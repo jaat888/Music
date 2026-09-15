@@ -1,0 +1,87 @@
+name: sursathi
+description: "SurSathi - Hindi/Haryanvi/Punjabi music player"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ---------- State management ----------
+  provider: ^6.1.1
+
+  # ---------- Local storage ----------
+  shared_preferences: ^2.2.2
+  sqflite: ^2.3.0
+  path: ^1.9.1
+  path_provider: ^2.1.1
+
+  # ---------- Fonts / UI ----------
+  cupertino_icons: ^1.0.6
+  google_fonts: ^6.1.0
+  cached_network_image: ^3.3.0
+  shimmer: ^3.0.0
+
+  # ---------- Audio playback (backend files audio_handler.dart use these) ----------
+  # just_audio aur audio_session ko latest minor (0.10.x / 0.2.x) pe NAHI
+  # badla — ye pre-1.0 packages hain jahan minor bump breaking hota hai,
+  # aur ye is bug (YouTube search/stream fail) ka root cause nahi hain.
+  # audio_service sirf patch-bump kiya (safe, no breaking changes).
+  just_audio: ^0.9.36
+  audio_service: ^0.18.18
+  audio_session: ^0.1.18
+
+  # ---------- YouTube backend (youtube_service.dart use karega) ----------
+  # Piped (free, public, self-maintained-nahi-karna-padta) REST API use ho
+  # raha hai — koi YouTube client fake nahi karna padta, isliye
+  # youtube_explode_dart wale client-block issues yahan nahi aate.
+  # Bas plain HTTP calls chahiye.
+  http: ^1.2.2
+
+  # ---------- Permissions / device ----------
+  permission_handler: ^12.0.0
+  device_info_plus: ^10.1.2
+  # 5.0.2 ka Android module compileSdk 33 pe compiled hai, jabki naye
+  # AndroidX libs (lifecycle, exifinterface, etc) 34+ maangte hain —
+  # isi wajah se Gradle build fail hota hai ("currently compiled against
+  # android-33" errors). 6.1.5 me compileSdk 34 hai. App mein connectivity_plus
+  # actually kahin use nahi ho raha, isliye version bump se koi code
+  # change nahi chahiye.
+  connectivity_plus: ^6.1.5
+
+  # ---------- Notifications (extra, non-playback notifications) ----------
+  flutter_local_notifications: ^17.2.1
+
+  # ---------- Sharing / links ----------
+  share_plus: ^10.1.4
+  url_launcher: ^6.2.2
+
+  # ---------- Misc utils ----------
+  intl: ^0.18.1
+  uuid: ^4.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+  flutter_launcher_icons: ^0.13.1
+
+flutter:
+  uses-material-design: true
+  # Assets add karne ke liye:
+  # 1. assets/images/ aur assets/icons/ folder banao
+  # 2. Images daalo
+  # 3. Niche wali lines uncomment karo
+  # assets:
+  #   - assets/images/
+  #   - assets/icons/
+
+# App icon generator config — icon file assets/icons/app_icon.png daalna phir
+# `flutter pub run flutter_launcher_icons` chalana
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icons/app_icon.jpg"

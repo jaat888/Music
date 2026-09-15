@@ -1,0 +1,54 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    namespace = "com.sursathi.sursathi"
+    compileSdk = flutter.compileSdkVersion
+    ndkVersion = flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        // flutter_local_notifications ke liye zaroori — iske bina
+        // ":app:checkReleaseAarMetadata" step pe build fail ho jaata hai.
+        coreLibraryDesugaringEnabled = true
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_17.toString()
+    }
+
+    defaultConfig {
+        applicationId = "com.sursathi.sursathi"
+        // flutter_local_notifications 17.x ko minSdk 23+ chahiye
+        minSdk = 23
+        targetSdk = flutter.targetSdkVersion
+        // GRADLE FIX (Gradle 9.x): purane template me ye do lines
+        // local.properties se manually parse hoti thi, jiske liye
+        // file ke top pe `plugins {}` block se PEHLE code likhna padta
+        // tha — Gradle 9.x isko allow nahi karta ("no other statements
+        // are allowed before plugins {} blocks"). Naye Flutter template
+        // ke mutabik `flutter.versionCode`/`flutter.versionName` seedhe
+        // Flutter Gradle plugin se milte hain, koi manual parsing nahi
+        // chahiye.
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.debug
+        }
+    }
+}
+
+flutter {
+    source = "../.."
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+}
