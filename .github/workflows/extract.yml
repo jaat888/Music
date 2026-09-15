@@ -1,0 +1,39 @@
+name: Extract Uploaded Zip
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '*.zip'
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract (without .github)
+        run: |
+          mkdir /tmp/extract
+          for z in *.zip; do
+            [ -f "$z" ] && unzip -o "$z" -d /tmp/extract && rm -f "$z"
+          done
+          rm -rf /tmp/extract/.github
+          if [ -d "/tmp/extract" ]; then
+            cp -r /tmp/extract/* . 2>/dev/null || true
+            cp -r /tmp/extract/.[!.]* . 2>/dev/null || true
+          fi
+      - name: Flatten
+        run: |
+          for dir in */; do
+            if [ -f "${dir}pubspec.yaml" ]; then
+              mv "${dir}"* . 2>/dev/null || true
+              rmdir "${dir}" 2>/dev/null || true
+            fi
+          done
+      - name: Commit
+        run: |
+          git config user.name "bot"
+          git config user.email "bot@github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "extract"
+          git push
