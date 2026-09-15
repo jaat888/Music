@@ -1,0 +1,29 @@
+# analysis_options.yaml
+# Ye file Dart analyzer ko batati hai konse lint rules follow karne hai.
+# flutter_lints package ka base set use kar rahe hai, plus kuch custom rules.
+
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    - "build/**"
+  errors:
+    # Batch-by-batch code likhte waqt TODO comments allowed hai, warning nahi chahiye
+    todo: ignore
+    # Kabhi kabhi private field seedha use karna padta hai widgets me
+    invalid_use_of_protected_member: warning
+
+linter:
+  rules:
+    # Naming aur style
+    - prefer_const_constructors
+    - prefer_const_literals_to_create_immutables
+    - prefer_final_fields
+    - avoid_print
+    - sized_box_for_whitespace
+    - use_key_in_widget_constructors
+
+    # Zyada strict rules jo batch code me dikkat karte hai unhe off rakha
+    - avoid_unnecessary_containers: false
