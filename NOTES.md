@@ -545,6 +545,36 @@ coreLibraryDesugaring, applicationId) waisa hi rakha gaya hai.
 
 ---
 
+---
+
+### Fixed — "Play tap pe kuch nahi hota / app laggy lagta hai"
+**Files:** `lib/services/background_service.dart`, `lib/services/youtube_service.dart`,
+`lib/widgets/mini_player.dart`
+**Root cause:** `playWithRetry()` sirf `playSong()` ke andar `mediaItem.add(...)`
+karta tha, aur `playSong()` tab tak call hi nahi hota jab tak
+`YoutubeService.getAudioUrl()` (3 attempts × 5 clients, koi network timeout
+nahi) URL resolve na kar de. Is poore gap me `mediaItem` null rehta tha,
+isliye mini player screen pe aata hi nahi tha — tap karne ke baad user ko
+koi feedback nahi milta tha (na spinner, na kuch), sirf kuch second/minute
+baad achanak gaana bajta (ya chup-chaap fail ho jaata). Isi wajah se "click
+karne pe kuch hota hi nahi, app lag gaya" jaisa feel aata tha.
+**Fix:**
+1. `playWithRetry()` ab shuru me hi turant `mediaItem` + ek "loading"
+   `playbackState` broadcast karta hai, taaki tap karte hi mini player
+   turant dikh jaaye.
+2. `YoutubeService.getAudioUrl()` ke har client attempt pe `.timeout(10s)`
+   laga diya — pehle ek slow/stuck client poore retry loop ko indefinitely
+   atka sakta tha.
+3. `mini_player.dart` ab `audioHandler.playbackState` (loading/buffering)
+   dekh ke play button ki jagah ek chhota spinner dikhata hai jab tak
+   stream URL resolve na ho jaaye.
+**Note:** Album art ka "rotating vinyl" (full player screen) jaanbujhke
+continuously ghoomta hai jab song play ho raha ho (`rotating_vinyl.dart`)
+— agar screenshot me artwork ulta/tedha dikhe to ye bug nahi hai, bas
+vinyl mid-spin capture hua hai.
+
+---
+
 _Har naye batch ke baad, agar koi aisa gap/assumption/limitation aaye,
 usko yahin niche add karna — README.md sirf progress status ke liye hai,
 ye file un cheezon ke liye jo "kaam kar rahi hai par yahan dhyan do"
