@@ -2,6 +2,15 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        // Fallback: mavenCentral() (repo.maven.apache.org) kabhi-kabhi
+        // GitHub Actions runner se transient/flaky ho jaata hai — usi CI
+        // run me alag-alag unrelated artifacts (jsoup, rhino, rhino-engine,
+        // protobuf-javalite — sab genuinely Central pe maujood hain) ek
+        // saath "Could not find" dena iska classic sign hai (versions
+        // galat nahi the). repo1.maven.org ko explicitly ek doosre mirror
+        // ki tarah add kar diya taaki agar apache.org wala mirror us waqt
+        // slow/unreachable ho to Gradle isse try kare.
+        maven { url 'https://repo1.maven.org/maven2' }
         // NewPipeExtractor (newpipeextractor_dart ki transitive Android
         // dependency, com.github.teamnewpipe:NewPipeExtractor) sirf
         // JitPack pe hosted hai, Maven Central/Google pe nahi. Isके
