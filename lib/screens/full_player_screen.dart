@@ -312,10 +312,10 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                         key: ValueKey('duration-${song.id}'),
                                         stream:
                                             audioHandler.player.durationStream,
-                                        initialData: mediaItem.duration,
+                                        initialData: mediaItem?.duration,
                                         builder: (context, durSnap) {
                                           final total = durSnap.data ??
-                                              mediaItem.duration ??
+                                              mediaItem?.duration ??
                                               Duration.zero;
                                           return StreamBuilder<Duration>(
                                             key: ValueKey('position-${song.id}'),

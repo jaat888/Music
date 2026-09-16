@@ -51,6 +51,11 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:youtube_explode_dart/solvers.dart';
 import 'package:dart_ytmusic_api/yt_music.dart';
+// yt_music.dart sirf `YTMusic` class export karta hai — SongDetailed/
+// VideoDetailed/PlaylistDetailed jaise result types alag `types.dart`
+// library me hain, isliye unhe explicitly import karna padta hai
+// (varna "isn't a type" compile error aata hai).
+import 'package:dart_ytmusic_api/types.dart';
 import 'package:newpipeextractor_dart/newpipeextractor_dart.dart' as npe;
 
 import '../db/download_db.dart';

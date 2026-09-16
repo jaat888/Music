@@ -27,7 +27,17 @@ Future<void> initAudioHandler() async {
     config: const AudioServiceConfig(
       androidNotificationChannelId: 'com.sursathi.audio',
       androidNotificationChannelName: 'SurSathi Playback',
-      androidNotificationOngoing: true,
+      // BUG FIX (2026-09-16, v9): audio_service 0.18.19 me ab ek build-time
+      // assert hai — `androidNotificationOngoing: true` sirf
+      // `androidStopForegroundOnPause: true` ke saath allowed hai (varna
+      // "will make no effect" throw hota hai), kyunki jab foreground
+      // service active rehti hai (stopForegroundOnPause: false) to Android
+      // khud hi notification ko ongoing/non-dismissable bana deta hai —
+      // isliye androidNotificationOngoing ki yahan zaroorat hi nahi thi.
+      // androidNotificationOngoing hata diya (default false), asli intent
+      // (pause pe bhi foreground service + controls persist) neeche wale
+      // androidStopForegroundOnPause: false se already poora hota hai.
+      //
       // BUG FIX (2026-09-16, v8): pehle "true" tha — pause karte hi
       // foreground service demote ho jaati thi. MIUI jaise aggressive
       // OEMs par isse notification/control-center media card

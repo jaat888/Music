@@ -15,6 +15,26 @@ hai. Agar app closed-source rakhni hai:
 Ye purely legal/licensing decision hai, code fix nahi — khud decide karo
 kaunsa tradeoff chahiye.
 
+## RESOLVED IN BATCH 16 (CI build failure, 2026-09-16)
+- `lib/services/youtube_service.dart`: `SongDetailed`/`VideoDetailed`/
+  `PlaylistDetailed` "isn't a type" errors — `dart_ytmusic_api`'s
+  `yt_music.dart` only exports the `YTMusic` class; those result types
+  live in the separate `types.dart` library. Fix: added
+  `import 'package:dart_ytmusic_api/types.dart';`.
+- `lib/screens/full_player_screen.dart:315,318`: `mediaItem.duration`
+  accessed without a null check — `mediaItem` here is `mediaSnap.data`
+  from a `StreamBuilder<MediaItem?>`, so it's `MediaItem?`. Fix: changed
+  both to `mediaItem?.duration`.
+- `lib/services/background_service.dart` (`AudioServiceConfig`):
+  `audio_service` has an internal assert that `androidNotificationOngoing:
+  true` requires `androidStopForegroundOnPause: true` (otherwise it's a
+  no-op, because an active foreground service already forces the
+  notification to be ongoing) — this combo now throws at const-eval time
+  instead of silently no-opping. Fix: removed `androidNotificationOngoing:
+  true` (default `false`); `androidStopForegroundOnPause: false` alone
+  already gives the intended behavior (persistent foreground
+  notification/controls through pause).
+
 ## RESOLVED IN BATCH 15
 - assets/ folder missing build fail de raha tha — pubspec me comment kar diya
 - Android scaffold incomplete tha — build.yml me flutter create step add
