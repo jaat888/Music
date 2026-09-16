@@ -3,8 +3,11 @@
 // liye. Production feature nahi hai, sirf troubleshooting tool.
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show MethodChannel, PlatformException;
+import 'package:share_plus/share_plus.dart';
 
 import '../theme/colors.dart';
 import '../theme/typography.dart';
@@ -16,7 +19,7 @@ import '../db/app_database.dart';
 // bheja gaya hai, to confirm ho jaata hai ki NAYA code hi build/run ho
 // raha hai. Agar purana marker dikhe (ya ye poori section hi missing ho),
 // to matlab build abhi bhi purane source se ban raha hai.
-const String kBuildMarker = 'NEWPIPE-NATIVE-2026-09-16-v9';
+const String kBuildMarker = 'NEWPIPE-NATIVE-2026-09-16-v10';
 
 class DebugScreen extends StatefulWidget {
   const DebugScreen({super.key});
@@ -47,6 +50,89 @@ class _DebugScreenState extends State<DebugScreen> {
   bool _checkingDb = false;
   List<String>? _dbTables;
   String? _dbCheckError;
+
+  // Crash log state (PC/logcat na hone par app-ke-andar-hi crash capture —
+  // dekho android/.../CrashLogger.kt)
+  static const MethodChannel _crashLogChannel =
+      MethodChannel('com.sursathi.sursathi/crashlog');
+  bool _loadingCrashLog = false;
+  String? _crashLogStatus;
+  String? _crashLogPreview;
+  String? _crashLogPath;
+
+  Future<void> _loadAndShareCrashLog() async {
+    setState(() {
+      _loadingCrashLog = true;
+      _crashLogStatus = null;
+      _crashLogPreview = null;
+    });
+    try {
+      final path =
+          await _crashLogChannel.invokeMethod<String>('getPath');
+      if (path == null) {
+        throw Exception('Native se path nahi mila');
+      }
+      _crashLogPath = path;
+      final file = File(path);
+      if (!await file.exists()) {
+        if (!mounted) return;
+        setState(() {
+          _loadingCrashLog = false;
+          _crashLogStatus = 'Koi crash log nahi mila — ya to app kabhi '
+              'crash nahi hui, ya crash Dart-side thi (isse pakda gaya '
+              'aur app chalti rahi, koi native process-crash nahi hua).';
+        });
+        return;
+      }
+      final content = await file.readAsString();
+      if (!mounted) return;
+      setState(() {
+        _loadingCrashLog = false;
+        _crashLogPreview = content;
+        _crashLogStatus = '${content.length} characters mile. Neeche '
+            '"Share" se WhatsApp/Telegram/Files pe bhej sakte ho.';
+      });
+      // Turant share-sheet bhi khol do — user ko alag se button dhoondna
+      // na pade.
+      await Share.shareXFiles(
+        [XFile(path)],
+        text: 'SurSathi crash log',
+      );
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingCrashLog = false;
+        _crashLogStatus = 'Native error: ${e.code}: ${e.message}';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingCrashLog = false;
+        _crashLogStatus = 'Error: $e';
+      });
+    }
+  }
+
+  Future<void> _shareCrashLogAgain() async {
+    final path = _crashLogPath;
+    if (path == null) return;
+    await Share.shareXFiles([XFile(path)], text: 'SurSathi crash log');
+  }
+
+  Future<void> _clearCrashLog() async {
+    try {
+      await _crashLogChannel.invokeMethod('clear');
+      if (!mounted) return;
+      setState(() {
+        _crashLogPreview = null;
+        _crashLogPath = null;
+        _crashLogStatus = 'Crash log clear kar diya gaya.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _crashLogStatus = 'Clear fail: $e');
+    }
+  }
 
   Future<void> _checkDbTables() async {
     setState(() {
@@ -280,6 +366,82 @@ class _DebugScreenState extends State<DebugScreen> {
               ],
             ),
           ),
+          const SizedBox(height: 16),
+
+          // --- CRASH LOG (PC/logcat na hone par bhi crash-reason nikalne
+          // ke liye — dekho CrashLogger.kt) ---
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A2333),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFF3A4560)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Crash Log', style: AppText.bodyM(color: kTextDim)),
+                const SizedBox(height: 4),
+                Text(
+                  'App kabhi crash hui ho to yahan se seedha share kar '
+                  'sakte ho — PC/adb ki zaroorat nahi.',
+                  style: AppText.bodyS(color: kTextDim),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _buildButton(
+                        label: 'Load + Share Crash Log',
+                        loading: _loadingCrashLog,
+                        onTap: _loadAndShareCrashLog,
+                      ),
+                    ),
+                  ],
+                ),
+                if (_crashLogPreview != null) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      TextButton(
+                        onPressed: _shareCrashLogAgain,
+                        child: const Text('Share again'),
+                      ),
+                      TextButton(
+                        onPressed: _clearCrashLog,
+                        child: const Text('Clear log'),
+                      ),
+                    ],
+                  ),
+                ],
+                if (_crashLogStatus != null) ...[
+                  const SizedBox(height: 8),
+                  SelectableText(
+                    _crashLogStatus!,
+                    style: AppText.bodyM(color: kText),
+                  ),
+                ],
+                if (_crashLogPreview != null) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    constraints: const BoxConstraints(maxHeight: 240),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0F1522),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: SingleChildScrollView(
+                      child: SelectableText(
+                        _crashLogPreview!,
+                        style: AppText.bodyS(color: const Color(0xFFEF4444)),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+
           const SizedBox(height: 16),
           _buildButton(
             label: 'Test Search',

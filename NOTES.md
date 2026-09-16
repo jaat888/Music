@@ -1,5 +1,72 @@
 # SurSathi — Notes / Known Issues
 
+## Post-Batch-22 Addition (2026-09-16) — In-app crash logger (PC/logcat nahi hai)
+
+User ke paas PC nahi hai, aur is device (Redmi Note 7, MIUI, Android 10)
+ke Developer Options me "Bug report" tool bhi missing/hidden hai — matlab
+crash debug karne ka koi standard bahri tarika available nahi tha.
+
+**Fix — app apna khud ka crash catcher rakhti hai ab:**
+- Naya `android/app/src/main/kotlin/com/sursathi/sursathi/CrashLogger.kt`
+  — `Thread.setDefaultUncaughtExceptionHandler` global install karta hai
+  (MainActivity.onCreate() ke sabse pehle statement se, taaki startup
+  crash bhi pakde). Koi bhi uncaught `Throwable` (Exception YA Error, dono
+  — dekho upar wala R8 crash fix jahan `Error` hi asli issue tha) poore
+  stack trace ke saath `getExternalFilesDir(null)/sursathi_crash_log.txt`
+  me likh diya jaata hai (koi runtime permission nahi chahiye), phir
+  purana/system default handler ko call kiya jaata hai (normal crash-dialog
+  behaviour barkarar rehta hai).
+- `MainActivity.kt`: naya MethodChannel `com.sursathi.sursathi/crashlog`
+  (`getPath` / `clear`) — Dart ko exact file path deta hai.
+- `debug_screen.dart`: naya "Crash Log" section (build-marker box ke turant
+  baad) — "Load + Share Crash Log" button file read karke turant
+  `share_plus` se Android share-sheet khol deta hai (WhatsApp/Telegram/
+  Files, kuch bhi) — koi ADB/logcat/Bug-Report zaroori nahi ab. "Clear log"
+  bhi hai taaki purane crashes naye se mix na ho.
+**Test on real device:** ek baar crash reproduce karke Debug screen se
+turant check karna — file turant milni chahiye, empty/missing nahi.
+**Build marker:** `NEWPIPE-NATIVE-2026-09-16-v10`.
+
+---
+
+## Post-Batch-22 Fix (2026-09-16) — User re-report: still crashing on v28 (native NewPipeExtractor R8 crash)
+
+User ne v28 test karke bataya crash abhi bhi ho raha hai. Batch 22 (neeche)
+ka native Kotlin plugin is session me kabhi compile/run nahi hua tha
+(explicitly note kiya gaya tha), isliye root cause wahin dhoonda:
+
+**Root cause (`NewPipeAudioChannel.kt`):** `resolveAudioStream()` ka
+aakhri catch block sirf `catch (e: Exception)` tha. Release build me R8
+minify hamesha ON hai, aur `proguard-rules.pro` me sirf
+`org.schabi.newpipe.extractor.timeago.patterns.**` (aur Rhino) keep kiya
+gaya tha — poora `org.schabi.newpipe.extractor` package nahi. NewPipeExtractor
+apne andar reflection/service-loading se poore package ki classes use karta
+hai (`StreamInfo`, `ServiceList`, `Service` subclasses); agar R8 inme se
+kisi ko obfuscate/strip kar de to runtime pe `NoSuchMethodError`/
+`NoClassDefFoundError` aata hai — ye **`Error` hai, `Exception` nahi**,
+isliye `catch (e: Exception)` ise pakadta hi nahi tha aur process crash ho
+jaata tha (bilkul usi purani WebView-crash class jaisa jo Dart try/catch
+se bhi nahi pakdi jaati thi — bas ab wahi pattern native Kotlin side pe
+reappear hua).
+
+**Fix:**
+1. `proguard-rules.pro`: `-keep class org.schabi.newpipe.extractor.** { *; }`
+   add kiya (poora package, na ki sirf timeago.patterns) — taaki R8 kuch
+   bhi strip/rename hi na kare.
+2. `NewPipeAudioChannel.kt`: aakhri catch ko `catch (e: Exception)` se
+   `catch (e: Throwable)` kiya — ab agar phir bhi koi `Error`-type cheez
+   aaye (kisi aur wajah se), wo bhi ek graceful `UNKNOWN` error result ban
+   ke Dart tak jaayegi, process crash nahi hoga.
+
+**Build marker:** `NEWPIPE-NATIVE-2026-09-16-v9` (debug_screen.dart).
+
+**Agar v29 me bhi crash ho:** ab crash Dart-catchable nahi hai matlab ye
+NewPipe wala code-path nahi hai — real device se **logcat** (`adb logcat`
+ya Play Protect/crash-report) chahiye hoga exact stack trace ke liye,
+guess karke aur fix karna is point ke baad reliable nahi rahega.
+
+---
+
 ## Batch 22 (2026-09-16) — Option C: native NewPipeExtractor plugin (no more WebView)
 
 Batch 21 ke end me user ke saath 3 options discuss huye the (audio-fetch

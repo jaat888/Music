@@ -3,6 +3,15 @@
 # (https://github.com/TeamNewPipe/NewPipeExtractor) — "If you are using
 # tools to minimize your project, make sure to keep the files below".
 # In ke bina R8 minify (:app:minifyReleaseWithR8) fail hota hai.
+#
+# Batch-22-native follow-up (crash fix): sirf timeago.patterns keep karna
+# kaafi nahi tha — NewPipeExtractor apne andar reflection/service-loading
+# se poora `org.schabi.newpipe.extractor` package use karta hai (StreamInfo,
+# ServiceList, Service subclasses waghera). Inme se koi bhi class R8 se
+# obfuscate/strip ho jaaye to runtime pe NoSuchMethodError/NoClassDefFoundError
+# (Exception nahi, Error hai) aata hai jo crash deta tha — poora package keep
+# karke ye risk khatam kar diya.
+-keep class org.schabi.newpipe.extractor.** { *; }
 -keep class org.schabi.newpipe.extractor.timeago.patterns.** { *; }
 -keep class org.mozilla.javascript.** { *; }
 -keep class org.mozilla.classfile.ClassFileWriter

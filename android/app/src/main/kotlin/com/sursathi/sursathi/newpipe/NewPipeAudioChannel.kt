@@ -117,7 +117,16 @@ object NewPipeAudioChannel {
             mainErr(result, "EXTRACTION_FAILED", "Extraction failed: ${e.message}", null)
         } catch (e: IOException) {
             mainErr(result, "NETWORK_ERROR", "Network error: ${e.message}", null)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // `Throwable` jaanbujhke (na ki sirf `Exception`) — R8/ProGuard
+            // release build me `org.schabi.newpipe.extractor.**` ke andar
+            // kisi class/method ko obfuscate/strip kar sakta hai (proguard-
+            // rules.pro me sirf timeago.patterns + Rhino ke liye keep rules
+            // hain, poore extractor package ke liye nahi). Aisa hone par
+            // runtime pe `NoSuchMethodError`/`NoClassDefFoundError` jaisi
+            // `Error` aati hai — `Exception` isse pakadta NAHI, aur wo
+            // seedha process crash kar deta, bilkul usi purani WebView-crash
+            // class ki tarah jo Dart try/catch se bhi nahi pakdi jaati thi.
             mainErr(result, "UNKNOWN", "Unexpected: ${e.message}", null)
         }
     }
