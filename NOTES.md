@@ -992,3 +992,127 @@ gaane nahi bache" pe end ho jayegi, jaise pehle se tha) — koi crash ya
 compile error nahi hoga, bas "unlimited scroll" wapas purane fixed-size
 jaisa reduce ho jayega. Real device pe scroll karke confirm karna zaroori
 hai ki naye pages sach me aa rahe hain.
+
+---
+
+### Batch 20 (2026-09-16) — User re-report: crash on song tap + stale search + limited results (RESOLVED)
+
+User ne khud report kiya ki Batch 19 ke baad bhi (a) ek gaana bajte waqt
+koi doosra gaana tap karne pe ~1 sec me crash ho jaata hai, (b) search me
+kabhi-kabhi "purana" (galat query ka) result dikhta hai, aur (c) YT Music
+search results hamesha ek fixed chhoti size pe atke rehte hain. Teeno ko
+reproduce/trace karke, teeno alag root causes nikle (user ka apna "queue
+mismatch" wala shak sahi DIRECTION me tha — do requests overlap ho rahi
+thi — bas exact mechanism thoda alag tha har case me):
+
+**#49 — Crash sirf "next" tak fix hua tha, har gaane-tap pe nahi**
+**File:** `lib/services/background_service.dart`
+Batch 19 (#47) ka 350ms debounce sirf `skipToNext()`/`skipToPrevious()`
+ke andar tha. Lekin **har** screen (search, home, artist, album, library,
+playlists, liked songs, live playlist) jab user kisi bhi song pe tap
+karta hai to seedha `audioHandler.playWithRetry(song)` call karti hai —
+in sab paths pe koi debounce nahi tha. Root cause bilkul #47 jaisa hi:
+`_playToken` sirf stale RESULT ko overwrite hone se rokta hai, lekin
+har tap ka heavy resolve pipeline (NewPipeExtractor WebView solver +
+youtube_explode_dart + Piped) turant background me shuru ho jaata tha,
+chahe result discard hi kyun na ho — rapid taps overlapping native/WebView
+calls trigger karte the jo crash deta tha (OOM/WebView-instance-limit,
+native-side, isliye koi Dart catch/onError pakad nahi paata).
+**Fix:** Debounce ab `playWithRetry()` ke andar hi CENTRALIZED hai (retry-
+loop ko naye private `_resolveAndPlay()` me extract kiya gaya) — isse
+skip/previous AUR har screen ka seedha tap, dono ek hi jagah se protect
+hote hain. `skipToNext()`/`skipToPrevious()` ka apna alag debounce hata
+diya gaya (ab zaroorat nahi, `playWithRetry()` khud karta hai) — dono ab
+seedha `_playCurrentFromQueue()` ko await karte hain.
+
+**#50 — Search me "purana gana": koi sequence guard nahi tha**
+**File:** `lib/screens/search_screen.dart`
+`_runSearch()` (chip tap / history tap / voice search / debounced typing
+— sabse call hota hai) me koi request-sequence guard nahi tha. Agar do
+queries kabhi thodi overlap kar jaayein (e.g. ek chip tap kiya, network
+slow nikla, turant dusra chip tap kar diya), aur PEHLI (purani) query ka
+response DUSRI (nayi) query ke response ke BAAD aata, to screen pe purani
+query ke results reh jaate the — search bar me text kuch aur, list neeche
+purani/galat query ki. `_loadMoreResults()` me bhi wahi risk tha (purani
+query ka "load more" response naye query ke `_results` me mix ho sakta
+tha).
+**Fix:** Naya `_searchSeq` int token — har `_runSearch()` call apna unique
+seq leta hai, response aane par check hota hai ki ye ab bhi LATEST search
+hai ki nahi (`seq != _searchSeq` ho to state touch nahi karta, chup-chaap
+discard). `_loadMoreResults()` bhi isी seq ko capture karke same guard
+use karta hai.
+
+**#51 — Search "unlimited scroll" (Batch 19 #48) kabhi trigger hi nahi
+hota tha kai cases me — asli root cause mila**
+**File:** `lib/services/youtube_service.dart`
+`_moreSearchQuery`/`_moreSearchContinuation`/`_moreSearchExhausted`
+singleton fields the. `search()` me bug tha: `_moreSearchQuery = query`
+Layer 0 (`_innertube.searchSongs()`) ke CALL SE PEHLE set hota tha, lekin
+`_moreSearchContinuation`/`_moreSearchExhausted` sirf us call ke SUCCESS
+hone ke baad hi update hote the. Matlab agar Layer 0 THROW kar jaata
+(flaky/early-stage endpoint), `_moreSearchQuery` naye query pe already
+set ho chuka hota lekin continuation/exhausted PURANI (kisi bilkul alag
+pichhli query ki) value pe reh jaate — `loadMoreSearchResults()` ka
+`_moreSearchQuery != query` check galti se "match" maan leta (naam same
+hai) aur purani query ka stale exhausted-flag reuse ho jaata — agar
+purani query exhausted thi, naya query bhi turant "no more" maan leta,
+chahe uske paas khud results bache hon. Isi tarah agar Layer 0 success
+hota par `page.items` khaali aata (display Layer 1/2 se hota), tab bhi
+continuation Layer 0 ke khaali page se hi set ho jaata — displayed
+results se mismatch.
+**Fix:** `search()` ab call ki shuruaat me hi teeno field unconditionally
+reset karta hai (naya query ke liye, default `exhausted: false` — taaki
+Layer 0 fail/khaali ho to bhi `loadMoreSearchResults()` khud apna
+fallback try kare, turant "no more" na maan le), aur continuation/
+exhausted ko sirf TABHI set karta hai jab Layer 0 ka page.items khud
+display ho raha ho — taaki pagination state hamesha wahi reflect kare jo
+user ko screen pe dikh raha hai.
+
+**Test on real device:** teeno fix compile-level safe hain (koi naya
+dependency/API assumption nahi), lekin #49 (crash) aur #51 (pagination)
+dono network-timing-dependent hain — bahut jaldi-jaldi rapid taps se aur
+scroll karke confirm karna zaroori hai.
+
+---
+
+### Post-Batch-20 Fix — Real root cause of "gaana badalte hi crash" mila (user ne khud correct kiya: sirf tap se nahi, khatam hone pe bhi)
+
+User ne bataya ki Batch 20 ka #49 fix poora nahi tha — crash sirf rapid-tap
+se nahi, ek NORMAL transition se bhi hota hai (gaana khud khatam ho ke agla
+bajte waqt bhi). Isse pata chala ki debounce (300ms) sirf REDUCE karta tha
+overlap ka CHANCE, ASLI root cause khatam nahi karta tha:
+
+**Asli mechanism:** `_audioViaNewPipe()` (`youtube_service.dart`) ke andar
+`npe.VideoExtractor.getStream()` (NewPipeExtractor ka WebView-based JS
+solver) ek single call 5-30 second tak le sakta hai. Debounce sirf itna
+karta hai ki bahut jaldi-jaldi taps se sirf EK resolve SHURU ho — lekin agar
+wo EK resolve abhi bhi chal raha hai (WebView call ke beech mein, await pe)
+jab agla NORMAL transition ho (chahe khud khatam hoke auto-next ho, ya ek
+click jo debounce window ke BAAD aaya ho), to naya resolve bhi apna khud ka
+`npe.VideoExtractor.getStream()` call kar deta hai — do WebView-based native
+extractions overlap, aur yahi native crash hai (OOM/WebView instance limit,
+MIUI jaise kam-RAM OEMs pe) — bilkul normal ek-ke-baad-ek transitions me bhi
+reproduce hota hai, koi rapid double-tap zaroori nahi. Dart try/catch isko
+pakad nahi sakta (native process-level crash hai).
+
+**Fix (`youtube_service.dart`):** `_audioViaNewPipe()` ke poore body ko ek
+naye `_newPipeLock` (chained-Future mutex) se wrap kiya — ab poore app me
+kabhi bhi EK se zyada NewPipeExtractor WebView call parallel nahi chalegi.
+Naya call aaye jab pehla chal raha ho, to wo pehle ke poora khatam hone
+(chahe uska result baad me discard ho) ka wait karega, TABHI apna WebView
+call shuru karega. **Trade-off:** agar user bahut jaldi-jaldi skip kare, har
+naya song apni baari ka wait karega (worst-case ~30s pichhle abandoned
+resolve ke liye) — thoda slow feel ho sakta hai bahut rapid skipping me,
+lekin crash ab kabhi nahi hoga (safety > speed yahan zaroori tradeoff tha,
+kyunki native crash ko Dart-side se cancel/catch nahi kiya ja sakta).
+
+**Bonus fix (`background_service.dart`, `skipToNext()`):** Isi debugging ke
+dauraan ek related logic bug bhi mila — queue ke AAKHRI gaane par (repeat
+OFF), `QueueService.next()` jaanbujhke currentIndex change nahi karta
+(comment: "player ruk jayega"), lekin `skipToNext()` hamesha unconditionally
+`_playCurrentFromQueue()` call karta tha — jo usi (abhi-khatam) gaane ko
+FIR SE resolve karke replay kar deta tha, jo phir khud khatam hoke phir
+replay — ek silent infinite "khatam→replay" loop (har cycle apna naya heavy
+resolve call ke saath). Ab `skipToNext()` pehle check karta hai ki "aakhri
+gaana + repeat off" hai ki nahi — agar hai, seedha `stop()` karta hai,
+replay nahi karta.

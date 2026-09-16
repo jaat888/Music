@@ -91,6 +91,25 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
   bool _loadingMore = false;
   bool _hasMore = true;
 
+  // BUG FIX (2026-09-16, v20): "purana gana search me dikhta hai" — koi
+  // sequence guard nahi tha yahan. `_runSearch()` popular chip / history
+  // tap / voice-search / debounced typing — kisi se bhi call ho sakta hai,
+  // aur ye sab ek dusre ko cancel nahi karte the. Agar user jaldi-jaldi do
+  // alag queries chala de (e.g. ek chip tap kiya, network slow nikla, phir
+  // dusra chip tap kar diya), to DONO ke network calls parallel chalte the
+  // — jo bhi baad me (kisi bhi order me) complete hota, wahi `setState()`
+  // se `_results` ko overwrite kar deta tha. Matlab agar PEHLI (purani)
+  // query ka response DUSRI (nayi) query ke response ke BAAD aata, to
+  // screen pe purani/galat query ke results reh jaate the — bilkul jaisa
+  // user report kar raha tha ("purana gana araha hai"), search bar me text
+  // kuch aur hoga lekin list neeche purani query ki hogi.
+  // Fix: har `_runSearch()` call apna unique `_searchSeq` token leta hai.
+  // Jab response aaye, check hota hai ki ye ab bhi LATEST search hai ki
+  // nahi — agar iske baad koi naya search shuru ho chuka hai, to ye purana
+  // response chup-chaap discard ho jaata hai (state ko touch hi nahi
+  // karta).
+  int _searchSeq = 0;
+
   @override
   void initState() {
     super.initState();
@@ -149,9 +168,15 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
 
   Future<void> _loadMoreResults() async {
     if (_loadingMore || !_hasMore || _query.isEmpty) return;
+    final seq = _searchSeq; // isi search session ka "load more" hai
+    final query = _query;
     setState(() => _loadingMore = true);
-    final more = await YoutubeService.instance.loadMoreSearchResults(_query);
-    if (!mounted) return;
+    final more = await YoutubeService.instance.loadMoreSearchResults(query);
+    // BUG FIX (v20): agar is dauraan user ne naya search chala diya
+    // (`_searchSeq` aage badh gaya), to ye purani query ka "load more"
+    // response naye query ke `_results` me mix nahi hona chahiye —
+    // discard kar do (dekho `_searchSeq` comment upar).
+    if (!mounted || seq != _searchSeq) return;
     // Pehle se dikh rahe IDs (Layer 1 ka pehla batch ya pichhle pages) ko
     // dobara na dikhaye — explode ka page 1 kabhi-kabhi YT Music ke
     // results se overlap kar sakta hai.
@@ -267,6 +292,7 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
   Future<void> _runSearch(String query) async {
     if (query.isEmpty) return;
     if (!mounted) return;
+    final seq = ++_searchSeq; // is search ka apna unique token
     setState(() {
       _loading = true;
       _searched = true;
@@ -316,7 +342,10 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
       final liked = await LikedDB.instance.getAll();
       final cached = await CacheDB.instance.getAll();
 
-      if (!mounted) return;
+      // Is response ke aane tak koi NAYA search shuru ho chuka ho to ye
+      // purana response chup-chaap discard — state ko touch hi mat karo
+      // (dekho `_searchSeq` comment upar).
+      if (!mounted || seq != _searchSeq) return;
       setState(() {
         _results = results;
         _searchSource = source;
@@ -330,13 +359,13 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
       _maybeAutoLoadMore();
     } catch (e) {
       print('SEARCH _runSearch() ERROR: $e');
-      if (!mounted) return;
+      if (!mounted || seq != _searchSeq) return;
       setState(() {
         _results = []; // empty state dikhega, spinner atka nahi rahega
         _debugError = 'EXCEPTION: $e'; // TEMPORARY — screen pe dikhega
       });
     } finally {
-      if (mounted) {
+      if (mounted && seq == _searchSeq) {
         setState(() => _loading = false);
       }
     }

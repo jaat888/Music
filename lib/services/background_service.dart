@@ -176,45 +176,57 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     await super.stop();
   }
 
-  // BUG FIX (2026-09-16, v16): "next par bahut baar tap karo to app crash".
-  // Root cause: skipToNext()/skipToPrevious() pehle turant har tap pe
-  // _playCurrentFromQueue() call karte the, jo turant playWithRetry() ->
-  // YoutubeService.getAudioUrl() shuru kar deta hai — ismein NewPipeExtractor
-  // (WebView-based JS solver) + youtube_explode_dart + Piped, teeno heavy
-  // network/native calls hain. _playToken sirf ye rokta hai ki PURANA result
-  // final state ko overwrite kare — lekin har tap ka poora resolve pipeline
-  // (WebView spin-up sameet) fir bhi background me chalta rehta hai, chahe
-  // uska result baad me discard ho jaaye. User jab next ko bahut jaldi-jaldi
-  // (ek ke baad ek) dabata hai, kai saare in-flight WebView/network
-  // extractions ek saath overlap ho jaate hain — MIUI jaise kam-RAM/aggressive
-  // OEMs par ye native crash (OOM ya WebView instance limit) trigger karta
-  // hai, sirf Flutter-side error nahi (isliye koi catch/onError isko pakad
-  // nahi paata tha).
-  // Fix: skip ab turant resolve shuru nahi karta — sirf queue index turant
-  // update hota hai (taaki UI/index turant sahi rahe), aur asli
-  // _playCurrentFromQueue() ek chhoti 350ms debounce ke baad hi chalta hai.
-  // Isse agar user 5 baar jaldi-jaldi next dabaye, sirf EK hi resolve
-  // pipeline shuru hoga (aakhri wale index ke liye) — beech ke saare taps
-  // sirf debounce timer ko reset karte hain, koi extra heavy call nahi karte.
+  // BUG FIX (2026-09-16, v16, EXTENDED v20): "bahut baar tap karo (next ho
+  // ya koi bhi gaana) to app crash ho jaata hai". Root cause: playback shuru
+  // karne wale saare paths turant playWithRetry() -> YoutubeService.
+  // getAudioUrl() shuru kar dete the, ismein NewPipeExtractor (WebView-based
+  // JS solver) + youtube_explode_dart + Piped, teeno heavy network/native
+  // calls hain. _playToken sirf ye rokta hai ki PURANA result final state ko
+  // overwrite kare — lekin har tap ka poora resolve pipeline (WebView
+  // spin-up sameet) fir bhi background me chalta rehta hai, chahe uska
+  // result baad me discard ho jaaye. User jab jaldi-jaldi (next ho ya search/
+  // home/kisi bhi list se alag-alag gaane) tap karta hai, kai saare in-flight
+  // WebView/network extractions ek saath overlap ho jaate hain — MIUI jaise
+  // kam-RAM/aggressive OEMs par ye native crash (OOM ya WebView instance
+  // limit) trigger karta hai, sirf Flutter-side error nahi (isliye koi catch/
+  // onError isko pakad nahi paata tha).
+  // Fix (v20): debounce ab `playWithRetry()` ke andar hi centralized hai
+  // (dekho neeche) — is se skip/previous, aur har screen ka seedha
+  // `audioHandler.playWithRetry(song)` call, sab isi ek jagah se protect
+  // hote hain. Yahan `_skipDebounce` field sirf declare hua hai taaki
+  // `stop()` (aur playWithRetry khud) ek hi Timer share kar sakein.
   Timer? _skipDebounce;
 
   @override
   Future<void> skipToNext() async {
-    QueueService.instance.next();
-    _debouncedPlayCurrent();
+    final q = QueueService.instance;
+    // BUG FIX (2026-09-16, v20): "gaana khatam hone ke baad crash/ajeeb
+    // behavior" — agar repeat OFF hai aur ye QUEUE KA AAKHRI gaana hai,
+    // `QueueService.next()` jaanbujhke currentIndex change NAHI karta
+    // (dekho queue_service.dart ka apna comment: "currentIndex wahi
+    // rehta hai, player ruk jayega") — matlab intent tha ki player bas
+    // ruk jaaye. Lekin yahan neeche hamesha `_playCurrentFromQueue()` hi
+    // call hota tha, chahe index badla ho ya nahi — jo isi (abhi-khatam)
+    // gaane ko FIR SE resolve karke replay kar deta tha. Result: gaana
+    // khatam → dobara wahi resolve+play → wo bhi khatam → phir wahi —
+    // ek silent infinite "khatam→replay" loop, jisme har cycle apna
+    // poora naya heavy resolve call (NewPipeExtractor) bhi karta tha.
+    // Fix: pehle hi check kar lo ki ye "aakhri gaana, repeat off" wala
+    // case hai ki nahi — agar hai, seedha `stop()` karo, replay mat karo.
+    final wasLastWithNoRepeat =
+        q.repeat == SurRepeatMode.off && q.currentIndex == q.queue.length - 1;
+    q.next();
+    if (wasLastWithNoRepeat) {
+      await stop();
+      return;
+    }
+    await _playCurrentFromQueue();
   }
 
   @override
   Future<void> skipToPrevious() async {
     QueueService.instance.previous();
-    _debouncedPlayCurrent();
-  }
-
-  void _debouncedPlayCurrent() {
-    _skipDebounce?.cancel();
-    _skipDebounce = Timer(const Duration(milliseconds: 350), () {
-      _playCurrentFromQueue();
-    });
+    await _playCurrentFromQueue();
   }
 
   @override
@@ -290,6 +302,46 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       ),
     );
 
+    // BUG FIX (2026-09-16, v20): "koi aur gaana pe click karo to 1 sec
+    // me crash" — pehle sirf skipToNext()/skipToPrevious() ko debounce
+    // milta tha (dekho #47 upar). Lekin HAR screen (search, home, artist,
+    // album, library, playlists, liked songs, live playlist) seedha
+    // playWithRetry() call karti hai jab user kisi bhi song pe tap karta
+    // hai — wahan koi debounce nahi tha. _playToken sirf STALE RESULT ko
+    // overwrite hone se rokta hai, lekin har tap ka heavy resolve pipeline
+    // (NewPipeExtractor WebView solver + youtube_explode_dart + Piped)
+    // turant shuru ho jaata tha, chahe result discard hi kyun na ho jaaye.
+    // Jab user jaldi-jaldi alag-alag gaano pe tap karta (ya ek se zyada
+    // "next" jaisi rapid taps kahin se bhi aati), kai heavy WebView/native
+    // extractions ek saath overlap ho jaate the — yahi asli crash tha (OOM/
+    // WebView instance limit, native-side, isliye koi Dart catch/onError
+    // isko pakad nahi paata tha) — bilkul #47 jaisa hi root cause, bas
+    // trigger karne ka call-site alag tha. User ka "queue mismatch" wala
+    // shak sahi direction me tha (do requests overlap ho rahi thi), bas
+    // asli wajah queue data corruption nahi, balki overlapping native
+    // resolve calls thi.
+    // Fix: resolve pipeline (neeche wala poora retry-loop) ab turant shuru
+    // nahi hota — ek chhoti 300ms debounce ke baad hi shuru hota hai, aur
+    // agar is dauraan koi naya playWithRetry/skip aa jaaye (_playToken
+    // aage badh jaaye), to ye purana debounced call chup-chaap cancel ho
+    // jaata hai (koi extra heavy call nahi hoti). mediaItem + "loading"
+    // state upar hi turant broadcast ho chuke hain, isliye UI (mini
+    // player/full player) turant update dikhta hai — sirf asli network
+    // resolve thoda delay hota hai jab tak taps settle na ho jaayein.
+    final completer = Completer<void>();
+    _skipDebounce?.cancel();
+    _skipDebounce = Timer(const Duration(milliseconds: 300), () async {
+      if (token != _playToken) {
+        completer.complete();
+        return;
+      }
+      await _resolveAndPlay(song, token);
+      completer.complete();
+    });
+    return completer.future;
+  }
+
+  Future<void> _resolveAndPlay(Song song, int token) async {
     for (var attempt = 1; attempt <= 3; attempt++) {
       // BUG FIX (2026-09-16, v5): agar is dauraan user ne koi aur gaana
       // tap kar diya (_playToken aage badh gaya), to ye purana attempt

@@ -42,6 +42,7 @@
 // liye datacenter/bot maana jaata hai aur block ho jaata hai — Termux ya
 // kisi bhi real phone/PC se test karo).
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -192,6 +193,35 @@ class YoutubeService {
   ];
 
   final http.Client _http = http.Client();
+
+  // BUG FIX (2026-09-16, v20 — REAL root cause of "gaana badalte hi crash",
+  // chahe click ho ya gaana khud khatam ho ke agla bajte waqt): background_
+  // service.dart ka 300ms debounce + `_playToken` sirf ye control karta hai
+  // ki kitni BAAR (aur kab) ek naya resolve SHURU ho — lekin ek baar
+  // `_audioViaNewPipe()` (neeche) ke andar `npe.VideoExtractor.getStream()`
+  // (NewPipeExtractor ka WebView-based JS solver, `flutter_inappwebview` se
+  // wrap kiya gaya) call ho jaaye, wo call khud 5-30 second tak le sakta hai
+  // (network + JS challenge solve karne me). Is DAURAAN agar agla song bajna
+  // shuru ho (naturally khatam hone ke baad AUTO-NEXT ho ya user ne click
+  // kiya — dono se) — debounce ke 300ms nikal chuke hote hain, isliye naya
+  // `_resolveAndPlay()` bhi shuru ho jaata hai, aur wo bhi apna khud ka
+  // `npe.VideoExtractor.getStream()` call kar deta hai. Ab DO WebView-based
+  // native extractions EK SAATH chal rahi hoti hain — chahe user ne bilkul
+  // bhi jaldi-jaldi tap na kiya ho, sirf itna ki pehla song abhi bhi resolve
+  // ho raha tha jab dusra shuru hua. Yahi asli "1 sec me crash" hai (native
+  // WebView OOM/instance-limit, MIUI jaise kam-RAM OEMs pe) — normal ek-ke-
+  // baad-ek song transitions me bhi reproduce hota hai, sirf rapid double-
+  // tap se nahi. Dart-level try/catch isko pakad nahi sakta kyunki ye native
+  // process-level crash hai, koi Dart exception nahi.
+  // Fix: `_audioViaNewPipe()` ke poore body ko ek simple chained-Future
+  // MUTEX se wrap kiya gaya hai — is se poore app me kabhi bhi EK se zyada
+  // NewPipeExtractor WebView call parallel nahi chalegi. Agar koi naya call
+  // aata hai jab pehla abhi chal raha hai, wo pehle ke poora khatam (settle)
+  // hone ka wait karega, tabhi apna WebView call shuru karega — isse
+  // overlapping native instances kabhi bante hi nahi, chahe transitions
+  // kitni bhi jaldi-jaldi (ya kitni bhi slow-resolve ke beech) kyun na ho
+  // rahe hon.
+  Future<void> _newPipeLock = Future.value();
 
   // ---------------- Search pagination state ("unlimited" scroll) ----------------
   //
@@ -344,6 +374,45 @@ class YoutubeService {
   }) async {
     if (query.trim().isEmpty) return [];
 
+    // BUG FIX (2026-09-16, v20): "search unlimited nahi, hamesha limited
+    // gaane hi aate hain" — asli root cause. `_moreSearchQuery`/
+    // `_moreSearchContinuation`/`_moreSearchExhausted` teeno singleton
+    // instance fields hain (poore app me ek hi YoutubeService.instance),
+    // lekin pehle:
+    // (1) Agar `_innertube.searchSongs(query)` (Layer 0) THROW kar jaata
+    //     (network flaky, ya YouTube ka internal endpoint kabhi-kabhi
+    //     signature change kar de — ye poora Layer 0 hi "assumption/early
+    //     stage" hai), to `_moreSearchQuery` already naye query pe set ho
+    //     chuka hota tha (exception se PEHLE hi), lekin `_moreSearchContinuation`/
+    //     `_moreSearchExhausted` PURANI (kisi bilkul alag pichli query ki)
+    //     value pe hi reh jaate the. `loadMoreSearchResults()` ka
+    //     `if (_moreSearchQuery != query)` check isliye galti se "match"
+    //     maan leta tha (query naam to same hai), aur purani query ka
+    //     stale continuation/exhausted-flag naye query pe reuse ho jaata
+    //     tha — matlab agar purani query exhausted thi, naya query bhi
+    //     turant "no more" maan leta, chahe uske paas khud ke bahut saare
+    //     results bache hon.
+    // (2) Agar Layer 0 successfully chal jaata lekin `page.items` KHAALI
+    //     aata (jabki `page.continuation` non-null ho sakta hai), to
+    //     display Layer 1 (dart_ytmusic_api) ya Layer 2 (explode) se hota
+    //     tha — lekin continuation/exhausted state Layer 0 ke (khaali)
+    //     page se hi set ho chuka hota tha, jo actual displayed results se
+    //     match hi nahi karta — "load more" agli baar galat/mismatched
+    //     jagah se continue karne ki koshish karta.
+    // Fix: (a) har call ki shuruaat me hi in teeno ko unconditionally is
+    // naye query ke liye reset kar do (chahe Layer 0 throw kare ya kuch
+    // bhi ho, purani query ka state kabhi bhi is naye query pe leak na
+    // ho) — default `exhausted: false` taaki agar Layer 0 fail/khaali ho
+    // bhi jaaye, `loadMoreSearchResults()` khud apna fallback (explode
+    // generic search) try kare bajaye turant "no more" maan lene ke. (b)
+    // continuation/exhausted ko sirf TABHI Layer 0 ke response se set
+    // karo jab Layer 0 ka page.items khud display ho raha ho (i.e. andar
+    // wale `if` ke andar) — taaki pagination state hamesha wahi reflect
+    // kare jo user ko screen pe dikh raha hai.
+    _moreSearchQuery = query;
+    _moreSearchContinuation = null;
+    _moreSearchExhausted = false;
+
     // Layer 0 (NEW, v18): apna InnertubeClient — YT Music ka wahi endpoint
     // jo dart_ytmusic_api internally use karta hai, par yahan pagination
     // token bhi milta hai (loadMoreSearchResults isi query ke liye reset
@@ -351,11 +420,10 @@ class YoutubeService {
     // badhe).
     try {
       onProgress?.call('Searching (innertube)...');
-      _moreSearchQuery = query;
       final page = await _innertube.searchSongs(query);
-      _moreSearchContinuation = page.continuation;
-      _moreSearchExhausted = page.continuation == null;
       if (page.items.isNotEmpty) {
+        _moreSearchContinuation = page.continuation;
+        _moreSearchExhausted = page.continuation == null;
         onProgress?.call('Innertube: OK, ${page.items.length} results');
         return page.items
             .take(max)
@@ -832,6 +900,23 @@ class YoutubeService {
   // aur YouTube ke changes ke baad zyada tezi se patch aata hai (dekh
   // pubspec.yaml me GPL-3.0 license warning bhi).
   Future<_AudioStream?> _audioViaNewPipe(
+    String videoId, {
+    void Function(String status)? onProgress,
+  }) async {
+    // Mutex acquire — dekho `_newPipeLock` comment upar. Apni baari ka wait
+    // karo (chahe wo pichhla call kisi bilkul alag song/token ke liye ho).
+    final myTurn = Completer<void>();
+    final previous = _newPipeLock;
+    _newPipeLock = myTurn.future;
+    await previous;
+    try {
+      return await _audioViaNewPipeUnlocked(videoId, onProgress: onProgress);
+    } finally {
+      myTurn.complete(); // agli waiting call ko aage badhne do
+    }
+  }
+
+  Future<_AudioStream?> _audioViaNewPipeUnlocked(
     String videoId, {
     void Function(String status)? onProgress,
   }) async {
