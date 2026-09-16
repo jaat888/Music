@@ -178,7 +178,7 @@ class InnertubeClient {
   Future<Map<String, dynamic>?> _post(
     String endpoint,
     Map<String, dynamic> extraBody, {
-    bool _isRetry = false,
+    bool isRetry = false,
   }) async {
     try {
       final body = {..._context, ...extraBody};
@@ -199,10 +199,10 @@ class InnertubeClient {
         print('INNERTUBE $endpoint: HTTP ${res.statusCode}');
         // Key/version stale hone ka classic sign 400/403 hota hai — ek
         // baar live config refresh karke retry karo (dekho _refreshConfig).
-        if (!_isRetry &&
+        if (!isRetry &&
             (res.statusCode == 400 || res.statusCode == 403) &&
             await _refreshConfig()) {
-          return _post(endpoint, extraBody, _isRetry: true);
+          return _post(endpoint, extraBody, isRetry: true);
         }
         return null;
       }
