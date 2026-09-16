@@ -297,6 +297,24 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     playbackState.add(
       playbackState.value.copyWith(
         controls: const [MediaControl.stop],
+        // BUG FIX (crash log 2026-09-16): `controls` yahan sirf 1 item
+        // (`stop`, index 0) tak shrink kiya jaata hai, lekin
+        // `androidCompactActionIndices` copyWith() me pichhli value
+        // (`_broadcastState()` se aaya [0, 1, 3], normal playback ke
+        // controls — previous/play-pause/stop/next — ke liye) carry
+        // forward kar deta tha kyunki yahan explicitly overwrite nahi
+        // kiya gaya tha. Notification compact-view index 1 aur 3 maangta
+        // tha jabki sirf 1 control (index 0) tha — Android ka
+        // `RemoteServiceException: setShowActionsInCompactView: action 1
+        // out of bounds (max 0)` isi mismatch se aata hai, aur ye poore
+        // app process ko turant crash kar deta hai (system-level
+        // notification-inflation crash, Dart try/catch se bilkul bhi
+        // pakda nahi ja sakta — matlab jab bhi koi naya gaana load hona
+        // shuru hota (loading state) is line ke through guzarta, crash
+        // ho jaata tha). Fix: `controls` jab bhi shrink/badle,
+        // `androidCompactActionIndices` ko bhi USI list ke saath explicitly
+        // match karo.
+        androidCompactActionIndices: const [0],
         processingState: AudioProcessingState.loading,
         playing: false,
       ),

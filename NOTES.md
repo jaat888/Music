@@ -1,5 +1,48 @@
 # SurSathi — Notes / Known Issues
 
+## Post-Batch-22 Fix (2026-09-16) — REAL crash found via new in-app crash logger
+
+User ne crash logger (v10 build) se pehli baar asli crash log nikaal ke
+bheja:
+```
+android.app.RemoteServiceException: Bad notification(tag=null, id=1124)...
+Couldn't inflate contentViews
+java.lang.IllegalArgumentException: setShowActionsInCompactView: action 1
+out of bounds (max 0)
+```
+Ye confirm karta hai ki asli crash NewPipeExtractor/R8 wala nahi tha —
+ek bilkul alag, system-level **media-notification** crash hai jo Dart
+try/catch se kabhi pakda nahi ja sakta (crash logger na hota to isse
+guess karna almost impossible tha).
+
+**Root cause (`lib/services/background_service.dart`, `playWithRetry()`):**
+`_broadcastState()` normal playback ke waqt `controls` ko 4 items
+(previous/play-pause/stop/next) set karta hai aur
+`androidCompactActionIndices: [0, 1, 3]` (matlab compact notification me
+index 0, 1, 3 wale controls dikhao). Lekin `playWithRetry()` jab bhi naya
+gaana load karta hai, `controls` ko sirf `[MediaControl.stop]` (1 item,
+sirf index 0) tak shrink kar deta tha — bina `androidCompactActionIndices`
+ko bhi update kiye. `copyWith()` purani `[0, 1, 3]` value carry-forward kar
+deta, matlab notification ko bola jaa raha tha index 1 aur 3 wale actions
+compact view me dikhao, jabki ab controls list me sirf 1 item (index 0)
+tha — Android isi mismatch pe `RemoteServiceException` de ke **poora app
+process crash** kar deta hai. Isi wajah se crash "har naya gaana load hote
+waqt" consistently hota tha (normal transition ho ya tap se) — bilkul
+Batch-20 wale purane symptom jaisa dikhta tha, lekin root cause bilkul
+alag nikla.
+
+**Fix:** `playWithRetry()` ke us `copyWith()` call me
+`androidCompactActionIndices: const [0]` explicitly add kiya — jab bhi
+`controls` shrink/badle, compact indices ko bhi USI list ke saath sync
+rakhna zaroori hai.
+
+**Build marker:** `NEWPIPE-NATIVE-2026-09-16-v11`.
+**Test on real device:** naya gaana tap karke turant confirm karo — is
+baar crash NAHI hona chahiye. Agar phir bhi ho, crash logger (Debug screen
+→ Load + Share Crash Log) se naya log bhejo.
+
+---
+
 ## Post-Batch-22 Addition (2026-09-16) — In-app crash logger (PC/logcat nahi hai)
 
 User ke paas PC nahi hai, aur is device (Redmi Note 7, MIUI, Android 10)
