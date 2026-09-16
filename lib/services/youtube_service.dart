@@ -23,18 +23,20 @@
 //   Layer 2: youtube_explode_dart search — agar YT Music search fail ho
 //            ya 0 results de.
 //
-// AUDIO URL:
-//   Layer 1: youtube_explode_dart — seedha YouTube se extract (multiple
+// AUDIO URL (updated 2026-09-16, Batch 22 — Option C native plugin):
+//   Layer 1: NewPipeExtractor — asli NewPipe app wali extraction, ab
+//            seedha native Kotlin plugin se (android/app/.../newpipe/),
+//            koi Flutter-wrapper/WebView beech me nahi (bilkul OuterTune/
+//            OpenTune jaisa). Behtar bypass-rate hai explode se, aur ab
+//            crash-risk bhi khatam (WebView hata di gayi — dekho
+//            NewPipeDownloader.kt/NewPipeAudioChannel.kt comments).
+//   Layer 2: youtube_explode_dart — seedha YouTube se extract (multiple
 //            client surfaces: androidSdkless/ios/androidVr/safari + Deno
-//            JS-solver agar device pe available ho). Audio-only streams
-//            fail (403/PoToken-restricted) ho to muxed (video+audio)
-//            stream fallback try karta hai — muxed alag client-path use
-//            karta hai isliye aksar chalta hai jab audio-only nahi
-//            chalta; player audio-only track nikaal ke play kar leta
-//            hai, thoda extra video data waste hota hai but kaam ho
-//            jaata hai.
-//   Layer 2: Piped public instances (BACKUP, free extra try) — dono me
-//            koi single point of failure share nahi hota.
+//            JS-solver agar device pe available ho). Fallback agar Layer 1
+//            fail ho. Audio-only streams fail (403/PoToken-restricted) ho
+//            to muxed (video+audio) stream fallback try karta hai.
+//   Layer 3: Piped public instances (BACKUP, free extra try) — koi single
+//            point of failure teeno layers me share nahi hota.
 //
 // Isi exact architecture ka standalone Dart CLI version repo
 // "jaat888/Test-music" me hai — koi bhi future change pehle wahan test
@@ -57,7 +59,7 @@ import 'package:dart_ytmusic_api/yt_music.dart';
 // library me hain, isliye unhe explicitly import karna padta hai
 // (varna "isn't a type" compile error aata hai).
 import 'package:dart_ytmusic_api/types.dart';
-import 'package:newpipeextractor_dart/newpipeextractor_dart.dart' as npe;
+import 'package:flutter/services.dart' show MethodChannel, PlatformException;
 
 import '../db/download_db.dart';
 import '../models/song.dart';
@@ -194,34 +196,18 @@ class YoutubeService {
 
   final http.Client _http = http.Client();
 
-  // BUG FIX (2026-09-16, v20 — REAL root cause of "gaana badalte hi crash",
-  // chahe click ho ya gaana khud khatam ho ke agla bajte waqt): background_
-  // service.dart ka 300ms debounce + `_playToken` sirf ye control karta hai
-  // ki kitni BAAR (aur kab) ek naya resolve SHURU ho — lekin ek baar
-  // `_audioViaNewPipe()` (neeche) ke andar `npe.VideoExtractor.getStream()`
-  // (NewPipeExtractor ka WebView-based JS solver, `flutter_inappwebview` se
-  // wrap kiya gaya) call ho jaaye, wo call khud 5-30 second tak le sakta hai
-  // (network + JS challenge solve karne me). Is DAURAAN agar agla song bajna
-  // shuru ho (naturally khatam hone ke baad AUTO-NEXT ho ya user ne click
-  // kiya — dono se) — debounce ke 300ms nikal chuke hote hain, isliye naya
-  // `_resolveAndPlay()` bhi shuru ho jaata hai, aur wo bhi apna khud ka
-  // `npe.VideoExtractor.getStream()` call kar deta hai. Ab DO WebView-based
-  // native extractions EK SAATH chal rahi hoti hain — chahe user ne bilkul
-  // bhi jaldi-jaldi tap na kiya ho, sirf itna ki pehla song abhi bhi resolve
-  // ho raha tha jab dusra shuru hua. Yahi asli "1 sec me crash" hai (native
-  // WebView OOM/instance-limit, MIUI jaise kam-RAM OEMs pe) — normal ek-ke-
-  // baad-ek song transitions me bhi reproduce hota hai, sirf rapid double-
-  // tap se nahi. Dart-level try/catch isko pakad nahi sakta kyunki ye native
-  // process-level crash hai, koi Dart exception nahi.
-  // Fix: `_audioViaNewPipe()` ke poore body ko ek simple chained-Future
-  // MUTEX se wrap kiya gaya hai — is se poore app me kabhi bhi EK se zyada
-  // NewPipeExtractor WebView call parallel nahi chalegi. Agar koi naya call
-  // aata hai jab pehla abhi chal raha hai, wo pehle ke poora khatam (settle)
-  // hone ka wait karega, tabhi apna WebView call shuru karega — isse
-  // overlapping native instances kabhi bante hi nahi, chahe transitions
-  // kitni bhi jaldi-jaldi (ya kitni bhi slow-resolve ke beech) kyun na ho
-  // rahe hon.
-  Future<void> _newPipeLock = Future.value();
+  // NOTE (2026-09-16, Batch 22 — native plugin): is jagah pehle ek
+  // `_newPipeLock` mutex hota tha, jo `_audioViaNewPipe()` ke andar
+  // `npe.VideoExtractor.getStream()` (WebView-based JS solver) ki
+  // overlapping calls ko serialize karta tha — do parallel WebView native
+  // instances hi asli "gaana badalte hi crash" ka root cause the (native
+  // process-level crash, Dart try/catch se na pakड़ me aane wala). Ab
+  // `_audioViaNewPipe()` seedha native Kotlin plugin (koi WebView nahi,
+  // dekho android/app/.../newpipe/) call karta hai, isliye mutex ki
+  // zaroorat khatam ho gayi — hata diya gaya hai (dekho neeche
+  // `_audioViaNewPipe()` ka comment).
+  static const MethodChannel _nativeNewPipe =
+      MethodChannel('com.sursathi.sursathi/newpipe');
 
   // ---------------- Search pagination state ("unlimited" scroll) ----------------
   //
@@ -893,94 +879,70 @@ class YoutubeService {
     }
   }
 
-  // ---- Layer 1 (PRIMARY, 2026-09-16 v4): NewPipeExtractor ----
-  // Ye asli NewPipe app wali extraction hai (Java library, Dart se
-  // flutter_inappwebview ke through wrap ki gayi). youtube_explode_dart se
-  // zyada reliable hai kyunki NewPipeExtractor ki community bahut badi hai
-  // aur YouTube ke changes ke baad zyada tezi se patch aata hai (dekh
-  // pubspec.yaml me GPL-3.0 license warning bhi).
+  // ---- Layer: NewPipeExtractor, NATIVE (2026-09-16, Batch 22 — Option C) ----
+  // Pehle ye function `newpipeextractor_dart` (Flutter wrapper package) ke
+  // through `npe.VideoExtractor.getStream()` call karta tha, jo andar se
+  // `flutter_inappwebview` (WebView) ke JS solver se signature-cipher
+  // resolve karta tha — usi WebView native View creation ke crash (kuch
+  // specific videos pe, native process-level, Dart try/catch se na pakड़ me
+  // aane wala) ki wajah se package hi hata di gayi hai (dekho pubspec.yaml).
+  //
+  // Ab seedha native Kotlin plugin (MethodChannel
+  // "com.sursathi.sursathi/newpipe", dekho android/app/src/main/kotlin/
+  // com/sursathi/sursathi/newpipe/NewPipeAudioChannel.kt) ko call karte
+  // hain — wo asli NewPipeExtractor Java library ko DIRECTLY use karta hai
+  // (bilkul OuterTune/OpenTune jaisa), koi Flutter-wrapper beech me nahi,
+  // koi WebView nahi (NewPipeExtractor khud Mozilla Rhino, pure JVM JS
+  // interpreter, se signature-cipher solve karta hai — koi Android View
+  // nahi banti). Isi wajah se purana `_newPipeLock` mutex bhi hata diya
+  // gaya — native extraction thread-safe hai.
   Future<_AudioStream?> _audioViaNewPipe(
     String videoId, {
     void Function(String status)? onProgress,
   }) async {
-    // Mutex acquire — dekho `_newPipeLock` comment upar. Apni baari ka wait
-    // karo (chahe wo pichhla call kisi bilkul alag song/token ke liye ho).
-    final myTurn = Completer<void>();
-    final previous = _newPipeLock;
-    _newPipeLock = myTurn.future;
-    await previous;
     try {
-      return await _audioViaNewPipeUnlocked(videoId, onProgress: onProgress);
-    } finally {
-      myTurn.complete(); // agli waiting call ko aage badhne do
-    }
-  }
+      onProgress?.call('Resolving via native NewPipeExtractor...');
+      final raw = await _nativeNewPipe.invokeMethod<Map<dynamic, dynamic>>(
+        'getAudioStream',
+        {'videoId': videoId},
+      ).timeout(const Duration(seconds: 30));
 
-  Future<_AudioStream?> _audioViaNewPipeUnlocked(
-    String videoId, {
-    void Function(String status)? onProgress,
-  }) async {
-    final url = 'https://www.youtube.com/watch?v=$videoId';
-    try {
-      onProgress?.call('Resolving via NewPipeExtractor...');
-      final video = await npe.VideoExtractor.getStream(url)
-          .timeout(const Duration(seconds: 30));
-
-      final info = video.videoInfo;
-      final audio = video.audioWithHighestQuality ??
-          (video.audioOnlyStreams.isNotEmpty
-              ? video.audioOnlyStreams.first
-              : null);
-      if (audio == null || audio.url == null || audio.url!.isEmpty) {
-        onProgress?.call('NewPipeExtractor: no audio-only stream, trying muxed...');
-        final muxed = video.videoStreams.isNotEmpty ? video.videoStreams.first : null;
-        if (muxed == null || muxed.url == null || muxed.url!.isEmpty) {
-          onProgress?.call('NewPipeExtractor: no usable stream at all');
-          return null;
-        }
-        final v = await _verifyPlayable(muxed.url!);
-        onProgress?.call('  -> ${v.ok ? "OK" : "FAIL"} (${v.detail})');
-        if (!v.ok) return null;
-        return _AudioStream(
-          url: muxed.url!,
-          format: (muxed.formatSuffix ?? 'mp4').toLowerCase(),
-          title: info.name ?? 'Unknown',
-          author: info.uploaderName ?? 'Unknown Artist',
-          thumb: info.thumbnails.isNotEmpty ? info.thumbnails.last : '',
-          duration: info.length ?? 0,
-        );
+      final streamUrl = raw?['url'] as String?;
+      if (raw == null || streamUrl == null || streamUrl.isEmpty) {
+        onProgress?.call('NewPipeExtractor: no usable stream at all');
+        return null;
       }
 
-      onProgress?.call('Checking NewPipe audio stream (${audio.averageBitrate}kbps)...');
-      final v = await _verifyPlayable(audio.url!);
+      final kind = raw['kind'] as String? ?? 'audio';
+      onProgress?.call(
+        kind == 'muxed'
+            ? 'NewPipeExtractor: audio-only nahi mila, muxed try...'
+            : 'Checking NewPipe audio stream (${raw['bitrate'] ?? '?'}kbps)...',
+      );
+      final v = await _verifyPlayable(streamUrl);
       onProgress?.call('  -> ${v.ok ? "OK" : "FAIL"} (${v.detail})');
       if (!v.ok) return null;
 
       return _AudioStream(
-        url: audio.url!,
-        format: (audio.formatSuffix ?? 'm4a').toLowerCase(),
-        title: info.name ?? 'Unknown',
-        author: info.uploaderName ?? 'Unknown Artist',
-        thumb: info.thumbnails.isNotEmpty ? info.thumbnails.last : '',
-        duration: info.length ?? 0,
+        url: streamUrl,
+        format: ((raw['format'] as String?) ??
+                (kind == 'muxed' ? 'mp4' : 'm4a'))
+            .toLowerCase(),
+        title: (raw['title'] as String?) ?? 'Unknown',
+        author: (raw['author'] as String?) ?? 'Unknown Artist',
+        thumb: (raw['thumb'] as String?) ?? '',
+        duration: (raw['duration'] as num?)?.toInt() ?? 0,
       );
-    } on npe.ExtractorException catch (e) {
-      // Har exception type ka apna clear reason hai (README ke mutabik) —
-      // isse debug screen pe exact pata chalega, "generic fail" nahi.
-      final detail = switch (e) {
-        npe.BadUrlException() => 'Invalid URL: ${e.message}',
-        npe.FatalFailureException() => 'YouTube API change (fatal): ${e.message}',
-        npe.TransientFailureException() => 'YouTube-side temp error: ${e.message}',
-        npe.RequestLimitExceededException() => 'Rate limited: ${e.message}',
-        npe.ReCaptchaRequiredException() => 'CAPTCHA required at ${e.challengeUrl}',
-        npe.StreamIsNullException() => 'No stream available: ${e.message}',
-        _ => e.toString(),
-      };
-      print('NewPipeExtractor failed for $videoId: $detail');
+    } on PlatformException catch (e) {
+      // Native side (NewPipeAudioChannel.kt) ke exception-code se seedha
+      // exact reason milta hai — debug screen pe "generic fail" nahi
+      // dikhega.
+      final detail = '${e.code}: ${e.message ?? ""}';
+      print('NewPipeExtractor (native) failed for $videoId: $detail');
       onProgress?.call('NewPipeExtractor FAILED: $detail');
       return null;
     } catch (e) {
-      print('NewPipeExtractor failed (unexpected) for $videoId: $e');
+      print('NewPipeExtractor (native) failed (unexpected) for $videoId: $e');
       onProgress?.call('NewPipeExtractor FAILED (unexpected): $e');
       return null;
     }
@@ -1226,47 +1188,29 @@ class YoutubeService {
     } catch (e) {
       print('YT id-check: skip kiya, error: $e');
     }
-    // BUG FIX (2026-09-16, Batch 21 — "kuch gaane HAMESHA crash/fail hote
-    // hain, kuch HAMESHA chal jaate hain" — user ne khud confirm kiya ki
-    // ye per-song CONSISTENT hai, rapid-tap ya "abhi khatam hua" jaisi
-    // timing pe depend nahi karta. Iska matlab #49/#51 (overlap) wala
-    // mutex fix sahi hai lekin isse ALAG ek doosra root cause bhi hai:
-    // ek SINGLE (non-overlapping) NewPipeExtractor call bhi kuch specific
-    // videos pe crash kar sakta hai — mutex sirf DO calls ko ek saath
-    // chalne se rokta hai, ek akela call agar khud crash kare (kisi
-    // specific video ke signature-cipher/JS-challenge shape ki wajah se)
-    // to mutex us se bacha hi nahi sakta.
-    // Context: `newpipeextractor_dart` (pubspec me pinned) khud bahut NAYA
-    // aur chhota package hai (pehla release ~mid-2026, pub.dev par sirf 2
-    // likes/~150 downloads total — matlab bahut kam real-world testing) —
-    // OuterTune/OpenTune jaisi established Kotlin YT Music apps NewPipe-
-    // Extractor ko seedha (native Kotlin/Java) use karti hain, is chhote
-    // Flutter-wrapper se nahi, aur unka apna alag actively-maintained
-    // innertube module hai — isliye unke paas ye specific per-video native
-    // crash class kam dikhti hai. Yahan wo option nahi hai (Flutter app
-    // hai), lekin jitna kam is package pe depend karein utna crash-surface
-    // kam.
-    // Fix: order badal diya — pehle `_audioViaExplode()` (youtube_
-    // explode_dart, pure Dart, koi native WebView nahi, isliye kabhi
-    // process-level crash nahi karega) try karo. Sirf agar wo fail ho
-    // (null return — YouTube ke bot-detection se URL na mile, jaisa header
-    // comment me already documented hai) tab NewPipeExtractor (WebView-
-    // based, behtar bypass-rate lekin crash-risk wala) fallback ki tarah
-    // try karo. Isse jitne bhi gaane explode se seedha resolve ho jaate
-    // hain, unke liye crash-prone path kabhi chhua hi nahi jaata; jo
-    // explode pe fail hote hain (asli "bypass zaroori hai" cases), unhi ke
-    // liye NewPipeExtractor ka risk accept kiya jaata hai.
-    // NOTE: is se stream-fetch SUCCESS RATE thoda kam ho sakta hai kuch
-    // videos ke liye (explode occasionally NewPipe se kam reliable hai,
-    // dekho file-header comment) — trade-off jaanbujhke hai (crash >>
-    // ek retry/error message, jaisa mutex fix me bhi "safety > speed"
-    // tradeoff liya gaya tha).
+    // ORDER CHANGE (2026-09-16, Batch 22 — Option C, native plugin): Batch
+    // 21 me order jaanbujhke `_audioViaExplode()` PEHLE kiya gaya tha, aur
+    // NewPipeExtractor (us waqt WebView-based `newpipeextractor_dart`) sirf
+    // fallback tha — kyunki us WebView layer ka ek single (non-overlapping)
+    // call bhi kuch specific videos pe native process-level crash kar sakta
+    // tha (Dart try/catch se na pakड़ me aane wala), isliye jitna kam usse
+    // guzarein utna accha tha.
+    // Ab (upar `_audioViaNewPipe()` dekho) wo WebView layer hi hata di gayi
+    // hai — native Kotlin plugin NewPipeExtractor ko DIRECTLY (Mozilla
+    // Rhino, pure JVM, koi Android View nahi) use karta hai, isliye wo
+    // crash-class ab exist hi nahi karti. Chunki NewPipeExtractor pehle se
+    // hi document tha ki explode se BEHTAR bypass-rate deta hai (dekho
+    // file-header comment) — ab jab crash-risk khatam ho chuka hai, order
+    // wapas NewPipeExtractor-first kar diya gaya hai taaki us behtar
+    // bypass-rate ka fayda mile. `_audioViaExplode()` (pure Dart) ab
+    // fallback hai — agar native NewPipeExtractor kisi wajah se fail ho.
+    final viaNewPipe =
+        await _audioViaNewPipe(resolvedId, onProgress: onProgress);
+    if (viaNewPipe != null) return viaNewPipe;
+
     final viaExplode =
         await _audioViaExplode(resolvedId, onProgress: onProgress);
     if (viaExplode != null) return viaExplode;
-
-    final viaNewPipe = await _audioViaNewPipe(resolvedId, onProgress: onProgress);
-    if (viaNewPipe != null) return viaNewPipe;
 
     return _audioViaPipedBackup(resolvedId, onProgress: onProgress);
   }

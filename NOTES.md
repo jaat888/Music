@@ -1,5 +1,68 @@
 # SurSathi — Notes / Known Issues
 
+## Batch 22 (2026-09-16) — Option C: native NewPipeExtractor plugin (no more WebView)
+
+Batch 21 ke end me user ke saath 3 options discuss huye the (audio-fetch
+crash ko HAMESHA ke liye khatam karne ke liye, jaisa OuterTune/OpenTune
+karti hain): (A) poora app native Kotlin me rewrite, (B) OpenTune/OuterTune
+fork karo, (C) app waisa hi raho, sirf audio-fetch wala risky hissa apna
+native plugin se replace karo. User ne **Option C** choose kiya.
+
+**Kya badla:**
+- `newpipeextractor_dart` (Flutter wrapper, jo andar `flutter_inappwebview`
+  WebView ke through signature-cipher solve karta tha) aur uski
+  `flutter_inappwebview` dependency — dono `pubspec.yaml` se HATA DI GAYI
+  hain. Yahi WebView native View creation hi Batch 20/21 ke "kuch gaane
+  HAMESHA crash/fail" ka asli root cause thi (native process-level crash,
+  Dart try/catch se na pakड़ me aane wala).
+- Naya native Android plugin (koi third-party Flutter package nahi, hamara
+  apna Kotlin code):
+  - `android/app/src/main/kotlin/com/sursathi/sursathi/newpipe/NewPipeDownloader.kt`
+    — NewPipeExtractor ke liye `Downloader` implementation, seedha OkHttp
+    se (NewPipeExtractor ke apne quickstart docs ka pattern). Koi WebView
+    nahi.
+  - `android/app/src/main/kotlin/com/sursathi/sursathi/newpipe/NewPipeAudioChannel.kt`
+    — `MethodChannel("com.sursathi.sursathi/newpipe")` ka handler.
+    `StreamInfo.getInfo()` (asli NewPipeExtractor Java library) ko seedha
+    call karta hai — bilkul OuterTune/OpenTune jaisa architecture. Audio-
+    only stream na mile to muxed fallback (jaisa Dart-side pehle karta
+    tha). Har exception type (ContentNotAvailable/GeoRestricted/
+    AgeRestricted/ReCaptcha/Extraction/Network/Unknown) ka apna error-code
+    hai taaki debug screen pe exact reason dikhe.
+  - `MainActivity.kt` me `configureFlutterEngine()` override karke channel
+    register kiya gaya hai.
+  - `android/app/build.gradle` me `com.github.teamnewpipe:NewPipeExtractor:v0.26.4`
+    aur `com.squareup.okhttp3:okhttp:4.12.0` explicit dependencies add kiye
+    (pehle ye sirf `newpipeextractor_dart` ki transitive dependency ki
+    tarah aate the — JitPack repo + proguard rules already project me
+    maujood the, isliye unme koi change nahi karna pada).
+- `lib/services/youtube_service.dart`: `_audioViaNewPipe()` ab
+  `npe.VideoExtractor.getStream()` ki jagah upar wale native MethodChannel
+  ko call karta hai. Purana `_newPipeLock` mutex (WebView-instance-limit
+  crash rokne ke liye tha, dekho Batch-20 notes) poori tarah HATA DIYA GAYA
+  — native extraction thread-safe hai, serialize karne ki zaroorat nahi.
+  `_resolveAudioStream()` ka order bhi wapas NewPipeExtractor-first kar
+  diya gaya (Batch 21 me safety ke liye explode-first kiya gaya tha; ab
+  crash-risk hi khatam ho chuka hai to NewPipeExtractor ke behtar
+  bypass-rate ka fayda wapas milega) — `_audioViaExplode()` ab fallback
+  hai, Piped backup teesra layer.
+- `kBuildMarker` (debug_screen.dart): `NEWPIPE-NATIVE-2026-09-16-v8`.
+
+**Zaroori — TEST NAHI HUA (CI pe pehli baar banega):** Ye native Kotlin
+code is session me sirf docs/source-reference se likha gaya hai, kabhi
+compile nahi hua (is environment me Android SDK/Gradle available nahi
+hai). Pehla GitHub Actions build in sab pe compile-error de sakta hai
+(Kotlin syntax, NewPipeExtractor API signature mismatch specific version
+me, ya Gradle dependency resolution) — agar aisa ho to build log yahan
+paste karna, standard batch-by-batch fix flow se theek karenge (jaisa
+pichle saare Gradle/build fixes hue hain).
+
+**License:** NewPipeExtractor khud GPL-3.0 hai (pehle se documented tha
+`newpipeextractor_dart` ke liye bhi) — ab bhi wahi obligation hai, bas
+dependency pubspec.yaml ki jagah build.gradle me hai.
+
+---
+
 ## Batch 21 (2026-09-16) — User re-report on v23-fixed: "kuch bhi nahi badla"
 
 User ne v23-fixed test karke bataya: (a) crash ab bhi hota hai, LEKIN

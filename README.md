@@ -394,6 +394,22 @@ kiya gaya — sirf reference ke liye):**
 
 See `NOTES.md` #34 for full details.
 
+### Batch 21 — NewPipeExtractor added as primary (crash/stale-search fixes)
+`newpipeextractor_dart` (WebView-based Flutter wrapper) add kiya gaya tha
+audio-fetch ke liye + kai crash/pagination bugs fix hue (`_searchSeq`
+guard, `_newPipeLock` mutex, `skipToNext()` replay-loop bug). Poori
+details `NOTES.md` me Batch 21 heading ke neeche hain.
+
+### Batch 22 — Option C: native NewPipeExtractor plugin (no more WebView)
+User ne 3 options me se **Option C** choose kiya: `newpipeextractor_dart`
++ `flutter_inappwebview` (WebView) poori tarah hata di gayi, unki jagah
+apna native Kotlin plugin (`android/app/.../newpipe/NewPipeDownloader.kt`
++ `NewPipeAudioChannel.kt`, MethodChannel se wired) jo asli NewPipeExtractor
+Java library ko seedha call karta hai — bilkul OuterTune/OpenTune jaisa,
+koi WebView nahi. **NOT YET COMPILE-TESTED** (is session me Android SDK
+available nahi tha) — pehla CI build compile-errors de sakta hai, standard
+batch-by-batch flow se fix karna. Poori details `NOTES.md` Batch 22 me.
+
 ## Features (poore app ka scope, reference ke liye)
 YouTube search + stream + download; Home categories (Bollywood, Punjabi,
 Haryanvi, Lo-Fi, Party, Romantic, Workout, Old Hits, Arijit, Chill,

@@ -69,4 +69,22 @@ dependencies {
     // classes" R8 error java.nio.file.* ke liye aa sakta tha. NIO variant
     // plain wale ka superset hai, kuch todta nahi.
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.4")
+
+    // NATIVE NewPipeExtractor (2026-09-16, Batch 22 — Option C): pehle ye
+    // sirf `newpipeextractor_dart` (Flutter wrapper) ki transitive dependency
+    // ki tarah aata tha (isliye pehle se hi JitPack repo + proguard rules
+    // upar/is file me maujood hain). Ab wrapper hata diya gaya hai, isliye
+    // ise EXPLICITLY yahan declare karna zaroori hai — warna
+    // android/app/src/main/kotlin/.../newpipe/*.kt me
+    // "org.schabi.newpipe.extractor.*" import compile-time resolve nahi
+    // hoga. Version NewPipeExtractor ke GitHub releases (latest v0.26.4,
+    // 2026-09-16 ko check kiya) se match ki hai.
+    implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.4")
+
+    // NewPipeDownloader.kt (apna Downloader implementation) OkHttp use
+    // karta hai — NewPipeExtractor ke apne quickstart docs me bhi yahi
+    // recommend kiya gaya hai. Explicit version pin (transitive pe depend
+    // nahi kiya) taaki kabhi bhi koi aur plugin apni okhttp version na
+    // todde.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
