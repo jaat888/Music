@@ -27,6 +27,23 @@ Future<void> initAudioHandler() async {
     config: const AudioServiceConfig(
       androidNotificationChannelId: 'com.sursathi.audio',
       androidNotificationChannelName: 'SurSathi Playback',
+      // BUG FIX (2026-09-16, v22): "notification me controls invisible
+      // rehte hain, tap karne se kaam karta hai par dikhta nahi" — ye
+      // `androidNotificationIcon` yahan kabhi set hi nahi kiya gaya tha,
+      // isliye audio_service apna default `mipmap/ic_launcher` use kar
+      // raha tha — jo app ka NORMAL full-color launcher icon hai. Android
+      // status-bar/media-notification icons sirf ek flat alpha MASK ke
+      // roobh me draw hote hain (koi real color allowed nahi) — ek
+      // colored PNG/adaptive-icon diya jaaye to system usko silhouette
+      // banane ki koshish karta hai aur zyaadatar OEMs (khaas kar MIUI/
+      // Samsung dark theme) par result ek poori tarah invisible/blank
+      // icon hota hai. Notification ka baaki structure (action buttons ki
+      // tap-area/PendingIntents) bilkul theek register hote hain — isi
+      // liye touch karne se kaam karta tha par kuch dikhta nahi tha.
+      // Fix: apna khud ka single-color vector drawable banaya
+      // (android/app/src/main/res/drawable/ic_notification.xml) aur use
+      // yahan explicitly point kiya.
+      androidNotificationIcon: 'drawable/ic_notification',
       // BUG FIX (2026-09-16, v9): audio_service 0.18.19 me ab ek build-time
       // assert hai — `androidNotificationOngoing: true` sirf
       // `androidStopForegroundOnPause: true` ke saath allowed hai (varna
