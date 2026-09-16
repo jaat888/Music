@@ -8,6 +8,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      # matrix: debug aur release dono jobs ek saath (parallel) chalenge —
+      # dono independent runners pe, isliye ek dusre ka wait nahi karte.
+      # Public repo pe GitHub-hosted runners free hain, so isse extra
+      # paisa nahi lagta — bas thoda zyada free CI minutes use hote hain.
+      matrix:
+        build-type: [debug, release]
     steps:
       - uses: actions/checkout@v4
 
@@ -33,9 +40,12 @@ jobs:
           # in me se kisi bhi file me change (jaise proguard/repo/version
           # fix) hone par cache key turant badle aur naya/changed dependency
           # fresh download ho, purana stale cache silently reuse na ho.
-          key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.lock', 'android/**/*.gradle*', 'android/gradle.properties', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          # Debug aur release job ka cache alag rakha (key me build-type
+          # shaamil), taaki debug ke unminified deps release ke saath mix
+          # na ho.
+          key: ${{ runner.os }}-flutter-${{ matrix.build-type }}-${{ hashFiles('**/pubspec.lock', 'android/**/*.gradle*', 'android/gradle.properties', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
-            ${{ runner.os }}-flutter-
+            ${{ runner.os }}-flutter-${{ matrix.build-type }}-
 
       - name: Create Android scaffold
         run: flutter create . --platforms=android --org com.sursathi --project-name sursathi --no-overwrite
@@ -46,12 +56,13 @@ jobs:
       - name: Generate launcher icons
         run: dart run flutter_launcher_icons
 
-      - name: Build APK
-        run: flutter build apk --release
+      - name: Build APK (${{ matrix.build-type }})
+        run: flutter build apk --${{ matrix.build-type }}
+
       - name: Rename APK
-        run: cp build/app/outputs/flutter-apk/app-release.apk sursathi.apk
+        run: cp build/app/outputs/flutter-apk/app-${{ matrix.build-type }}.apk sursathi-${{ matrix.build-type }}.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sursathi-apk
-          path: sursathi.apk
+          name: sursathi-apk-${{ matrix.build-type }}
+          path: sursathi-${{ matrix.build-type }}.apk
