@@ -66,6 +66,16 @@ import '../models/song.dart';
 import 'innertube_client.dart';
 import 'storage_service.dart';
 
+// NEW (2026-09-16, v21): YouTube/YT Music jaisa "Filters" (Upload date)
+// support — dekho search_screen.dart ke filter chips aur YoutubeService.search()
+// ka naya `dateFilter` param. `relevance` (default) purana behavior hai
+// (InnerTube/YT Music ranking, koi date-filter nahi). Baaki sab values
+// seedha YouTube ke apne "Upload date" filter (youtube_explode_dart ke
+// UploadDateFilter consts) use karte hain — isliye in sabke liye YT Music
+// layer (InnerTube) skip ho jaata hai, kyunki uska search API date-filter
+// support hi nahi karta.
+enum YtDateFilter { relevance, hour, today, week, month, year }
+
 // Search/playlist result ka lightweight model — Song se pehle ka staging data
 class YtResult {
   final String id;
@@ -250,6 +260,118 @@ class YoutubeService {
   String? _moreSearchContinuation;
   bool _moreSearchExhausted = false;
 
+  // NEW (2026-09-16, v21): "Upload date" filter (relevance ke alawa) ke
+  // liye alag pagination state — InnerTube (YT Music) is filter ko support
+  // hi nahi karta, isliye jab date-filter active ho, hum poori tarah
+  // youtube_explode_dart ke apne paginated search (`VideoSearchList`) pe
+  // shift ho jaate hain, aur uska "next page" object yahan store karte
+  // hain taaki loadMoreSearchResults() seedha `.nextPage()` bula sake.
+  // `dynamic` jaanbujhke — jaisa upar wale `loadMoreSearchResults()` ke
+  // comment me bataya gaya hai, is package ke exact return-type naam pe
+  // pehle bhi compile error aa chuka hai.
+  dynamic _dateFilterList;
+  String? _dateFilterQuery;
+  YtDateFilter _dateFilterActive = YtDateFilter.relevance;
+
+  SearchFilter? _uploadDateFilterFor(YtDateFilter f) {
+    switch (f) {
+      case YtDateFilter.hour:
+        return UploadDateFilter.lastHour;
+      case YtDateFilter.today:
+        return UploadDateFilter.today;
+      case YtDateFilter.week:
+        return UploadDateFilter.lastWeek;
+      case YtDateFilter.month:
+        return UploadDateFilter.lastMonth;
+      case YtDateFilter.year:
+        return UploadDateFilter.lastYear;
+      case YtDateFilter.relevance:
+        return null;
+    }
+  }
+
+  // YouTube/YT Music jaisa "Upload date" filter — InnerTube (YT Music) ka
+  // search endpoint date-filter support nahi karta, isliye ye seedha
+  // youtube_explode_dart ke generic YouTube search pe jaata hai (jaisa
+  // YouTube website ke "Filters -> Upload date" chips karte hain). Isi
+  // wajah se relevance-mode (YT Music curated) se results thoda alag
+  // "generic YouTube" jaise lag sakte hain — trade-off hai taaki asli
+  // date-range mile.
+  Future<List<YtResult>> _searchByUploadDate(
+    String query,
+    YtDateFilter dateFilter, {
+    int max = 30,
+  }) async {
+    _dateFilterQuery = query;
+    _dateFilterActive = dateFilter;
+    _dateFilterList = null;
+    try {
+      final filter = _uploadDateFilterFor(dateFilter) ?? TypeFilters.video;
+      final yt = await _getYt();
+      final list = await yt.search.search(query, filter: filter);
+      _dateFilterList = list;
+      final results = <YtResult>[];
+      for (final dynamic v in list) {
+        try {
+          results.add(YtResult(
+            id: v.id.value as String,
+            title: v.title as String,
+            author: v.author as String,
+            thumb: v.thumbnails.highResUrl as String,
+            duration: (v.duration as Duration?)?.inSeconds ?? 0,
+          ));
+        } catch (_) {
+          continue;
+        }
+      }
+      return results.take(max).toList();
+    } catch (e) {
+      print('DATE-FILTER SEARCH ERROR ($query, $dateFilter): $e');
+      return [];
+    }
+  }
+
+  // Date-filter mode me "load more" — pehle se stored VideoSearchList ka
+  // agla page maangta hai. Query/filter badal chuka ho (user ne search ya
+  // filter chip badla) to yahan se seedha khaali list milegi — caller
+  // (_searchByUploadDate) khud dobara set karega.
+  Future<List<YtResult>> _loadMoreByUploadDate(
+    String query,
+    YtDateFilter dateFilter,
+  ) async {
+    if (_dateFilterList == null ||
+        _dateFilterQuery != query ||
+        _dateFilterActive != dateFilter) {
+      return [];
+    }
+    try {
+      final dynamic next = await _dateFilterList.nextPage();
+      if (next == null) {
+        _dateFilterList = null;
+        return [];
+      }
+      _dateFilterList = next;
+      final results = <YtResult>[];
+      for (final dynamic v in next) {
+        try {
+          results.add(YtResult(
+            id: v.id.value as String,
+            title: v.title as String,
+            author: v.author as String,
+            thumb: v.thumbnails.highResUrl as String,
+            duration: (v.duration as Duration?)?.inSeconds ?? 0,
+          ));
+        } catch (_) {
+          continue;
+        }
+      }
+      return results;
+    } catch (e) {
+      print('DATE-FILTER LOAD MORE ERROR ($query, $dateFilter): $e');
+      return [];
+    }
+  }
+
   // "next page" chahiye ho to isko call karo — pehli baar isi query ke
   // liye call hone par InnerTube search ka PEHLA page deta hai (jo already
   // search() screen pe dikh chuka hoga, isliye caller apni taraf se
@@ -257,8 +379,16 @@ class YoutubeService {
   // (asli continuation token se). Khaali list wapas aane ka matlab hai
   // YouTube ke paas is query ke liye aur results nahi bache — list yahi
   // khatam maano.
-  Future<List<YtResult>> loadMoreSearchResults(String query) async {
+  Future<List<YtResult>> loadMoreSearchResults(
+    String query, {
+    YtDateFilter dateFilter = YtDateFilter.relevance,
+  }) async {
     if (query.trim().isEmpty) return [];
+    // NEW (v21): date-filter mode InnerTube continuation use nahi karta —
+    // apna alag paginated path hai (dekho _loadMoreByUploadDate).
+    if (dateFilter != YtDateFilter.relevance) {
+      return _loadMoreByUploadDate(query, dateFilter);
+    }
     try {
       if (_moreSearchQuery != query) {
         _moreSearchQuery = query;
@@ -356,9 +486,25 @@ class YoutubeService {
   Future<List<YtResult>> search(
     String query, {
     int max = 30,
+    YtDateFilter dateFilter = YtDateFilter.relevance,
     void Function(String status)? onProgress,
   }) async {
     if (query.trim().isEmpty) return [];
+
+    // NEW (2026-09-16, v21): "Upload date" filter chip select kiya gaya hai
+    // (relevance nahi) — seedha date-filtered path pe jao, InnerTube/YT
+    // Music layers (Layer 0/1) yahan skip hote hain kyunki wo date-filter
+    // support hi nahi karte (dekho _searchByUploadDate() ka comment).
+    if (dateFilter != YtDateFilter.relevance) {
+      onProgress?.call('Searching (upload date filter)...');
+      final results = await _searchByUploadDate(query, dateFilter, max: max);
+      onProgress?.call(
+        results.isNotEmpty
+            ? 'Upload-date filter: OK, ${results.length} results'
+            : 'Upload-date filter: 0 results',
+      );
+      return results;
+    }
 
     // BUG FIX (2026-09-16, v20): "search unlimited nahi, hamesha limited
     // gaane hi aate hain" — asli root cause. `_moreSearchQuery`/

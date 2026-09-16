@@ -110,6 +110,11 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
   // karta).
   int _searchSeq = 0;
 
+  // NEW (2026-09-16, v21): YouTube/YT Music jaisa "Upload date" filter —
+  // dekho _buildDateFilterChips(). Default relevance hai (purana behavior,
+  // koi change nahi).
+  YtDateFilter _dateFilter = YtDateFilter.relevance;
+
   @override
   void initState() {
     super.initState();
@@ -171,7 +176,10 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
     final seq = _searchSeq; // isi search session ka "load more" hai
     final query = _query;
     setState(() => _loadingMore = true);
-    final more = await YoutubeService.instance.loadMoreSearchResults(query);
+    final more = await YoutubeService.instance.loadMoreSearchResults(
+      query,
+      dateFilter: _dateFilter,
+    );
     // BUG FIX (v20): agar is dauraan user ne naya search chala diya
     // (`_searchSeq` aage badh gaya), to ye purani query ka "load more"
     // response naye query ke `_results` me mix nahi hona chahiye —
@@ -202,6 +210,56 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
     } else if (_tabController.index == 2 && !_playlistsLoaded) {
       _loadPlaylists(_query);
     }
+    // NEW (v21): date-filter chips row sirf Songs tab pe dikhti hai —
+    // tab badalne pe rebuild taaki wo row dikhe/chhupe.
+    if (mounted) setState(() {});
+  }
+
+  // NEW (2026-09-16, v21): YouTube/YT Music jaisa "Upload date" filter chip
+  // select hone pe — sirf tab badle to hi dobara search chalao (khamakha
+  // wahi filter dobara select karne pe kuch na ho).
+  void _onDateFilterChanged(YtDateFilter f) {
+    if (f == _dateFilter) return;
+    setState(() => _dateFilter = f);
+    if (_query.isNotEmpty) _runSearch(_query);
+  }
+
+  static const Map<YtDateFilter, String> _kDateFilterLabels = {
+    YtDateFilter.relevance: 'Relevance',
+    YtDateFilter.hour: 'Last hour',
+    YtDateFilter.today: 'Today',
+    YtDateFilter.week: 'This week',
+    YtDateFilter.month: 'This month',
+    YtDateFilter.year: 'This year',
+  };
+
+  // YouTube/YT Music jaisa filter-chips row — "Relevance" default hai
+  // (purana behavior), baaki sab "Upload date" se filter karte hain.
+  Widget _buildDateFilterChips() {
+    return SizedBox(
+      height: 44,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        children: _kDateFilterLabels.entries.map((e) {
+          final selected = _dateFilter == e.key;
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: ChoiceChip(
+              label: Text(e.value),
+              selected: selected,
+              onSelected: (_) => _onDateFilterChanged(e.key),
+              selectedColor: kGreen,
+              backgroundColor: kBgElev,
+              labelStyle: AppText.bodyS(
+                color: selected ? Colors.black : kText,
+              ).copyWith(fontWeight: selected ? FontWeight.bold : FontWeight.normal),
+              side: BorderSide.none,
+            ),
+          );
+        }).toList(),
+      ),
+    );
   }
 
   Future<void> _loadArtists(String query) async {
@@ -331,6 +389,7 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
       String? source;
       final results = await YoutubeService.instance.search(
         query,
+        dateFilter: _dateFilter,
         onProgress: (status) {
           if (status.startsWith('YT Music: OK')) {
             source = 'YouTube Music';
@@ -522,6 +581,10 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
             Tab(text: 'Playlists'),
           ],
         ),
+        // NEW (v21): "Upload date" filter chips — YouTube/YT Music jaisa.
+        // Sirf Songs tab pe relevant hai (Artists/Playlists is filter ko
+        // use hi nahi karte).
+        if (_tabController.index == 0) _buildDateFilterChips(),
         Expanded(
           child: TabBarView(
             controller: _tabController,
