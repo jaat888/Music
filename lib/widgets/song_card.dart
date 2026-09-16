@@ -56,47 +56,57 @@ class SongCard extends StatelessWidget {
           child: Row(
             children: [
               // ---------- Thumbnail ----------
-              Hero(
-                tag: 'thumb-${song.id}',
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: CachedNetworkImage(
-                        imageUrl: song.thumb,
+              // BUG FIX (crash on song change): pehle yahan Hero(tag:
+              // 'thumb-${song.id}') tha — mini_player.dart aur
+              // full_player_screen.dart dono bhi EXACT SAME tag format use
+              // karte hain (jaanbujhke — un dono ke beech animation chalti
+              // hai). Jab currently-playing gaana isi list me bhi visible
+              // rehta (jo ki normal hai — gaana tap karo, wo list se hi
+              // play hota hai), to ek hi route ke subtree me 2 heroes same
+              // tag ke saath ho jaate the — full player kholte hi seedha
+              // "There are multiple heroes that share the same tag within a
+              // subtree" crash. List item ko is animation me hissa lene ki
+              // zaroorat nahi thi (sirf mini_player <-> full_player wali
+              // fly-animation matter karti hai), isliye yahan se Hero hata
+              // diya — Stack seedha rakha gaya hai.
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: CachedNetworkImage(
+                      imageUrl: song.thumb,
+                      width: 60,
+                      height: 60,
+                      fit: BoxFit.cover,
+                      placeholder: (context, url) => Container(
                         width: 60,
                         height: 60,
-                        fit: BoxFit.cover,
-                        placeholder: (context, url) => Container(
-                          width: 60,
-                          height: 60,
-                          color: kSurface,
-                        ),
-                        errorWidget: (context, url, error) => Container(
-                          width: 60,
-                          height: 60,
-                          color: kSurface,
-                          child: const Icon(Icons.music_note, color: kTextDim),
+                        color: kSurface,
+                      ),
+                      errorWidget: (context, url, error) => Container(
+                        width: 60,
+                        height: 60,
+                        color: kSurface,
+                        child: const Icon(Icons.music_note, color: kTextDim),
+                      ),
+                    ),
+                  ),
+                  // Cached hone pe bottom-right green dot dikhao
+                  if (isCached)
+                    Positioned(
+                      bottom: -2,
+                      right: -2,
+                      child: Container(
+                        width: 6,
+                        height: 6,
+                        decoration: const BoxDecoration(
+                          color: kGreen,
+                          shape: BoxShape.circle,
                         ),
                       ),
                     ),
-                    // Cached hone pe bottom-right green dot dikhao
-                    if (isCached)
-                      Positioned(
-                        bottom: -2,
-                        right: -2,
-                        child: Container(
-                          width: 6,
-                          height: 6,
-                          decoration: const BoxDecoration(
-                            color: kGreen,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
+                ],
               ),
               const SizedBox(width: 10),
               // ---------- Title + artist · duration ----------
