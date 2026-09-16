@@ -160,6 +160,15 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         // bhi pass ho gaya" — lekin gaana chala hi nahi, aur user ko
         // koi feedback tak nahi milta tha (bilkul silent — na spinner na
         // error, bas 0:00/0:00 pe atka reh jaata).
+        //
+        // BUG FIX (2026-09-17): asli `e`/`st` yahan receive to hote the
+        // lekin kabhi print/log nahi hote the — sirf discard. Ye exactly
+        // wo case hai jahan "URL resolve hota hai, test bhi pass, phir
+        // bhi gaana nahi chalta" — kyunki fail hi is silent stream se
+        // ho raha hota hai, jo _handleStreamDrop() ke andar bhi kabhi
+        // log nahi hota tha. Ab yahan turant print karte hain.
+        print('YT PLAYBACK STREAM ERROR (CDN drop, setUrl pass hone ke '
+            'baad): $e');
         _handleStreamDrop();
       },
     );
@@ -180,6 +189,8 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
     if (song != null && _streamErrorRetries < _maxStreamErrorRetries) {
       _streamErrorRetries++;
+      print('YT STREAM DROP: "${song.title}" — retry ${_streamErrorRetries}/'
+          '$_maxStreamErrorRetries (fresh URL nikaal ke).');
       // Loading state dikhao — user ko "kuch hua hi nahi" na lage jab
       // background me retry chal raha ho.
       playbackState.add(
@@ -193,6 +204,8 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     }
 
     // Retries khatam ho gaye (ya current song hi pata nahi) — ab final error
+    print('YT STREAM DROP: "${song?.title}" — saare $_maxStreamErrorRetries '
+        'retries fail, final error.');
     _streamErrorRetries = 0;
     playbackState.add(
       playbackState.value.copyWith(
