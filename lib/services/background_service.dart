@@ -111,6 +111,22 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // taaki ek SnackBar dikha sake.
   void Function(String message)? onError;
 
+  // BUG FIX (2026-09-16, v21): "stream drop ho gaya" error 1 sec ke andar
+  // hi aa jaata tha, koi retry nahi hota tha — jabki URL-resolve wala path
+  // (playWithRetry/_resolveAndPlay) 3 attempts x 45s tak try karta hai.
+  // Root cause: ye do bilkul alag failure points hain —
+  //   1) getAudioUrl() FAIL ho (URL hi nahi mila)   -> retry hota tha
+  //   2) getAudioUrl() PASS ho, setUrl()/play() PASS ho, lekin CDN stream
+  //      thodi der baad (kabhi turant) drop kare (403 / format issue /
+  //      network reset) -> ye sirf player.playbackEventStream ke async
+  //      onError se pata chalta hai, aur yahan pehle SEEDHA final error
+  //      dikha diya jaata tha, ek bhi retry ke bina.
+  // Fix: (2) wale case me bhi ab fresh URL nikaal ke retry hota hai —
+  // max 3 attempts, har attempt se pehle 1s ka chhota gap — total budget
+  // ~30s tak (fresh resolve + retries), tabhi jaake final error aata hai.
+  int _streamErrorRetries = 0;
+  static const int _maxStreamErrorRetries = 3;
+
   SurSathiAudioHandler() {
     // just_audio ke playback events ko audio_service ke playbackState me map karo
     player.playbackEventStream.listen(
@@ -127,18 +143,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         // bhi pass ho gaya" — lekin gaana chala hi nahi, aur user ko
         // koi feedback tak nahi milta tha (bilkul silent — na spinner na
         // error, bas 0:00/0:00 pe atka reh jaata).
-        playbackState.add(
-          playbackState.value.copyWith(
-            processingState: AudioProcessingState.error,
-            playing: false,
-          ),
-        );
-        final title = mediaItem.valueOrNull?.title;
-        onError?.call(
-          title != null
-              ? '"$title" play karte waqt error aaya (stream drop ho gaya). Koi aur gaana try karein.'
-              : 'Playback me error aaya. Koi aur gaana try karein.',
-        );
+        _handleStreamDrop();
       },
     );
 
@@ -148,6 +153,71 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         skipToNext();
       }
     });
+  }
+
+  // Actual CDN stream-drop handler — ab yahan bhi retry hota hai (pehle
+  // seedha final error dikha deta tha, 0 retries).
+  void _handleStreamDrop() {
+    final token = _playToken;
+    final song = QueueService.instance.currentSong;
+
+    if (song != null && _streamErrorRetries < _maxStreamErrorRetries) {
+      _streamErrorRetries++;
+      // Loading state dikhao — user ko "kuch hua hi nahi" na lage jab
+      // background me retry chal raha ho.
+      playbackState.add(
+        playbackState.value.copyWith(
+          processingState: AudioProcessingState.loading,
+          playing: false,
+        ),
+      );
+      unawaited(_retryAfterStreamDrop(song, token));
+      return;
+    }
+
+    // Retries khatam ho gaye (ya current song hi pata nahi) — ab final error
+    _streamErrorRetries = 0;
+    playbackState.add(
+      playbackState.value.copyWith(
+        processingState: AudioProcessingState.error,
+        playing: false,
+      ),
+    );
+    final title = mediaItem.valueOrNull?.title;
+    onError?.call(
+      title != null
+          ? '"$title" play karte waqt error aaya (stream drop ho gaya). Koi aur gaana try karein.'
+          : 'Playback me error aaya. Koi aur gaana try karein.',
+    );
+  }
+
+  Future<void> _retryAfterStreamDrop(Song song, int token) async {
+    // Chhota gap taaki turant-turant CDN ko dobara na maare, network/CDN
+    // ko thoda "settle" hone ka time mile.
+    await Future.delayed(const Duration(seconds: 1));
+    if (token != _playToken) return; // is dauraan user aage badh gaya
+
+    String? url;
+    try {
+      // getAudioUrl() koi purana cached URL nahi deta — har call pe fresh
+      // resolve karta hai (naya signed URL), isliye same-CDN-drop dobara
+      // hone ka chance kam ho jaata hai.
+      url = await YoutubeService.instance
+          .getAudioUrl(song.id, title: song.title, author: song.artist)
+          .timeout(const Duration(seconds: 10));
+    } catch (_) {
+      url = null;
+    }
+    if (token != _playToken) return;
+
+    if (url == null) {
+      // Fresh URL bhi nahi mila — same handler dobara call karo, ye
+      // apna retry-counter khud check karega (attempt 2, 3, ya final error).
+      _handleStreamDrop();
+      return;
+    }
+
+    await _playSong(song, url, token);
   }
 
   // ---------------- State broadcast ----------------
@@ -292,6 +362,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       await player.setUrl(url, headers: YoutubeService.cdnHeaders);
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       await player.play();
+      // Playback successfully shuru ho gaya — stream-drop retry counter
+      // reset karo taaki agli baar drop hone pe wapas poore 3 attempts milein.
+      _streamErrorRetries = 0;
       // Cache background me ho jaaye — playback ruke bina
       unawaited(_autoCacheInBackground(song, url));
       // Agla gaana bhi abhi se resolve karna shuru kar do (instant next ke liye)
@@ -322,6 +395,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // dikhe aur spinner/loading state UI me nazar aaye.
   Future<void> playWithRetry(Song song) async {
     final token = ++_playToken;
+    // Naya song select hua — purane song ke stream-drop retries ka count
+    // carry-forward nahi hona chahiye.
+    _streamErrorRetries = 0;
 
     // BUG FIX (2026-09-16, v12): "gaana change karo to photo/naam turant
     // badal jaata hai lekin AUDIO purana hi 10-12 sec tak bajta rehta hai,

@@ -19,6 +19,7 @@ import '../services/youtube_service.dart';
 import '../widgets/rotating_vinyl.dart';
 import '../widgets/progress_slider.dart';
 import '../widgets/animated_play_button.dart';
+import '../widgets/loading_ring.dart';
 import '../widgets/heart_button.dart';
 import 'queue_screen.dart';
 import 'lyrics_screen.dart';
@@ -435,8 +436,9 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                         StreamBuilder<PlaybackState>(
                                           stream: audioHandler.playbackState,
                                           builder: (context, pbSnap) {
-                                            final isError = pbSnap.data
-                                                    ?.processingState ==
+                                            final processingState = pbSnap
+                                                .data?.processingState;
+                                            final isError = processingState ==
                                                 AudioProcessingState.error;
                                             if (isError) {
                                               return SizedBox(
@@ -454,12 +456,36 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                                 ),
                                               );
                                             }
-                                            return AnimatedPlayButton(
-                                              isPlaying: isPlaying,
+                                            // NEW (2026-09-16, v15): gaana
+                                            // change hote hi ye button turant
+                                            // dikhta tha lekin player abhi
+                                            // naya source load kar raha
+                                            // hota tha (timestamp 00:00 pe
+                                            // atka rehta) — isi beech user
+                                            // tap kar deta to play/pause
+                                            // state inconsistent ho jaati
+                                            // thi. Ab loading/buffering ke
+                                            // time button ke around ek
+                                            // ghumta hua ring dikhta hai aur
+                                            // uske taps bhi block ho jaate
+                                            // hain jab tak naya gaana ready
+                                            // na ho jaaye.
+                                            final isLoading = processingState ==
+                                                    AudioProcessingState
+                                                        .loading ||
+                                                processingState ==
+                                                    AudioProcessingState
+                                                        .buffering;
+                                            return LoadingRing(
+                                              isLoading: isLoading,
                                               size: 70,
-                                              onTap: () => isPlaying
-                                                  ? audioHandler.pause()
-                                                  : audioHandler.play(),
+                                              child: AnimatedPlayButton(
+                                                isPlaying: isPlaying,
+                                                size: 70,
+                                                onTap: () => isPlaying
+                                                    ? audioHandler.pause()
+                                                    : audioHandler.play(),
+                                              ),
                                             );
                                           },
                                         ),
