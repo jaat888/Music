@@ -14,3 +14,12 @@
 # NewPipeExtractor ke actual usage me ye code-path chalta bhi nahi. Isliye
 # R8 ko ye missing classes safely ignore karne do, warn/fail mat karo.
 -dontwarn java.beans.**
+
+# Rhino ka optimizer (org.mozilla.javascript.optimizer.Bootstrapper waghera)
+# JDK 9+ ke jdk.dynalink.* invokedynamic-linking classes ko reference karta
+# hai (java.lang.invoke.CallSite bootstrap ke liye) — ye desktop-JDK-only
+# classes Android/ART pe exist hi nahi karte, aur bytecode-generation wala
+# ye optimizer code-path NewPipeExtractor me chalta bhi nahi. Isliye
+# java.beans.** ki tarah hi, R8 ko in missing classes pe safely warn/fail
+# mat karne do.
+-dontwarn jdk.dynalink.**
