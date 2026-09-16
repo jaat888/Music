@@ -1,5 +1,20 @@
 # SurSathi — Notes / Known Issues
 
+## ⚠️ GPL-3.0 LICENSE WARNING (added 2026-09-16, v4) — READ BEFORE PUBLISHING
+`newpipeextractor_dart` (ab primary audio backend) is GPL-3.0, kyunki ye
+GPL-3.0 NewPipeExtractor (Java) library ko link karta hai. **Iska matlab:
+poori app ab GPL-3.0 ke tahat aati hai** agar tum ise kisi ko distribute
+karte ho (Play Store, APK sharing, kuch bhi) — GPL-3.0 copyleft hai, isliye
+poore app ka source code publicly available karna legally zaroori ho jaata
+hai. Agar app closed-source rakhni hai:
+- Ya to `newpipeextractor_dart` hata do (wapas sirf youtube_explode_dart +
+  Piped backup pe niर्भर, jo abhi kam reliable hain — dekh youtube_service.dart
+  ke comments), ya
+- App ko khud GPL-3.0 ke tahat open-source publish karo, ya
+- Koi non-copyleft alternative dhoondo.
+Ye purely legal/licensing decision hai, code fix nahi — khud decide karo
+kaunsa tradeoff chahiye.
+
 ## RESOLVED IN BATCH 15
 - assets/ folder missing build fail de raha tha — pubspec me comment kar diya
 - Android scaffold incomplete tha — build.yml me flutter create step add

@@ -51,6 +51,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:youtube_explode_dart/solvers.dart';
 import 'package:dart_ytmusic_api/yt_music.dart';
+import 'package:newpipeextractor_dart/newpipeextractor_dart.dart' as npe;
 
 import '../db/download_db.dart';
 import '../models/song.dart';
@@ -135,7 +136,7 @@ class YoutubeService {
   // youtube_explode_dart client — lazily banta hai, ek baar bante hi
   // reuse hota hai (naya banane me Deno solver dobara init karna padega).
   YoutubeExplode? _yt;
-  Future<YoutubeExplode> _getYt() async {
+  Future<YoutubeExplode> _getYt({void Function(String status)? onProgress}) async {
     final existing = _yt;
     if (existing != null) return existing;
     YoutubeExplode created;
@@ -146,7 +147,13 @@ class YoutubeService {
       // Deno device pe na ho to bhi chalta hai — thoda kam reliable
       // (kuch videos signature-deciphering maangte hain), but crash nahi
       // hota.
+      // BUG FIX (2026-09-16, v3): pehle ye sirf print() hoti thi, jo
+      // device UI (debug screen) pe kabhi nahi dikhti thi — sirf logcat
+      // me. Ab onProgress se bhi bhejte hain taaki debug screen pe pata
+      // chale ki Deno solver hi nahi ban paya (common signature-decipher
+      // failure ka root cause).
       print('YT: Deno JS solver init nahi hua, bina solver ke aage: $e');
+      onProgress?.call('Deno JS solver init FAILED (bina solver aage): $e');
       created = YoutubeExplode();
     }
     _yt = created;
@@ -281,14 +288,90 @@ class YoutubeService {
     }
   }
 
-  // ---- Layer 1: seedha YouTube se (youtube_explode_dart) ----
+  // ---- Layer 1 (PRIMARY, 2026-09-16 v4): NewPipeExtractor ----
+  // Ye asli NewPipe app wali extraction hai (Java library, Dart se
+  // flutter_inappwebview ke through wrap ki gayi). youtube_explode_dart se
+  // zyada reliable hai kyunki NewPipeExtractor ki community bahut badi hai
+  // aur YouTube ke changes ke baad zyada tezi se patch aata hai (dekh
+  // pubspec.yaml me GPL-3.0 license warning bhi).
+  Future<_AudioStream?> _audioViaNewPipe(
+    String videoId, {
+    void Function(String status)? onProgress,
+  }) async {
+    final url = 'https://www.youtube.com/watch?v=$videoId';
+    try {
+      onProgress?.call('Resolving via NewPipeExtractor...');
+      final video = await npe.VideoExtractor.getStream(url)
+          .timeout(const Duration(seconds: 30));
+
+      final info = video.videoInfo;
+      final audio = video.audioWithHighestQuality ??
+          (video.audioOnlyStreams.isNotEmpty
+              ? video.audioOnlyStreams.first
+              : null);
+      if (audio == null || audio.url == null || audio.url!.isEmpty) {
+        onProgress?.call('NewPipeExtractor: no audio-only stream, trying muxed...');
+        final muxed = video.videoStreams.isNotEmpty ? video.videoStreams.first : null;
+        if (muxed == null || muxed.url == null || muxed.url!.isEmpty) {
+          onProgress?.call('NewPipeExtractor: no usable stream at all');
+          return null;
+        }
+        final v = await _verifyPlayable(muxed.url!);
+        onProgress?.call('  -> ${v.ok ? "OK" : "FAIL"} (${v.detail})');
+        if (!v.ok) return null;
+        return _AudioStream(
+          url: muxed.url!,
+          format: (muxed.formatSuffix ?? 'mp4').toLowerCase(),
+          title: info.name ?? 'Unknown',
+          author: info.uploaderName ?? 'Unknown Artist',
+          thumb: info.thumbnails.isNotEmpty ? info.thumbnails.last : '',
+          duration: info.length ?? 0,
+        );
+      }
+
+      onProgress?.call('Checking NewPipe audio stream (${audio.averageBitrate}kbps)...');
+      final v = await _verifyPlayable(audio.url!);
+      onProgress?.call('  -> ${v.ok ? "OK" : "FAIL"} (${v.detail})');
+      if (!v.ok) return null;
+
+      return _AudioStream(
+        url: audio.url!,
+        format: (audio.formatSuffix ?? 'm4a').toLowerCase(),
+        title: info.name ?? 'Unknown',
+        author: info.uploaderName ?? 'Unknown Artist',
+        thumb: info.thumbnails.isNotEmpty ? info.thumbnails.last : '',
+        duration: info.length ?? 0,
+      );
+    } on npe.ExtractorException catch (e) {
+      // Har exception type ka apna clear reason hai (README ke mutabik) —
+      // isse debug screen pe exact pata chalega, "generic fail" nahi.
+      final detail = switch (e) {
+        npe.BadUrlException() => 'Invalid URL: ${e.message}',
+        npe.FatalFailureException() => 'YouTube API change (fatal): ${e.message}',
+        npe.TransientFailureException() => 'YouTube-side temp error: ${e.message}',
+        npe.RequestLimitExceededException() => 'Rate limited: ${e.message}',
+        npe.ReCaptchaRequiredException() => 'CAPTCHA required at ${e.challengeUrl}',
+        npe.StreamIsNullException() => 'No stream available: ${e.message}',
+        _ => e.toString(),
+      };
+      print('NewPipeExtractor failed for $videoId: $detail');
+      onProgress?.call('NewPipeExtractor FAILED: $detail');
+      return null;
+    } catch (e) {
+      print('NewPipeExtractor failed (unexpected) for $videoId: $e');
+      onProgress?.call('NewPipeExtractor FAILED (unexpected): $e');
+      return null;
+    }
+  }
+
+  // ---- Layer 2: seedha YouTube se (youtube_explode_dart) ----
   Future<_AudioStream?> _audioViaExplode(
     String videoId, {
     void Function(String status)? onProgress,
   }) async {
     try {
       onProgress?.call('Resolving via YouTube...');
-      final yt = await _getYt();
+      final yt = await _getYt(onProgress: onProgress);
 
       // Metadata (title/author/thumb/duration) — best-effort, na mile to
       // bhi audio resolve karna try karte hain.
@@ -317,9 +400,24 @@ class YoutubeService {
       // hang risk. 30s ke baad TimeoutException throw hogi, jo neeche
       // wale catch(e) me pakdi jaake Piped backup layer try karega
       // (poori flow hang nahi hogi).
-      final manifest = await yt.videos.streams
-          .getManifest(videoId, ytClients: _ytClients)
-          .timeout(const Duration(seconds: 30));
+      //
+      // BUG FIX (2026-09-16, v3): getManifest() ka exception pehle seedha
+      // bahar wale catch(e) me chala jaata tha jo sirf print() karta tha
+      // (onProgress kabhi nahi bulata tha) — isliye debug screen pe
+      // "Resolving via YouTube..." ke turant baad "YouTube direct
+      // failed" aa jaata tha, beech ka ASLI error (403? PoToken? no
+      // streams? DNS?) kabhi dikhta hi nahi tha. Ab apna try/catch hai
+      // jo exact error onProgress se dikhata hai.
+      StreamManifest manifest;
+      try {
+        manifest = await yt.videos.streams
+            .getManifest(videoId, ytClients: _ytClients)
+            .timeout(const Duration(seconds: 30));
+      } catch (e) {
+        print('YT explode: getManifest failed for $videoId: $e');
+        onProgress?.call('getManifest FAILED: $e');
+        return null;
+      }
 
       String fmt(Object container) => container.toString().toLowerCase();
 
@@ -367,14 +465,21 @@ class YoutubeService {
       }
 
       print('YT explode: sab audio-only aur muxed candidates fail ho gaye ($videoId)');
+      onProgress?.call('YouTube direct: sab streams fail (verify se pehle URL mila tha, fetch fail hua)');
       return null;
     } catch (e) {
+      // BUG FIX (2026-09-16, v3): ye catch pehle sirf print() karta tha —
+      // debug screen pe kabhi nahi dikhta tha kyun explode fail hua
+      // (video.get()/getManifest() ke alawa koi aur unexpected exception,
+      // jaise YoutubeExplode() init hi fail ho jaye). Ab onProgress se
+      // exact error text dikhta hai.
       print('YT explode failed for $videoId: $e');
+      onProgress?.call('YouTube direct FAILED (unexpected): $e');
       return null;
     }
   }
 
-  // ---- Layer 2: Piped public instances (BACKUP, free extra try) ----
+  // ---- Layer 3: Piped public instances (BACKUP, free extra try) ----
   Future<_AudioStream?> _audioViaPipedBackup(
     String videoId, {
     void Function(String status)? onProgress,
@@ -499,6 +604,9 @@ class YoutubeService {
     } catch (e) {
       print('YT id-check: skip kiya, error: $e');
     }
+    final viaNewPipe = await _audioViaNewPipe(resolvedId, onProgress: onProgress);
+    if (viaNewPipe != null) return viaNewPipe;
+
     final viaExplode =
         await _audioViaExplode(resolvedId, onProgress: onProgress);
     if (viaExplode != null) return viaExplode;

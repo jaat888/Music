@@ -37,6 +37,26 @@ Future<void> initAudioHandler() async {
 class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   final AudioPlayer player = AudioPlayer();
 
+  // BUG FIX (2026-09-16, v5): "latest request wins" token. User jab jaldi-
+  // jaldi gaane badalta hai (ya bahut saare songs test karta hai), har tap
+  // playWithRetry()/playFromFile() ko call karta hai — ye sab background
+  // me PARALLEL chalte the, koi bhi cancel nahi hota tha. Jo bhi request
+  // sabse aakhir me (kabhi bhi, kisi bhi order me) complete hoti thi, wahi
+  // mediaItem/playbackState ko overwrite kar deti thi — chahe user tab tak
+  // 3-4 aur gaane aage badh chuka ho. Isi wajah se: play/pause button
+  // glitch (stale request ne abhi playing:true/false flip kar diya),
+  // notification kabhi controls na dikhana (rapid state churn se
+  // audio_service ka Android notification confuse ho jaata), aur agar
+  // user bahut test kare to sab requests background me load hote rehte —
+  // lag hota hai kyunki koi bhi cancel nahi hoti.
+  //
+  // Fix: har naya playWithRetry/playFromFile call apna unique token leta
+  // hai (`++_playToken`). Har await ke baad check hota hai ki token abhi
+  // bhi "latest" hai ki nahi — agar koi naya request beech me aa chuka hai
+  // (matlab _playToken aage badh chuka hai), to ye purana request chup-
+  // chaap return ho jaata hai, kuch bhi overwrite nahi karta.
+  int _playToken = 0;
+
   // BUG FIX: pehle koi user-facing feedback nahi tha jab saare YouTube
   // clients fail ho jaate the (e.g. lambi "Full Album/Mix" compilation
   // videos, ya region/age-restricted videos jinka audio-only stream
@@ -133,6 +153,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> stop() async {
+    _playToken++; // koi bhi pending stale resolve ab kuch overwrite nahi karega
     await player.stop();
     await super.stop();
   }
@@ -176,14 +197,19 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // ---------------- Custom playback methods ----------------
 
   // Streaming URL se seedha play karo (YouTube stream)
-  Future<void> playSong(Song song, String url) async {
+  Future<void> playSong(Song song, String url) => _playSong(song, url, ++_playToken);
+
+  Future<void> _playSong(Song song, String url, int token) async {
+    if (token != _playToken) return; // ek naya request already aa chuka hai
     mediaItem.add(_toMediaItem(song));
     try {
       await player.setUrl(url);
+      if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       await player.play();
       // Cache background me ho jaaye — playback ruke bina
       unawaited(_autoCacheInBackground(song, url));
     } catch (e) {
+      if (token != _playToken) return;
       // URL kharab nikla — processing state error kar do, UI ko pata chal jaaye
       playbackState.add(
         playbackState.value.copyWith(
@@ -207,6 +233,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // playbackState broadcast karte hain taaki mini player/full player turant
   // dikhe aur spinner/loading state UI me nazar aaye.
   Future<void> playWithRetry(Song song) async {
+    final token = ++_playToken;
     mediaItem.add(_toMediaItem(song));
     playbackState.add(
       playbackState.value.copyWith(
@@ -217,6 +244,12 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     );
 
     for (var attempt = 1; attempt <= 3; attempt++) {
+      // BUG FIX (2026-09-16, v5): agar is dauraan user ne koi aur gaana
+      // tap kar diya (_playToken aage badh gaya), to ye purana attempt
+      // chup-chaap ruk jaata hai — na error dikhata, na retry karta, na
+      // kisi cheez ko overwrite karta.
+      if (token != _playToken) return;
+
       // BUG FIX: pehle yahan koi timeout nahi tha, aur youtube_service.dart
       // ke andar bhi network calls unbounded the — agar koi request stall
       // ho jaaye to poora player hamesha ke liye "loading" pe atka reh
@@ -240,15 +273,17 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         print('playWithRetry: attempt $attempt timed out after 45s');
         url = null;
       }
+      if (token != _playToken) return; // resolve hone tak user aage badh chuka
       if (url != null) {
-        await playSong(song, url);
+        await _playSong(song, url, token);
         return;
       }
       if (attempt < 3) {
         await Future.delayed(Duration(milliseconds: 500 * attempt));
       }
     }
-    // Teeno attempts fail — error state
+    // Teeno attempts fail — error state (sirf agar ye ab bhi latest request hai)
+    if (token != _playToken) return;
     playbackState.add(
       playbackState.value.copyWith(
         processingState: AudioProcessingState.error,
@@ -263,11 +298,14 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
   // Local file se play karo — downloaded ya already-cached songs ke liye
   Future<void> playFromFile(Song song, String filePath) async {
+    final token = ++_playToken;
     mediaItem.add(_toMediaItem(song.copyWith(filePath: filePath)));
     try {
       await player.setFilePath(filePath);
+      if (token != _playToken) return; // dauraan koi naya tap aa gaya
       await player.play();
     } catch (e) {
+      if (token != _playToken) return;
       playbackState.add(
         playbackState.value.copyWith(
           processingState: AudioProcessingState.error,

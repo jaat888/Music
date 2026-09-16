@@ -6,7 +6,11 @@ plugins {
 
 android {
     namespace = "com.sursathi.sursathi"
-    compileSdk = flutter.compileSdkVersion
+    // NewPipeExtractor_Dart (v2, added 2026-09-16) requires compileSdk 35+.
+    // flutter.compileSdkVersion usually already covers this on a current
+    // Flutter install, but pinned explicitly here so the build doesn't
+    // silently fail on an older Flutter SDK.
+    compileSdk = 35
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

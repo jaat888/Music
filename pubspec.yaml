@@ -35,11 +35,32 @@ dependencies:
   audio_session: ^0.1.18
 
   # ---------- YouTube backend (youtube_service.dart use karega) ----------
-  # Primary: youtube_explode_dart (seedha YouTube se) + dart_ytmusic_api
-  # (music-specific search). Piped ab sirf free backup layer hai (http se
-  # hi chal jaata hai) — Sept 2026 me poore Piped ecosystem ke public
-  # instances largely down hain, isliye primary source ke roop me use
-  # karna reliable nahi tha (dekh Test-music repo ki test logs).
+  # PRIMARY (2026-09-16, v4): newpipeextractor_dart — asli NewPipe app
+  # (F-Droid, still receiving updates as of Aug 2026) jis extractor library
+  # (NewPipeExtractor, Java) ko use karta hai, usi ka Dart/Flutter wrapper.
+  # youtube_explode_dart (neeche) abhi GitHub pe khud iska ek OPEN,
+  # UNRESOLVED issue hai (#387 "Video and audio streams return 403",
+  # Sept 2026 tak fix nahi hua) — chhoti team, YouTube ke anti-bot changes
+  # ke against slow. NewPipeExtractor ki team/community bahut bada hai aur
+  # zyada tezi se patch karti hai, isliye zyada reliably chalta hai abhi.
+  #
+  # *** LICENSE WARNING: newpipeextractor_dart khud GPL-3.0 hai (kyunki
+  # ye GPL-3.0 NewPipeExtractor ko link karta hai). Iska matlab: is app ko
+  # bhi GPL-3.0 ke tahat distribute karna zaroori hai (source code publicly
+  # available karna padega) agar ye publish/distribute hoti hai. Agar
+  # closed-source rakhna hai to ye dependency use nahi kar sakte — is case
+  # me neeche wale youtube_explode_dart/Piped layers hi bachte hain (jo
+  # abhi kam reliable hain), ya koi non-GPL alternative dhoondhna hoga. ***
+  #
+  # Android-only, minSdk 22+, compileSdk 35+ chahiye (android/app/build.gradle
+  # me set kar diya). Requires core library desugaring (already enabled).
+  newpipeextractor_dart: ^2.0.2
+  flutter_inappwebview: ^6.1.5
+
+  # Backup layers: youtube_explode_dart (seedha YouTube se, dart_ytmusic_api
+  # ke saath search ke liye) aur Piped public instances — dono abhi
+  # unreliable hain (Sept 2026), isliye ab primary nahi, sirf free extra
+  # try hain agar NewPipeExtractor bhi fail ho jaye.
   http: ^1.2.2
   youtube_explode_dart: ^3.1.0
   dart_ytmusic_api: ^1.3.7
