@@ -463,10 +463,23 @@ class YoutubeService {
     final existing = _yt;
     if (existing != null) return existing;
     YoutubeExplode created;
-    try {
-      final solver = await DenoEJSSolver.init();
-      created = YoutubeExplode(jsSolver: solver);
-    } catch (e) {
+    // BUG FIX (2026-09-17): Android 10+ (API 29+) W^X restriction ki wajah
+    // se `code_cache/` jaisi app-writable directory se koi bhi extracted
+    // binary exec nahi ho sakta — Deno subprocess spawn hamesha
+    // "Permission denied" dega, ye device-specific nahi, platform-level
+    // hai (fix sirf deno binary ko jniLibs/*.so ke roop me APK me bundle
+    // karke hota, jo Dart-side change nahi hai aur APK size ~50-100MB
+    // badha deta). NewPipe native layer (Layer 1) already JVM ke andar hi
+    // signature-decipher kar leta hai, isliye Deno solver Android pe
+    // try hi nahi karte — har app-start pe ek guaranteed-fail subprocess
+    // spawn aur confusing log spam bachta hai.
+    if (Platform.isAndroid) {
+      created = YoutubeExplode();
+    } else {
+      try {
+        final solver = await DenoEJSSolver.init();
+        created = YoutubeExplode(jsSolver: solver);
+      } catch (e) {
       // Deno device pe na ho to bhi chalta hai — thoda kam reliable
       // (kuch videos signature-deciphering maangte hain), but crash nahi
       // hota.
@@ -475,9 +488,10 @@ class YoutubeService {
       // me. Ab onProgress se bhi bhejte hain taaki debug screen pe pata
       // chale ki Deno solver hi nahi ban paya (common signature-decipher
       // failure ka root cause).
-      print('YT: Deno JS solver init nahi hua, bina solver ke aage: $e');
-      onProgress?.call('Deno JS solver init FAILED (bina solver aage): $e');
-      created = YoutubeExplode();
+        print('YT: Deno JS solver init nahi hua, bina solver ke aage: $e');
+        onProgress?.call('Deno JS solver init FAILED (bina solver aage): $e');
+        created = YoutubeExplode();
+      }
     }
     _yt = created;
     return created;
