@@ -1226,12 +1226,48 @@ class YoutubeService {
     } catch (e) {
       print('YT id-check: skip kiya, error: $e');
     }
-    final viaNewPipe = await _audioViaNewPipe(resolvedId, onProgress: onProgress);
-    if (viaNewPipe != null) return viaNewPipe;
-
+    // BUG FIX (2026-09-16, Batch 21 — "kuch gaane HAMESHA crash/fail hote
+    // hain, kuch HAMESHA chal jaate hain" — user ne khud confirm kiya ki
+    // ye per-song CONSISTENT hai, rapid-tap ya "abhi khatam hua" jaisi
+    // timing pe depend nahi karta. Iska matlab #49/#51 (overlap) wala
+    // mutex fix sahi hai lekin isse ALAG ek doosra root cause bhi hai:
+    // ek SINGLE (non-overlapping) NewPipeExtractor call bhi kuch specific
+    // videos pe crash kar sakta hai — mutex sirf DO calls ko ek saath
+    // chalne se rokta hai, ek akela call agar khud crash kare (kisi
+    // specific video ke signature-cipher/JS-challenge shape ki wajah se)
+    // to mutex us se bacha hi nahi sakta.
+    // Context: `newpipeextractor_dart` (pubspec me pinned) khud bahut NAYA
+    // aur chhota package hai (pehla release ~mid-2026, pub.dev par sirf 2
+    // likes/~150 downloads total — matlab bahut kam real-world testing) —
+    // OuterTune/OpenTune jaisi established Kotlin YT Music apps NewPipe-
+    // Extractor ko seedha (native Kotlin/Java) use karti hain, is chhote
+    // Flutter-wrapper se nahi, aur unka apna alag actively-maintained
+    // innertube module hai — isliye unke paas ye specific per-video native
+    // crash class kam dikhti hai. Yahan wo option nahi hai (Flutter app
+    // hai), lekin jitna kam is package pe depend karein utna crash-surface
+    // kam.
+    // Fix: order badal diya — pehle `_audioViaExplode()` (youtube_
+    // explode_dart, pure Dart, koi native WebView nahi, isliye kabhi
+    // process-level crash nahi karega) try karo. Sirf agar wo fail ho
+    // (null return — YouTube ke bot-detection se URL na mile, jaisa header
+    // comment me already documented hai) tab NewPipeExtractor (WebView-
+    // based, behtar bypass-rate lekin crash-risk wala) fallback ki tarah
+    // try karo. Isse jitne bhi gaane explode se seedha resolve ho jaate
+    // hain, unke liye crash-prone path kabhi chhua hi nahi jaata; jo
+    // explode pe fail hote hain (asli "bypass zaroori hai" cases), unhi ke
+    // liye NewPipeExtractor ka risk accept kiya jaata hai.
+    // NOTE: is se stream-fetch SUCCESS RATE thoda kam ho sakta hai kuch
+    // videos ke liye (explode occasionally NewPipe se kam reliable hai,
+    // dekho file-header comment) — trade-off jaanbujhke hai (crash >>
+    // ek retry/error message, jaisa mutex fix me bhi "safety > speed"
+    // tradeoff liya gaya tha).
     final viaExplode =
         await _audioViaExplode(resolvedId, onProgress: onProgress);
     if (viaExplode != null) return viaExplode;
+
+    final viaNewPipe = await _audioViaNewPipe(resolvedId, onProgress: onProgress);
+    if (viaNewPipe != null) return viaNewPipe;
+
     return _audioViaPipedBackup(resolvedId, onProgress: onProgress);
   }
 

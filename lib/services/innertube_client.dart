@@ -134,9 +134,26 @@ class InnertubeClient {
   Uri _endpoint(String name) =>
       Uri.parse('$_baseUrl/$name?key=$_apiKey&prettyPrint=false');
 
-  // SELF-HEAL (NEW, v20): agar hardcoded key/version kabhi stale ho jaaye,
+  // BUG FIX (2026-09-16, Batch 21 — "search me purane/generic gaane"
+  // continue hone ka ek aur possible root cause): pehle _refreshConfig()
+  // sirf REACTIVE tha — sirf tab chalta tha jab request 400/403 se fail ho
+  // jaaye. Lekin agar YouTube kisi stale clientVersion ko seedha reject
+  // (400/403) nahi karta, balki bas ALAG/kam-accurate (generic, non-music-
+  // ranked) results 200 OK ke saath de deta hai — jo iske hardcoded
+  // default (`1.20241201.01.00`, ~21 mahine purana) ke saath bilkul ho
+  // sakta hai — to self-heal kabhi trigger hi nahi hota, aur "purane
+  // gaane" wali complaint bina kisi error/signal ke chalti rehti. Real
+  // YT Music clients (OpenTune/OuterTune jaisi Kotlin apps) is risk se
+  // bachte hain kyunki unka innertube module actively maintained hota hai
+  // (dependency-bot se regularly update). Yahan wo possible nahi (koi
+  // build-time codegen nahi), isliye PROACTIVE bana diya: pehli hi call
+  // pe (chahe wo successful ho ya fail), config ek baar zaroor refresh ho
+  // jaata hai — taaki purane hardcoded default pe kabhi bharosa na karna
+  // pade, bina kisi error ka wait kiye.
+  //
+  // SELF-HEAL (v20): agar hardcoded key/version kabhi stale ho jaaye,
   // seedha music.youtube.com ke HTML se live values nikal lete hain — jaisa
-  // ytmusicapi/ArchiveTune jaisi libraries khud karti hain. Sirf EK baar
+  // ytmusicapi/OpenTune jaisi libraries khud karti hain. Sirf EK baar
   // try hota hai per app-session (_refreshedConfigOnce) — baar baar
   // music.youtube.com ki poori HTML download karna mehenga hai, aur agar
   // ye bhi fail ho gaya to matlab network hi down hai, dobara try karne se
@@ -180,6 +197,11 @@ class InnertubeClient {
     Map<String, dynamic> extraBody, {
     bool isRetry = false,
   }) async {
+    // Proactive refresh (dekho _refreshConfig() ka comment) — session ki
+    // pehli hi call se pehle ek baar zaroor try karo, error ka wait mat
+    // karo. `_refreshConfig()` khud `_refreshedConfigOnce` se guarded hai,
+    // isliye ye har request pe dobara HTML download nahi karega.
+    if (!isRetry) await _refreshConfig();
     try {
       final body = {..._context, ...extraBody};
       final res = await _http

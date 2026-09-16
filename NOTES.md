@@ -1,5 +1,61 @@
 # SurSathi — Notes / Known Issues
 
+## Batch 21 (2026-09-16) — User re-report on v23-fixed: "kuch bhi nahi badla"
+
+User ne v23-fixed test karke bataya: (a) crash ab bhi hota hai, LEKIN
+per-song CONSISTENT hai (ek gaana hamesha chalta hai, doosra hamesha
+crash/fail) — matlab Batch 20 ka overlap-mutex fix (#49/#51, jo already
+verified present hai is zip me) apni jagah sahi hai, bas ye ALAG root
+cause hai jise wo fix cover nahi karta; (b) search me abhi bhi purane/
+generic gaane; (c) YouTube-se-fetch (download bhi, playback bhi) theek se
+kaam nahi kar raha. Fresh build confirm kiya gaya (purana APK/cache wali
+possibility nahi hai).
+
+**Research kiya gaya (OuterTune/OpenTune — established Kotlin YT Music
+clients — kya use karte hain):** Ye apps NewPipeExtractor ko seedha native
+Kotlin/Java se call karti hain (koi Flutter-jaisa WebView-wrapper plugin
+nahi) aur apna khud ka actively-maintained `innertube` Kotlin module rakhti
+hain. Isi research me pata chala ki humara `newpipeextractor_dart`
+(pubspec me `^2.0.2` pinned) khud bahut naya/chhota package hai (pehla
+release-family ~mid-2026, pub.dev par sirf ~2 likes/~150 downloads total —
+kam real-world testing) — matlab per-video native crash bugs iske andar
+already likely hain jo Dart-side try/catch se kabhi pakde nahi ja sakte
+(dekho pehle se documented "native process-level crash" note upar). Iski
+apni changelog (2.0.1) confirm karti hai ki YouTube "SABR enforcement" ke
+karan pehle stream-extraction reject kar raha tha — matlab pubspec ka
+`^2.0.2` constraint already sahi/latest version maangta hai jisme ye
+upstream fix included hai; agar phir bhi fetch fail ho raha hai, to
+package ki apni immaturity (kuch specific videos pe) sabse zyada likely
+wajah hai, na ki version-pinning.
+
+**Fix #1 (`youtube_service.dart`, crash + fetch dono):**
+`_resolveAudioStream()` ka order badla — pehle `_audioViaExplode()` (pure
+Dart, koi native WebView nahi, isliye process-level crash NAHI kar sakta)
+try hota hai, `_audioViaNewPipe()` (WebView-based, crash-risk) ab sirf
+FALLBACK hai jab explode fail ho. Isse jo bhi gaane explode se resolve ho
+jaate hain (crash-prone path chhua hi nahi jaata) unke crash/fetch-fail
+dono khatam ho jaana chahiye; jo explode pe fail hote hain unhi ke liye
+NewPipeExtractor ka crash-risk ab bhi accept kiya ja raha hai (trade-off:
+thoda kam success-rate kuch videos pe, crash na hone ke badle me).
+
+**Fix #2 (`innertube_client.dart`, purane/generic search):**
+`_refreshConfig()` (key/clientVersion self-heal) pehle sirf REACTIVE tha
+(sirf HTTP 400/403 pe chalta tha). Risk: agar YouTube stale clientVersion
+(hardcoded default ~21 mahine purana) ko seedha reject na kare, bas
+kam-accurate/generic 200-OK results de de, to self-heal kabhi trigger hi
+nahi hota — "purane gaane" bina kisi error signal ke chalte rehte. Ab
+`_post()` session ki PEHLI call se pehle hi (chahe wo call fail ho ya
+success) ek baar proactively refresh try karta hai.
+
+**Test on real device (zaroori):** Fix #1 crash ke liye sabse important
+hai — same "hamesha crash hone wala" gaana dobara try karna. Agar ab bhi
+crash ho (explode bhi us specific video pe kisi wajah se NewPipe tak
+pahunch jaata hai), logcat capture karna zaroori hoga real root cause
+isolate karne ke liye — is level ka native crash bina device log dekhe
+guess karna mushkil hai.
+
+---
+
 ## ⚠️ GPL-3.0 LICENSE WARNING (added 2026-09-16, v4) — READ BEFORE PUBLISHING
 `newpipeextractor_dart` (ab primary audio backend) is GPL-3.0, kyunki ye
 GPL-3.0 NewPipeExtractor (Java) library ko link karta hai. **Iska matlab:
