@@ -376,12 +376,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     if (token != _playToken) return; // ek naya request already aa chuka hai
     mediaItem.add(_toMediaItem(song));
     try {
-      await player.setAudioSource(
-  AudioSource.uri(
-    Uri.parse(url),
-    headers: YoutubeService.cdnHeaders,
-  ),
-);
+      await player.setUrl(url, headers: YoutubeService.cdnHeaders);
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       await player.play();
       // Playback successfully shuru ho gaya — stream-drop retry counter
