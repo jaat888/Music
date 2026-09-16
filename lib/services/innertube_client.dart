@@ -95,9 +95,18 @@ class InnertubeClient {
 
   // Public WEB_REMIX innertube key — YT Music website khud isko browser
   // requests me bhejti hai, koi private secret nahi (ytmusicapi jaisi
-  // open-source libraries me bhi yahi key hardcoded milegi).
-  static const String _apiKey = 'AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30';
-  static const String _clientVersion = '1.20241201.01.00';
+  // open-source libraries me bhi yahi key hardcoded milegi). Ye sirf
+  // STARTING default hai — agar ye kabhi reject ho jaye (YouTube ne
+  // rotate kar diya), `_refreshConfig()` isko live music.youtube.com HTML
+  // se replace kar deta hai (dekho niche) — ArchiveTune/ytmusicapi jaisi
+  // libraries bhi yahi self-heal pattern use karti hain, sirf hardcoded
+  // pe bharosa nahi karti.
+  static const String _defaultApiKey = 'AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30';
+  static const String _defaultClientVersion = '1.20241201.01.00';
+
+  String _apiKey = _defaultApiKey;
+  String _clientVersion = _defaultClientVersion;
+  bool _refreshedConfigOnce = false;
 
   // Music-specific search filters ("params" field) — YT Music website in
   // exact values ko search request me bhejti hai jab user "Songs" /
@@ -125,10 +134,52 @@ class InnertubeClient {
   Uri _endpoint(String name) =>
       Uri.parse('$_baseUrl/$name?key=$_apiKey&prettyPrint=false');
 
+  // SELF-HEAL (NEW, v20): agar hardcoded key/version kabhi stale ho jaaye,
+  // seedha music.youtube.com ke HTML se live values nikal lete hain — jaisa
+  // ytmusicapi/ArchiveTune jaisi libraries khud karti hain. Sirf EK baar
+  // try hota hai per app-session (_refreshedConfigOnce) — baar baar
+  // music.youtube.com ki poori HTML download karna mehenga hai, aur agar
+  // ye bhi fail ho gaya to matlab network hi down hai, dobara try karne se
+  // kuch nahi badlega (us case me existing fallback layers sambhal lenge).
+  Future<bool> _refreshConfig() async {
+    if (_refreshedConfigOnce) return false;
+    _refreshedConfigOnce = true;
+    try {
+      final res = await _http
+          .get(Uri.parse('https://music.youtube.com'))
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return false;
+      final html = res.body;
+
+      final keyMatch =
+          RegExp(r'"INNERTUBE_API_KEY":"([^"]{20,50})"').firstMatch(html);
+      final verMatch = RegExp(r'"INNERTUBE_CLIENT_VERSION":"([^"]+)"')
+          .firstMatch(html);
+
+      var changed = false;
+      if (keyMatch != null) {
+        _apiKey = keyMatch.group(1)!;
+        changed = true;
+      }
+      if (verMatch != null) {
+        _clientVersion = verMatch.group(1)!;
+        changed = true;
+      }
+      if (changed) {
+        print('INNERTUBE: config refreshed from music.youtube.com HTML');
+      }
+      return changed;
+    } catch (e) {
+      print('INNERTUBE config refresh FAILED: $e');
+      return false;
+    }
+  }
+
   Future<Map<String, dynamic>?> _post(
     String endpoint,
-    Map<String, dynamic> extraBody,
-  ) async {
+    Map<String, dynamic> extraBody, {
+    bool _isRetry = false,
+  }) async {
     try {
       final body = {..._context, ...extraBody};
       final res = await _http
@@ -146,6 +197,13 @@ class InnertubeClient {
           .timeout(const Duration(seconds: 15));
       if (res.statusCode != 200) {
         print('INNERTUBE $endpoint: HTTP ${res.statusCode}');
+        // Key/version stale hone ka classic sign 400/403 hota hai — ek
+        // baar live config refresh karke retry karo (dekho _refreshConfig).
+        if (!_isRetry &&
+            (res.statusCode == 400 || res.statusCode == 403) &&
+            await _refreshConfig()) {
+          return _post(endpoint, extraBody, _isRetry: true);
+        }
         return null;
       }
       final decoded = jsonDecode(res.body);
