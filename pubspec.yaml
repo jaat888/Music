@@ -35,11 +35,14 @@ dependencies:
   audio_session: ^0.1.18
 
   # ---------- YouTube backend (youtube_service.dart use karega) ----------
-  # Piped (free, public, self-maintained-nahi-karna-padta) REST API use ho
-  # raha hai — koi YouTube client fake nahi karna padta, isliye
-  # youtube_explode_dart wale client-block issues yahan nahi aate.
-  # Bas plain HTTP calls chahiye.
+  # Primary: youtube_explode_dart (seedha YouTube se) + dart_ytmusic_api
+  # (music-specific search). Piped ab sirf free backup layer hai (http se
+  # hi chal jaata hai) — Sept 2026 me poore Piped ecosystem ke public
+  # instances largely down hain, isliye primary source ke roop me use
+  # karna reliable nahi tha (dekh Test-music repo ki test logs).
   http: ^1.2.2
+  youtube_explode_dart: ^3.1.0
+  dart_ytmusic_api: ^1.3.7
 
   # ---------- Permissions / device ----------
   permission_handler: ^12.0.0
