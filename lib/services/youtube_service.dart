@@ -64,6 +64,7 @@ import 'package:flutter/services.dart' show MethodChannel, PlatformException;
 import '../db/download_db.dart';
 import '../models/song.dart';
 import 'innertube_client.dart';
+import 'potoken_service.dart';
 import 'storage_service.dart';
 
 // NEW (2026-09-16, v21): YouTube/YT Music jaisa "Filters" (Upload date)
@@ -1012,6 +1013,31 @@ class YoutubeService {
     }
   }
 
+  // ---------------- PoToken attach (2026-09-17, "real fix") ----------------
+  // Har resolved stream URL pe session-bound PoToken `&pot=` query param ki
+  // tarah attach karte hain — dekho potoken_service.dart ke top ka poora
+  // comment (root cause + fix explanation). FAIL-SOFT: PoTokenService kisi
+  // bhi wajah se null de (WebView abhi ready nahi, mint fail, timeout) to
+  // ye function bas ORIGINAL url wapas kar deta hai — koi crash/regression
+  // nahi, app pehle jaisa hi behave karegi.
+  Future<String> _withPoToken(
+    String url, {
+    void Function(String status)? onProgress,
+  }) async {
+    try {
+      final pot =
+          await PoTokenService.instance.getSessionPoToken(onProgress: onProgress);
+      if (pot == null || pot.isEmpty) return url;
+      final uri = Uri.parse(url);
+      final params = Map<String, String>.from(uri.queryParameters)
+        ..['pot'] = pot;
+      return uri.replace(queryParameters: params).toString();
+    } catch (e) {
+      print('PoToken attach failed (ignoring, using original URL): $e');
+      return url;
+    }
+  }
+
   // ---------------- Audio stream resolve (streaming/download dono ke liye) ----------------
 
   // Har candidate URL ko ek chhota real HTTP range-request (~1KB) bhejke
@@ -1117,12 +1143,18 @@ class YoutubeService {
             ? 'NewPipeExtractor: audio-only nahi mila, muxed try...'
             : 'Checking NewPipe audio stream (${raw['bitrate'] ?? '?'}kbps)...',
       );
-      final v = await _verifyPlayable(streamUrl);
+      // NOTE: NewPipeExtractor (native Java lib) khud PoToken support nahi
+      // karti — hum apna mint kiya hua session-token yahan bhi attach try
+      // karte hain (YouTube CDN URL format dono client-paths me similar
+      // hota hai), lekin ye guaranteed nahi ki isse fayda ho (dekho
+      // potoken_service.dart top comment).
+      final urlWithPot = await _withPoToken(streamUrl, onProgress: onProgress);
+      final v = await _verifyPlayable(urlWithPot);
       onProgress?.call('  -> ${v.ok ? "OK" : "FAIL"} (${v.detail})');
       if (!v.ok) return null;
 
       return _AudioStream(
-        url: streamUrl,
+        url: urlWithPot,
         format: ((raw['format'] as String?) ??
                 (kind == 'muxed' ? 'mp4' : 'm4a'))
             .toLowerCase(),
@@ -1208,11 +1240,21 @@ class YoutubeService {
         ..sort((a, b) => b.bitrate.bitsPerSecond.compareTo(a.bitrate.bitsPerSecond));
       for (final s in audioStreams) {
         onProgress?.call('Checking audio stream (${s.bitrate})...');
-        final v = await _verifyPlayable(s.url.toString());
+        // "REAL FIX" (2026-09-17): pehle yahan koi PoToken attach nahi
+        // hota tha — isi wajah se URL "mil jaata" (verify ka 1KB range-
+        // request kabhi-kabhi cold-start data se pass ho jaata hai) lekin
+        // asli playback ke waqt CDN "unverified client" maan ke drop kar
+        // deta tha (dekho sursathi_app_log.txt). Ab session-bound PoToken
+        // (BotGuard se mint, potoken_service.dart) verify se PEHLE hi
+        // attach karte hain, aur wahi (pot-included) URL playback ke liye
+        // bhi return karte hain.
+        final urlWithPot =
+            await _withPoToken(s.url.toString(), onProgress: onProgress);
+        final v = await _verifyPlayable(urlWithPot);
         onProgress?.call('  -> ${v.ok ? "OK" : "FAIL"} (${v.detail})');
         if (v.ok) {
           return _AudioStream(
-            url: s.url.toString(),
+            url: urlWithPot,
             format: fmt(s.container),
             title: title,
             author: author,
@@ -1231,12 +1273,14 @@ class YoutubeService {
         ..sort((a, b) => a.size.totalBytes.compareTo(b.size.totalBytes));
       for (final m in muxedStreams) {
         onProgress?.call('Checking muxed stream (${m.videoQuality})...');
-        final v = await _verifyPlayable(m.url.toString());
+        final urlWithPot =
+            await _withPoToken(m.url.toString(), onProgress: onProgress);
+        final v = await _verifyPlayable(urlWithPot);
         onProgress?.call('  -> ${v.ok ? "OK" : "FAIL"} (${v.detail})');
         if (v.ok) {
           print('YT explode: muxed fallback OK ($videoId), isse audio nikaal ke play karo');
           return _AudioStream(
-            url: m.url.toString(),
+            url: urlWithPot,
             format: fmt(m.container),
             title: title,
             author: author,

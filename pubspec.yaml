@@ -96,6 +96,15 @@ dependencies:
   # ---------- Voice search (mic se search karne ke liye) ----------
   speech_to_text: ^7.0.0
 
+  # ---------- PoToken (BotGuard) minting (2026-09-17, "real fix") ----------
+  # NewPipe layer ke liye pehle hataayi gayi flutter_inappwebview se ALAG/
+  # narrower package — sirf ek chhoti, dedicated, ek-hi-baar-chalne-wali
+  # BotGuard mint flow ke liye (per-track signature solving nahi, jahan
+  # crash mila tha). Official Flutter-team-maintained package hai, isliye
+  # newpipeextractor_dart wale unofficial-wrapper wala crash-risk yahan
+  # kam expected hai. Dekho lib/services/potoken_service.dart.
+  webview_flutter: ^4.10.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -1389,3 +1389,38 @@ replay — ek silent infinite "khatam→replay" loop (har cycle apna naya heavy
 resolve call ke saath). Ab `skipToNext()` pehle check karta hai ki "aakhri
 gaana + repeat off" hai ki nahi — agar hai, seedha `stop()` karta hai,
 replay nahi karta.
+
+---
+
+## 2026-09-17 — PoToken (BotGuard) "real fix" — NEW, UNTESTED
+
+**Root cause (confirmed via `sursathi_app_log.txt`):** stream URL milta tha,
+`just_audio` setUrl() PASS hota tha, lekin kuch second baad hi ExoPlayer
+"Source error" se drop ho jaata tha — classic PoToken-unverified-client
+signature (cold-start data chal jaata hai, phir CDN cut kar deta hai).
+Poore codebase me kahin bhi PoToken (BotGuard proof-of-origin token) mint
+nahi ho raha tha — sirf signature-cipher solving (Deno solver/NewPipe) thi,
+jo alag cheez hai.
+
+**Fix:** naya `lib/services/potoken_service.dart` — hidden WebView
+(`main.dart` me `_PoTokenHost`) `youtube.com` load karke `bgutils-js`
+(CDN se) ke through asli BotGuard Challenge->snapshot->GenerateIT->
+WebPoMinter flow chalata hai, session-bound poToken mint karta hai.
+`youtube_service.dart` me `_withPoToken()` se ye token har explode-resolved
+stream URL (audio-only + muxed) pe `&pot=` param ki tarah attach hota hai,
+verify se pehle.
+
+**STATUS: UNTESTED** — is dev environment me na Flutter SDK hai na network
+(sandboxed container), isliye compile/live-test nahi ho saka. Fail-soft hai
+(mint fail ho to bas pot skip hota hai, purana behavior), isliye worst case
+ye hai ki improvement na ho, crash/regression nahi hona chahiye — lekin
+pehli real build (CI) ke logs zaroor dekhna:
+- Agar Gradle/`flutter pub get` `webview_flutter` resolve/compile na kare
+  (naya dependency hai, pehli baar CI pe chalega).
+- Debug screen / app log me "PoToken: OK (minted, cached)" ya "PoToken:
+  FAILED (...)" dikhna chahiye — FAILED aaye to error text dekh ke aage
+  debug karna (CDN block? bgutils-js API surface badal gaya? visitorData
+  nahi mila?).
+- NewPipeExtractor (native Kotlin) layer isse cover NAHI hota — sirf
+  youtube_explode_dart layer par lagा hai. Piped backup layer bhi jaanbujh
+  kar chhoda gaya hai (proxy hai, apna alag domain/handling ho sakta hai).

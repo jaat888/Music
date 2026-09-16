@@ -421,6 +421,11 @@ shuffle, repeat, sleep timer; Settings (theme, cache limit, notifications);
 heavy animations (stagger, slide, fade, scale, shimmer); splash screen glow
 pulse; onboarding screens.
 
+### 🆕 2026-09-17 — PoToken (BotGuard) real fix (UNTESTED, dekho NOTES.md)
+Naya `lib/services/potoken_service.dart` + `main.dart` me hidden WebView
+host + `webview_flutter` dependency — stream-drop (CDN 403/terminate) ka
+asli fix. Fail-soft hai. Poora detail + testing checklist NOTES.md me.
+
 ## Agle instance ke liye instruction
 Repo me is zip ke andar ki files ko exact isi path structure me copy kar do
 (`lib/...`, `android/...`). Batch 1-15 dobara mat banana — sab complete

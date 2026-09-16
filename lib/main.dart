@@ -6,11 +6,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 import 'services/app_logger.dart';
 import 'services/background_service.dart';
 import 'services/cache_service.dart';
 import 'services/like_service.dart';
+import 'services/potoken_service.dart';
 import 'services/queue_service.dart';
 import 'services/search_history.dart';
 import 'services/theme_service.dart';
@@ -124,6 +126,33 @@ class SurSathiApp extends StatelessWidget {
         home: _startupError != null
             ? _ErrorScreen(error: _startupError!)
             : const _Boot(),
+        // NEW (2026-09-17): PoToken (BotGuard) mint karne wala hidden
+        // WebView — har screen ke upar Stack me 1x1 offstage mount rehta
+        // hai poori app-lifetime, taaki youtube_service.dart jab bhi
+        // PoTokenService.instance.getSessionPoToken() maange, WebView ka
+        // JS engine already chal raha ho (Android WebView bina actual
+        // View ke reliably JS nahi chalata). Dekho potoken_service.dart.
+        builder: (context, child) => Stack(
+          children: [
+            if (child != null) child,
+            const _PoTokenHost(),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PoTokenHost extends StatelessWidget {
+  const _PoTokenHost();
+  @override
+  Widget build(BuildContext context) {
+    return Offstage(
+      offstage: true,
+      child: SizedBox(
+        width: 1,
+        height: 1,
+        child: WebViewWidget(controller: PoTokenService.instance.controller),
       ),
     );
   }
