@@ -19,6 +19,50 @@ class QueueService extends ChangeNotifier {
   bool _shuffle = false;
   SurRepeatMode _repeat = SurRepeatMode.off;
 
+  // ---------------- Radio mode (unlimited auto-refill) ----------------
+  //
+  // NEW (2026-09-16, v19): jab radio mode on hai, queue khatam hone se
+  // pehle hi (last 3 gaane reh jaane par) khud-ba-khud `_radioSupplier`
+  // se agla batch maangta hai aur queue me jod deta hai — isse "radio
+  // unlimited chalta rahe" wala feel milta hai bina QueueService ko
+  // YoutubeService ke baare me kuch jaane (loose coupling — supplier
+  // caller set karta hai).
+  bool _radioMode = false;
+  Future<List<Song>> Function()? _radioSupplier;
+  bool _radioFetching = false;
+
+  bool get radioMode => _radioMode;
+
+  void enableRadioMode(Future<List<Song>> Function() supplier) {
+    _radioMode = true;
+    _radioSupplier = supplier;
+  }
+
+  void disableRadioMode() {
+    _radioMode = false;
+    _radioSupplier = null;
+  }
+
+  void _maybeRefillRadio() {
+    if (!_radioMode || _radioSupplier == null || _radioFetching) return;
+    if (_queue.isEmpty) return;
+    // Aakhri 3 gaano ke andar aa gaye to abhi se agla batch mangwa lo,
+    // taaki gaana khatam hote hote naya batch pehle se ready ho.
+    if (_currentIndex < _queue.length - 3) return;
+
+    _radioFetching = true;
+    _radioSupplier!().then((more) {
+      _radioFetching = false;
+      if (more.isNotEmpty) {
+        _queue.addAll(more);
+        _rebuildShuffleOrder();
+        notifyListeners();
+      }
+    }).catchError((_) {
+      _radioFetching = false;
+    });
+  }
+
   // Shuffle on hone pe ye order use hota hai (original index list)
   List<int> _shuffleOrder = [];
   final _random = Random();
@@ -76,6 +120,7 @@ class QueueService extends ChangeNotifier {
     _queue.clear();
     _currentIndex = -1;
     _shuffleOrder.clear();
+    disableRadioMode();
     notifyListeners();
   }
 
@@ -85,6 +130,9 @@ class QueueService extends ChangeNotifier {
       ..clear()
       ..addAll(songs);
     _currentIndex = songs.isEmpty ? -1 : startIndex.clamp(0, songs.length - 1);
+    // Naya (non-radio) source se poori queue replace ho rahi hai — purana
+    // radio mode yahan carry-forward nahi hona chahiye.
+    disableRadioMode();
     _rebuildShuffleOrder();
     notifyListeners();
   }
@@ -106,6 +154,7 @@ class QueueService extends ChangeNotifier {
       _currentIndex = 0;
     }
     // repeat off aur queue khatam — currentIndex wahi rehta hai, player ruk jayega
+    _maybeRefillRadio();
     notifyListeners();
   }
 

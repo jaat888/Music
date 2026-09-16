@@ -90,6 +90,9 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
       return;
     }
     QueueService.instance.addAll(added);
+    QueueService.instance.enableRadioMode(
+      () => YoutubeService.instance.loadMoreRadioQueue(),
+    );
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Radio shuru — ${added.length} gaane queue me add ho gaye')),
     );

@@ -60,6 +60,7 @@ import 'package:newpipeextractor_dart/newpipeextractor_dart.dart' as npe;
 
 import '../db/download_db.dart';
 import '../models/song.dart';
+import 'innertube_client.dart';
 import 'storage_service.dart';
 
 // Search/playlist result ka lightweight model — Song se pehle ka staging data
@@ -221,29 +222,62 @@ class YoutubeService {
   // upar karte hain) — agar package ka `.nextPage()` kisi wajah se na ho
   // ya alag kaam kare, "load more" bas khaali list de dega (list end jaisa
   // dikhega), poori app crash nahi hogi.
-  dynamic _moreSearchList;
+  // BUG FIX (2026-09-16, v18): pehle ye youtube_explode_dart ke generic
+  // (non-Music) search se "load more" karta tha — isliye page 2 se results
+  // "YT Music jaisa" nahi, generic YouTube jaisa dikhne lagte the. Ab apna
+  // InnertubeClient (music.youtube.com ka wahi endpoint jo YT Music khud
+  // use karta hai) use karta hai, jiska continuation token asli hota hai —
+  // isliye pehla page ho ya paanchwa, sabka ranking/source same (YT Music)
+  // rehta hai.
+  final InnertubeClient _innertube = InnertubeClient.instance;
   String? _moreSearchQuery;
+  String? _moreSearchContinuation;
+  bool _moreSearchExhausted = false;
 
   // "next page" chahiye ho to isko call karo — pehli baar isi query ke
-  // liye call hone par explode search ka PEHLA page deta hai (jo already
+  // liye call hone par InnerTube search ka PEHLA page deta hai (jo already
   // search() screen pe dikh chuka hoga, isliye caller apni taraf se
-  // duplicate IDs filter kare), uske baad har call agla page deti hai.
-  // Khaali list wapas aane ka matlab hai YouTube ke paas is query ke liye
-  // aur results nahi bache — list yahi khatam maano.
+  // duplicate IDs filter kare), uske baad har call agla page deti hai
+  // (asli continuation token se). Khaali list wapas aane ka matlab hai
+  // YouTube ke paas is query ke liye aur results nahi bache — list yahi
+  // khatam maano.
   Future<List<YtResult>> loadMoreSearchResults(String query) async {
     if (query.trim().isEmpty) return [];
     try {
-      final yt = await _getYt();
-      if (_moreSearchQuery != query || _moreSearchList == null) {
-        _moreSearchList = await yt.search.getVideos(query);
+      if (_moreSearchQuery != query) {
         _moreSearchQuery = query;
-      } else {
-        final dynamic next = await _moreSearchList.nextPage();
-        if (next == null) return []; // aur page nahi bache
-        _moreSearchList = next;
+        _moreSearchContinuation = null;
+        _moreSearchExhausted = false;
       }
+      if (_moreSearchExhausted) return [];
+
+      final page = await _innertube.searchSongs(
+        query,
+        continuation: _moreSearchContinuation,
+      );
+      _moreSearchContinuation = page.continuation;
+      if (page.continuation == null) _moreSearchExhausted = true;
+
+      if (page.items.isNotEmpty) {
+        return page.items
+            .map((s) => YtResult(
+                  id: s.id,
+                  title: s.title,
+                  author: s.author,
+                  thumb: s.thumb,
+                  duration: s.duration,
+                ))
+            .toList();
+      }
+
+      // InnerTube se kuch na mila (pehli baar hi fail ho gaya ya token
+      // expire ho gaya) — purane youtube_explode_dart generic search pe
+      // fallback, taaki "load more" bilkul khaali na reh jaaye.
+      final yt = await _getYt();
+      final videos = await yt.search.getVideos(query);
+      _moreSearchExhausted = true; // is fallback path me age continuation nahi
       final results = <YtResult>[];
-      for (final dynamic v in (_moreSearchList as Iterable)) {
+      for (final dynamic v in videos) {
         try {
           results.add(YtResult(
             id: v.id.value as String,
@@ -310,7 +344,36 @@ class YoutubeService {
   }) async {
     if (query.trim().isEmpty) return [];
 
-    // Layer 1: YT Music native search (music-specific ranking)
+    // Layer 0 (NEW, v18): apna InnertubeClient — YT Music ka wahi endpoint
+    // jo dart_ytmusic_api internally use karta hai, par yahan pagination
+    // token bhi milta hai (loadMoreSearchResults isi query ke liye reset
+    // ho jaata hai taaki page-1 yahi rahe, page-2+ usi continuation se aage
+    // badhe).
+    try {
+      onProgress?.call('Searching (innertube)...');
+      _moreSearchQuery = query;
+      final page = await _innertube.searchSongs(query);
+      _moreSearchContinuation = page.continuation;
+      _moreSearchExhausted = page.continuation == null;
+      if (page.items.isNotEmpty) {
+        onProgress?.call('Innertube: OK, ${page.items.length} results');
+        return page.items
+            .take(max)
+            .map((s) => YtResult(
+                  id: s.id,
+                  title: s.title,
+                  author: s.author,
+                  thumb: s.thumb,
+                  duration: s.duration,
+                ))
+            .toList();
+      }
+      print('Innertube search: 0 usable results, dart_ytmusic_api try kar rahe hain');
+    } catch (e) {
+      print('Innertube search failed: $e');
+    }
+
+    // Layer 1: YT Music native search (music-specific ranking), dart_ytmusic_api ke zariye
     try {
       onProgress?.call('Searching YT Music...');
       final ytmusic = await _getYtMusic();
@@ -383,6 +446,16 @@ class YoutubeService {
   Future<List<YtArtistResult>> searchArtists(String query) async {
     if (query.trim().isEmpty) return [];
     try {
+      final page = await _innertube.searchArtists(query);
+      if (page.items.isNotEmpty) {
+        return page.items
+            .map((a) => YtArtistResult(id: a.id, name: a.name, thumb: a.thumb))
+            .toList();
+      }
+    } catch (e) {
+      print('INNERTUBE ARTIST SEARCH FAILED: $e');
+    }
+    try {
       final ytmusic = await _getYtMusic();
       final artists = await ytmusic.searchArtists(query);
       final results = <YtArtistResult>[];
@@ -403,6 +476,21 @@ class YoutubeService {
 
   Future<List<YtPlaylistPreview>> searchPlaylists(String query) async {
     if (query.trim().isEmpty) return [];
+    try {
+      final page = await _innertube.searchPlaylists(query);
+      if (page.items.isNotEmpty) {
+        return page.items
+            .map((pl) => YtPlaylistPreview(
+                  id: pl.id,
+                  title: pl.title,
+                  subtitle: pl.subtitle,
+                  thumb: pl.thumb,
+                ))
+            .toList();
+      }
+    } catch (e) {
+      print('INNERTUBE PLAYLIST SEARCH FAILED: $e');
+    }
     try {
       final ytmusic = await _getYtMusic();
       final playlists = await ytmusic.searchPlaylists(query);
@@ -425,19 +513,55 @@ class YoutubeService {
 
   // ---------------- Radio ("current jaisa gaana chalate raho") ----------------
   //
-  // NOTE: Ye asli YT Music ka "Radio"/"watch next" continuation feature
-  // NAHI hai (uske liye innertube ka private "next" endpoint chahiye, jo
-  // yahan available nahi hai — dekho FEATURE_ROADMAP.md #1). Ye ek simple
-  // approximation hai: current song ke artist naam se dobara search()
-  // karke, current gaana hata ke, baaki ko shuffle karke deta hai. Mini
-  // player ke radio button isi list ko queue me "add" karta hai (queue
-  // replace nahi karta) taaki abhi chal raha gaana disturb na ho.
+  // UPDATED (2026-09-16, v19): pehle ye sirf approximation tha (current
+  // song ke artist se search() karke shuffle) — ek hi fixed batch (~15),
+  // khatam ho jaata tha, "unlimited" nahi tha. Ab InnertubeClient ka asli
+  // radio/"watch next" endpoint use karta hai (`RDAMVM<videoId>` — wahi
+  // radio playlist jo YT Music khud "Start radio" pe banata hai), jisme
+  // asli continuation token milta hai. Isliye ab practically unlimited ho
+  // sakta hai: QueueService radio-mode isko khud call karta hai jab queue
+  // khatam hone wali ho (dekho queue_service.dart ka enableRadioMode()).
+  String? _radioSeedId;
+  String? _radioContinuation;
+  bool _radioExhausted = false;
+
+  Song _songFromInnertube(InnertubeSong s) => Song(
+        id: s.id,
+        title: s.title,
+        artist: s.author,
+        thumb: s.thumb,
+        duration: s.duration,
+      );
+
   Future<List<Song>> getRadioQueue(
     String seedVideoId,
     String seedTitle,
     String seedArtist, {
-    int count = 15,
+    int count = 25,
   }) async {
+    // Naya radio shuru — purana continuation state reset karo.
+    _radioSeedId = seedVideoId;
+    _radioContinuation = null;
+    _radioExhausted = false;
+
+    try {
+      final page = await _innertube.radioQueue(seedVideoId);
+      _radioContinuation = page.continuation;
+      _radioExhausted = page.continuation == null;
+      final filtered = page.items.where((s) => s.id != seedVideoId).toList();
+      if (filtered.isNotEmpty) {
+        return filtered.take(count).map(_songFromInnertube).toList();
+      }
+      print('INNERTUBE RADIO: 0 usable results, purana approximation try kar rahe hain');
+    } catch (e) {
+      print('INNERTUBE RADIO FAILED: $e');
+    }
+
+    // Fallback (purana approximation) — ye "unlimited" nahi hai, isliye
+    // exhausted mark kar diya taaki loadMoreRadioQueue() seedhe khaali de
+    // (QueueService khud-ba-khud refill karna band kar dega, jo already
+    // chal raha hai use disturb kiye bina).
+    _radioExhausted = true;
     try {
       final query = seedArtist.trim().isNotEmpty ? seedArtist.trim() : seedTitle;
       final results = await search(query, max: 30);
@@ -446,6 +570,32 @@ class YoutubeService {
       return filtered.take(count).map((r) => r.toSong()).toList();
     } catch (e) {
       print('RADIO ERROR: $e');
+      return [];
+    }
+  }
+
+  // Radio "unlimited" banane wala asli hissa — QueueService (radio-mode
+  // on hone par) khud isko call karta hai jab queue khatam hone wali ho.
+  // Same seed ka agla batch, asli continuation token se. Khaali list ka
+  // matlab: ya continuation khatam ho gaya (YouTube ke paas is radio ke
+  // aur gaane nahi bache), ya getRadioQueue() fallback approximation pe
+  // gaya tha (jahan continuation hota hi nahi) — dono case me
+  // QueueService bas aage refill try karna rok dega.
+  Future<List<Song>> loadMoreRadioQueue() async {
+    if (_radioSeedId == null || _radioExhausted) return [];
+    try {
+      final page = await _innertube.radioQueue(
+        _radioSeedId!,
+        continuation: _radioContinuation,
+      );
+      _radioContinuation = page.continuation;
+      if (page.continuation == null) _radioExhausted = true;
+      final filtered =
+          page.items.where((s) => s.id != _radioSeedId).toList();
+      return filtered.map(_songFromInnertube).toList();
+    } catch (e) {
+      print('LOAD MORE RADIO ERROR: $e');
+      _radioExhausted = true;
       return [];
     }
   }
@@ -554,6 +704,28 @@ class YoutubeService {
     String? fallbackTitle,
     String? fallbackSubtitle,
   }) async {
+    // Layer 0 (NEW, v18): apna InnertubeClient — dedicated typed browse
+    // call, 3-alag-fallback-library-shape-mismatch wali dikkat yahan nahi
+    // aati kyunki dono search() aur ye method same InnertubeSong shape
+    // use karte hain.
+    try {
+      final page = await _innertube.playlistTracks(playlistId);
+      if (page.items.isNotEmpty) {
+        return page.items
+            .map((s) => YtResult(
+                  id: s.id,
+                  title: s.title,
+                  author: s.author,
+                  thumb: s.thumb,
+                  duration: s.duration,
+                ))
+            .toList();
+      }
+      print('INNERTUBE PLAYLIST TRACKS ($playlistId): 0 results, dart_ytmusic_api try kar rahe hain');
+    } catch (e) {
+      print('INNERTUBE PLAYLIST TRACKS ERROR ($playlistId): $e');
+    }
+
     try {
       final ytmusic = await _getYtMusic();
       final videos = await ytmusic.getPlaylistVideos(playlistId);

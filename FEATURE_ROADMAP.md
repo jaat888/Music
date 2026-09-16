@@ -11,29 +11,48 @@ deps · `[!]` needs new dependency or native code
 
 ## 1. Live/updated playlist aur search (YouTube Music "innertube" style)
 
-**Abhi:** `youtube_service.dart` sirf `newpipeextractor_dart` (+ backup
-`youtube_explode_dart`/Piped) pe depend karta hai — search aur playlist
-dono isi se aa rahe hain.
+**DONE (2026-09-16, v18):** apna khud ka Dart innertube client bana diya —
+dekho `lib/services/innertube_client.dart` (`InnertubeClient`, WEB_REMIX
+music.youtube.com endpoint, proper `continuation` token pagination).
+`youtube_service.dart` me `search()`, `searchArtists()`, `searchPlaylists()`,
+`getYtMusicPlaylistTracks()` aur `loadMoreSearchResults()` — sab ab isko
+Layer 0 (pehla try) bana ke use karte hain; `dart_ytmusic_api` /
+`youtube_explode_dart` fallback ki tarah waisi hi rehti hain, koi hataya
+nahi. `newpipeextractor_dart` abhi bhi sirf stream-URL-resolve ke liye hai —
+wo is change se untouched hai.
 
-**Kya alag hoga:** OpenTune/InnerTune YouTube Music ke internal/private
-"innertube" protocol (wahi jo asli YT Music app/web use karta hai) seedha
-call karte hain search/home-feed/playlist/browse ke liye — isliye unka
-data zyada "live" (real-time, YT Music ke actual backend se) lagta hai.
-NewPipeExtractor sirf **stream URL resolve karne** ke liye use hota hai,
-poori catalog ke liye nahi.
+**Abhi bhi baaki:** device pe real test karna (yeh sirf code-level change
+hai, YouTube ke internal JSON shape/params/key kabhi bhi change ho sakte
+hain — is case me automatically fallback layers pe chala jaayega, par
+"innertube layer khud kaam kar raha hai ya nahi" ye sirf phone pe search
+karke pata chalega). Agar `_filterArtists`/`_filterPlaylists` params galat
+nikle to sirf wo tabs fallback pe girenge, Songs search alag se test karo.
 
-**Karna kya hoga:**
-- [ ] Ek Dart innertube-style client dhoondo/banao (ya `youtube_explode_dart`
-      ka relevant hissa use karo) jo search/playlist/browse YT Music ke
-      internal endpoints se kare
-- [ ] `youtube_service.dart` me search/playlist fetching is naye client pe
-      shift karo; `newpipeextractor_dart` sirf stream-URL-resolve ke liye
-      rakho
-- [ ] Fallback chain document karo: innertube client fail → youtube_explode_dart
-      → Piped (jaisa abhi hai)
+**Priority:** Done — ab test/verify karna hai.
 
-**Priority:** Medium-high — isse search/playlist quality directly improve
-hogi.
+---
+
+## 1b. Radio mode — unlimited (same InnertubeClient ka istemaal)
+
+**DONE (2026-09-16, v19):** `getRadioQueue()` pehle sirf approximation tha
+(current gaane ke artist se `search()` karke shuffle, fixed ~15 gaano ka
+ek-baari batch). Ab `InnertubeClient.radioQueue()` use karta hai — YT Music
+ka asli "Start radio" endpoint (`next` + `playlistId: RDAMVM<videoId>`),
+jisme continuation token milta hai.
+
+`QueueService` me naya `enableRadioMode(supplier)` — jab radio on hai aur
+queue ke aakhri 3 gaane reh jaate hain, khud-ba-khud
+`YoutubeService.loadMoreRadioQueue()` (usi continuation se agla batch) call
+karke queue me jod deta hai. Radio button dabane pe (`full_player_screen.dart`
++ `mini_player.dart`) ab yahi enable hota hai. `setQueue()`/`clear()` radio
+mode ko automatically off kar dete hain (album/playlist play karne pe
+purana radio carry-forward na ho).
+
+**Limitation:** agar innertube radio fail ho (0 results) to purana
+artist-shuffle fallback chalta hai, par wo "unlimited" nahi hai (loadMore
+khaali dega) — is case me radio ek fixed batch ke baad ruk jaayega, jaisa
+pehle hota tha. Device pe test karke pata chalega asli continuation kitni
+der tak chalta hai.
 
 ---
 
