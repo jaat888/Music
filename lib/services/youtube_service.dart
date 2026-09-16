@@ -1021,7 +1021,7 @@ class YoutubeService {
   // se bachne ke liye chhota trade-off).
   Future<({bool ok, String detail})> _verifyPlayable(
     String url, {
-    bool _isRetry = false,
+    bool isRetry = false,
   }) async {
     HttpClient? client;
     try {
@@ -1050,11 +1050,11 @@ class YoutubeService {
           msg.contains('SocketException') ||
           msg.contains('Connection') ||
           msg.contains('Network is unreachable');
-      if (!_isRetry && isConnectIssue) {
+      if (!isRetry && isConnectIssue) {
         print('Stream verify: connect issue ($msg), 1x retry karte hain...');
         client?.close(force: true);
         await Future.delayed(const Duration(milliseconds: 700));
-        return _verifyPlayable(url, _isRetry: true);
+        return _verifyPlayable(url, isRetry: true);
       }
       print('Stream verify failed: $e');
       return (ok: false, detail: e.toString());
