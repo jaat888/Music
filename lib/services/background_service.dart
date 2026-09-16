@@ -74,6 +74,33 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // chaap return ho jaata hai, kuch bhi overwrite nahi karta.
   int _playToken = 0;
 
+  // FIX: "next dabane par 10s lagta hai" — pehle next song ka poora
+  // resolve (NewPipe/explode/Piped) sirf next tap hone ke BAAD shuru hota
+  // tha. Ab current gaana play hote hi agla gaana background me chup-
+  // chaap resolve karke yahan cache ho jaata hai — skipToNext() aate hi
+  // seedha ye URL use hota hai (instant), koi naya network call nahi.
+  final Map<String, String> _urlCache = {};
+  String? _prefetchingId;
+
+  void _prefetchNext() {
+    final upcoming = QueueService.instance.upcoming;
+    if (upcoming.isEmpty) return;
+    final next = upcoming.first;
+    if (_urlCache.containsKey(next.id) || _prefetchingId == next.id) return;
+    _prefetchingId = next.id;
+    YoutubeService.instance
+        .getAudioUrl(next.id, title: next.title, author: next.artist)
+        .then((url) {
+      if (url != null) _urlCache[next.id] = url;
+    }).catchError((_) {}).whenComplete(() {
+      if (_prefetchingId == next.id) _prefetchingId = null;
+      // Cache chhota rakho — sirf zaroorat jitna
+      if (_urlCache.length > 5) {
+        _urlCache.remove(_urlCache.keys.first);
+      }
+    });
+  }
+
   // BUG FIX: pehle koi user-facing feedback nahi tha jab saare YouTube
   // clients fail ho jaate the (e.g. lambi "Full Album/Mix" compilation
   // videos, ya region/age-restricted videos jinka audio-only stream
@@ -262,11 +289,13 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     if (token != _playToken) return; // ek naya request already aa chuka hai
     mediaItem.add(_toMediaItem(song));
     try {
-      await player.setUrl(url);
+      await player.setUrl(url, headers: YoutubeService.cdnHeaders);
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       await player.play();
       // Cache background me ho jaaye — playback ruke bina
       unawaited(_autoCacheInBackground(song, url));
+      // Agla gaana bhi abhi se resolve karna shuru kar do (instant next ke liye)
+      _prefetchNext();
     } catch (e) {
       if (token != _playToken) return;
       // URL kharab nikla — processing state error kar do, UI ko pata chal jaaye
@@ -390,6 +419,14 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _resolveAndPlay(Song song, int token) async {
+    // FIX: agar ye song already prefetch ho ke cache me pada hai (skipToNext
+    // ka sabse common case), seedha usi URL se play karo — koi naya
+    // NewPipe/explode/Piped resolve nahi, isliye "next" ab instant hai.
+    final cached = _urlCache.remove(song.id);
+    if (cached != null) {
+      await _playSong(song, cached, token);
+      return;
+    }
     for (var attempt = 1; attempt <= 3; attempt++) {
       // BUG FIX (2026-09-16, v5): agar is dauraan user ne koi aur gaana
       // tap kar diya (_playToken aage badh gaya), to ye purana attempt

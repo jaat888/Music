@@ -1,5 +1,49 @@
 # SurSathi — Notes / Known Issues
 
+## Batch 23 (2026-09-16) — "Next dabane par 10s lagta hai" + "kai gaane bilkul nahi chalte" (silent fail)
+
+**Problem 1 — Next par 10s delay (network fast hone par bhi):** `skipToNext()`
+har baar tap hone ke BAAD hi poora resolve pipeline (NewPipe native →
+youtube_explode_dart → Piped backup, teeno sequential) shuru karta tha.
+Chahe network kitna bhi fast ho, ye poora chain (native invoke + har
+candidate ka `_verifyPlayable()` HTTP check) kuch second le hi leta hai —
+aur next tap hone tak iska koi part pehle se nahi hota tha.
+
+**Fix (`background_service.dart`):** Naya `_urlCache` (Map<videoId, url>) +
+`_prefetchNext()`. Jaise hi current gaana successfully play hona shuru
+hota hai, queue ka agla gaana (`QueueService.upcoming.first`) turant
+background me resolve hona shuru ho jaata hai (silently, UI/state ko touch
+kiye bina). `skipToNext()` → `_resolveAndPlay()` sabse pehle is cache me
+dekhta hai — hit mile to seedha wahi URL se play (koi naya network/native
+call nahi, ~instant); miss ho (prefetch abhi complete nahi hua, ya user ne
+bahut jaldi 2-3 baar skip kar diya) to purana 3-attempt resolve chain
+normal fallback ki tarah chalta hai.
+
+**Problem 2 — kuch gaane bilkul nahi chalte (silent 403):** `_verifyPlayable()`
+aur `player.setUrl()` dono koi custom `User-Agent`/`Referer`/`Origin` header
+nahi bhejte the. googlevideo CDN ke kuch stream URLs bina in headers ke
+403 de dete hain — `_verifyPlayable` isko "FAIL" mark kar deta tha, saare
+candidates/layers isi tarah fail ho jaate, aur 3 attempts (har ek 45s tak)
+poore hone ke baad hi error snackbar aata — itni der wait karne tak user
+already navigate kar chuka hota, isliye "silent fail" jaisa feel hota tha.
+
+**Fix (`youtube_service.dart`):** `cdnHeaders` (Chrome UA + youtube.com
+Referer/Origin) add kiya, `_verifyPlayable()`, `player.setUrl()`
+(background_service.dart), aur `download()` ke http request — teeno me
+inject kiya.
+
+**Bonus:** NewPipe native layer (`_audioViaNewPipe`) ka timeout 30s → 8s
+(user ke fast-network case me stuck/hang jaldi detect ho aur agli layer
+try ho).
+
+**Not changed:** `_newPipeLock` mutex jaanbujhke wapas nahi laaya — Batch 22
+me isko hataya gaya tha kyunki native Kotlin plugin (WebView nahi) already
+thread-safe hai; lock dobara dalna sirf prefetch + skip dono ko slow karega,
+crash-safety me koi naya fayda nahi (wo crash-class Batch 22 me hi khatam
+ho chuki thi).
+
+---
+
 ## Post-Batch-22 Fix (2026-09-16) — REAL crash found via new in-app crash logger
 
 User ne crash logger (v10 build) se pehli baar asli crash log nikaal ke

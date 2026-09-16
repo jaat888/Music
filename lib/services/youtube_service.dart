@@ -181,6 +181,19 @@ class YoutubeService {
   YoutubeService._internal();
   static final YoutubeService instance = YoutubeService._internal();
 
+  // FIX: googlevideo CDN URLs kabhi-kabhi bina in headers ke 403 dete hain
+  // (client jo URL generate karta hai usi jaisa UA/Referer/Origin expect
+  // karta hai) — isi wajah se "kai gaane bilkul nahi chalte" (silent 403).
+  // Player (just_audio setUrl) aur _verifyPlayable dono me same headers
+  // use karo.
+  static const Map<String, String> cdnHeaders = {
+    'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://www.youtube.com/',
+    'Origin': 'https://www.youtube.com',
+  };
+
   // Public Piped instances — ab sirf FREE EXTRA backup hai, primary source
   // NAHI (Sept 2026 me ye ecosystem-wide largely down hai). Order matters,
   // upar wale pehle try hote hain. List
@@ -1005,6 +1018,7 @@ class YoutubeService {
           .getUrl(Uri.parse(url))
           .timeout(const Duration(seconds: 6));
       request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-1023');
+      cdnHeaders.forEach(request.headers.set);
       final response =
           await request.close().timeout(const Duration(seconds: 6));
       // BUG FIX (2026-09-16): drain<T>() ka T stream ke data ka type NAHI
@@ -1051,7 +1065,7 @@ class YoutubeService {
       final raw = await _nativeNewPipe.invokeMethod<Map<dynamic, dynamic>>(
         'getAudioStream',
         {'videoId': videoId},
-      ).timeout(const Duration(seconds: 30));
+      ).timeout(const Duration(seconds: 8));
 
       final streamUrl = raw?['url'] as String?;
       if (raw == null || streamUrl == null || streamUrl.isEmpty) {
@@ -1376,6 +1390,15 @@ class YoutubeService {
     return stream?.url;
   }
 
+  // Preload/skipToNext ke liye — url ke saath player-ready headers bhi.
+  Future<_AudioStream?> resolveStream(
+    String videoId, {
+    String? title,
+    String? author,
+  }) {
+    return _resolveAudioStream(videoId, title: title, author: author);
+  }
+
   // ---------------- Download (permanent, Music/SurSathi/) ----------------
 
   Future<String?> download(String videoId, String title, {String? author}) async {
@@ -1397,7 +1420,8 @@ class YoutubeService {
       final ext = stream.format.isNotEmpty ? stream.format : 'm4a';
       final filePath = p.join(musicDir.path, '$safeName.$ext');
 
-      final request = http.Request('GET', Uri.parse(stream.url));
+      final request = http.Request('GET', Uri.parse(stream.url))
+        ..headers.addAll(cdnHeaders);
       final response = await _http.send(request);
       final file = File(filePath);
       final sink = file.openWrite();
