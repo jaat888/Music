@@ -123,7 +123,7 @@ class YoutubeService {
 
   // youtube_explode_dart ke manifest fetch me try karne wale client
   // surfaces — androidSdkless PoToken/403-on-audio-only ka known fix hai.
-  static const List<YoutubeApiClient> _ytClients = [
+  static final List<YoutubeApiClient> _ytClients = [
     YoutubeApiClient.androidSdkless,
     YoutubeApiClient.ios,
     YoutubeApiClient.androidVr,
