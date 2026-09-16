@@ -115,6 +115,15 @@ class MiniPlayer extends StatelessWidget {
                       final isLoading = processingState ==
                               AudioProcessingState.loading ||
                           processingState == AudioProcessingState.buffering;
+                      // NEW (2026-09-16): pehle error state me bhi play
+                      // icon hi dikhta rehta tha — tap karne pe kuch nahi
+                      // hota tha (player.play() ek bina-URL/khaali source
+                      // pe kuch nahi karta), user ko lagta tha button
+                      // kaam nahi kar raha. Ab error pe seedha Retry
+                      // (refresh) icon dikhta hai jo currentSong ko
+                      // dobara resolve karne ki koshish karta hai.
+                      final isError =
+                          processingState == AudioProcessingState.error;
 
                       return StreamBuilder<PlayerState>(
                         stream: audioHandler.player.playerStateStream,
@@ -146,21 +155,33 @@ class MiniPlayer extends StatelessWidget {
                                           color: Colors.black,
                                         ),
                                       )
-                                    : IconButton(
-                                        padding: EdgeInsets.zero,
-                                        icon: Icon(
-                                          playing
-                                              ? Icons.pause_circle_filled
-                                              : Icons.play_circle_filled,
-                                          color: Colors.black,
-                                        ),
-                                        iconSize: 42,
-                                        onPressed: () {
-                                          playing
-                                              ? audioHandler.pause()
-                                              : audioHandler.play();
-                                        },
-                                      ),
+                                    : isError
+                                        ? IconButton(
+                                            padding: EdgeInsets.zero,
+                                            tooltip: 'Retry',
+                                            icon: const Icon(
+                                              Icons.refresh_rounded,
+                                              color: Colors.black,
+                                            ),
+                                            iconSize: 34,
+                                            onPressed: () =>
+                                                audioHandler.retryCurrent(),
+                                          )
+                                        : IconButton(
+                                            padding: EdgeInsets.zero,
+                                            icon: Icon(
+                                              playing
+                                                  ? Icons.pause_circle_filled
+                                                  : Icons.play_circle_filled,
+                                              color: Colors.black,
+                                            ),
+                                            iconSize: 42,
+                                            onPressed: () {
+                                              playing
+                                                  ? audioHandler.pause()
+                                                  : audioHandler.play();
+                                            },
+                                          ),
                               ),
                             ],
                           );

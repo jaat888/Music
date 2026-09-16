@@ -333,6 +333,15 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
+  // NEW (2026-09-16): mini player + full player me "Retry" button ke liye —
+  // jab playbackState.processingState == error ho jaaye (koi stream/file
+  // resolve nahi hua), user isse tap karke wahi current song dobara try kar
+  // sake, bina wapas queue/search me jaake dobara select kiye. Same source-
+  // selection logic reuse karta hai jo _playCurrentFromQueue use karta hai
+  // (currentSong abhi bhi wahi hai jo fail hua tha — sirf index change nahi
+  // hota agar sirf retry chahiye).
+  Future<void> retryCurrent() => _playCurrentFromQueue();
+
   MediaItem _toMediaItem(Song song) {
     return MediaItem(
       id: song.id,

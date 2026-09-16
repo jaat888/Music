@@ -335,12 +335,46 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                               audioHandler.skipToPrevious(),
                                         ),
                                         const SizedBox(width: 8),
-                                        AnimatedPlayButton(
-                                          isPlaying: isPlaying,
-                                          size: 70,
-                                          onTap: () => isPlaying
-                                              ? audioHandler.pause()
-                                              : audioHandler.play(),
+                                        // NEW (2026-09-16): error state me
+                                        // pehle bhi yahi AnimatedPlayButton
+                                        // dikhta rehta tha (isPlaying=false
+                                        // hone se "play" icon), tap karne pe
+                                        // kuch nahi hota tha (koi resolved
+                                        // URL/source hi nahi hai player me).
+                                        // Ab processingState==error pe ek
+                                        // Retry button dikhta hai jo
+                                        // currentSong ko dobara resolve
+                                        // karta hai.
+                                        StreamBuilder<PlaybackState>(
+                                          stream: audioHandler.playbackState,
+                                          builder: (context, pbSnap) {
+                                            final isError = pbSnap.data
+                                                    ?.processingState ==
+                                                AudioProcessingState.error;
+                                            if (isError) {
+                                              return SizedBox(
+                                                width: 70,
+                                                height: 70,
+                                                child: IconButton(
+                                                  tooltip: 'Retry',
+                                                  icon: const Icon(
+                                                    Icons.refresh_rounded,
+                                                    color: kText,
+                                                  ),
+                                                  iconSize: 40,
+                                                  onPressed: () => audioHandler
+                                                      .retryCurrent(),
+                                                ),
+                                              );
+                                            }
+                                            return AnimatedPlayButton(
+                                              isPlaying: isPlaying,
+                                              size: 70,
+                                              onTap: () => isPlaying
+                                                  ? audioHandler.pause()
+                                                  : audioHandler.play(),
+                                            );
+                                          },
                                         ),
                                         const SizedBox(width: 8),
                                         IconButton(

@@ -23,3 +23,11 @@
 # java.beans.** ki tarah hi, R8 ko in missing classes pe safely warn/fail
 # mat karne do.
 -dontwarn jdk.dynalink.**
+
+# Rhino ka optional JSR-223 (javax.script) wrapper — RhinoScriptEngine,
+# RhinoCompiledScript, RhinoScriptEngineFactory — javax.script.* classes ko
+# reference karta hai. Ye JSR-223 API Android/ART me exist nahi karta, aur
+# NewPipeExtractor is wrapper ko actually use nahi karta (sirf core Rhino
+# interpreter use hota hai). Isliye R8 build fail ("Missing classes
+# detected while running R8") na kare, is liye in classes ko dontwarn karo.
+-dontwarn javax.script.**

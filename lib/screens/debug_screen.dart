@@ -293,7 +293,7 @@ class _DebugScreenState extends State<DebugScreen> {
           const SizedBox(height: 10),
           if (_searchSummary != null)
             _resultBox(_searchSummary!, isError: _searchResults.isEmpty),
-          if (_searchError != null) _errorBox(_searchError!),
+          if (_searchError != null) _errorBox(_searchError!, onRetry: _testSearch),
           if (_searchResults.isNotEmpty) ...[
             const SizedBox(height: 10),
             ..._searchResults.map(_buildResultTile),
@@ -317,7 +317,7 @@ class _DebugScreenState extends State<DebugScreen> {
               _audioUrlResult!,
               isError: _audioUrlResult!.contains('FAIL'),
             ),
-          if (_audioUrlError != null) _errorBox(_audioUrlError!),
+          if (_audioUrlError != null) _errorBox(_audioUrlError!, onRetry: _testAudioUrl),
           if (_audioUrlLog.isNotEmpty) ...[
             const SizedBox(height: 10),
             Container(
@@ -354,7 +354,7 @@ class _DebugScreenState extends State<DebugScreen> {
               _directResult!,
               isError: _directResult!.contains('FAIL'),
             ),
-          if (_directError != null) _errorBox(_directError!),
+          if (_directError != null) _errorBox(_directError!, onRetry: _testDirectVideo),
         ],
       ),
     );
@@ -407,7 +407,11 @@ class _DebugScreenState extends State<DebugScreen> {
     );
   }
 
-  Widget _errorBox(String text) {
+  // NEW (2026-09-16): pehle exception dikhne ke baad user ko upar scroll
+  // karke wahi button dobara dhoondhna padta tha — ab error box ke saath
+  // hi ek inline "Retry" button hai jo wahi test seedha dobara chala deta
+  // hai. onRetry na diya jaaye to button hi nahi dikhta (backward compatible).
+  Widget _errorBox(String text, {VoidCallback? onRetry}) {
     return Container(
       margin: const EdgeInsets.only(top: 8),
       width: double.infinity,
@@ -417,9 +421,29 @@ class _DebugScreenState extends State<DebugScreen> {
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: kRed, width: 1),
       ),
-      child: Text(
-        'EXCEPTION:\n$text',
-        style: AppText.bodyS(color: kRed),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'EXCEPTION:\n$text',
+            style: AppText.bodyS(color: kRed),
+          ),
+          if (onRetry != null) ...[
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 34,
+              child: OutlinedButton.icon(
+                onPressed: onRetry,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: kRed,
+                  side: const BorderSide(color: kRed),
+                ),
+                icon: const Icon(Icons.refresh_rounded, size: 18),
+                label: const Text('Retry'),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
