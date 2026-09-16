@@ -254,7 +254,13 @@ class YoutubeService {
   // verify karte hain ki asal me fetch ho pa raha hai ya nahi. "URL mila"
   // aur "URL actually chalta hai" alag check hain (expired/blocked URLs
   // dono sources se aa sakte hain).
-  Future<bool> _verifyPlayable(String url) async {
+  //
+  // BUG FIX: pehle sirf true/false return hota tha — isse "fail hua" to
+  // pata chalta tha par "KYUN fail hua" (403 block? timeout? DNS error?)
+  // kabhi nahi pata chalta tha, jo asli debugging ke liye sabse zaroori
+  // cheez hai. Ab exact status code ya error reason bhi return karte
+  // hain, aur onProgress se wo bhi dikhta hai.
+  Future<({bool ok, String detail})> _verifyPlayable(String url) async {
     HttpClient? client;
     try {
       client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
@@ -265,10 +271,11 @@ class YoutubeService {
       final response =
           await request.close().timeout(const Duration(seconds: 6));
       await response.drain<List<int>>();
-      return response.statusCode == 200 || response.statusCode == 206;
+      final ok = response.statusCode == 200 || response.statusCode == 206;
+      return (ok: ok, detail: 'HTTP ${response.statusCode}');
     } catch (e) {
       print('Stream verify failed: $e');
-      return false;
+      return (ok: false, detail: e.toString());
     } finally {
       client?.close(force: true);
     }
@@ -321,7 +328,9 @@ class YoutubeService {
         ..sort((a, b) => b.bitrate.bitsPerSecond.compareTo(a.bitrate.bitsPerSecond));
       for (final s in audioStreams) {
         onProgress?.call('Checking audio stream (${s.bitrate})...');
-        if (await _verifyPlayable(s.url.toString())) {
+        final v = await _verifyPlayable(s.url.toString());
+        onProgress?.call('  -> ${v.ok ? "OK" : "FAIL"} (${v.detail})');
+        if (v.ok) {
           return _AudioStream(
             url: s.url.toString(),
             format: fmt(s.container),
@@ -342,7 +351,9 @@ class YoutubeService {
         ..sort((a, b) => a.size.totalBytes.compareTo(b.size.totalBytes));
       for (final m in muxedStreams) {
         onProgress?.call('Checking muxed stream (${m.videoQuality})...');
-        if (await _verifyPlayable(m.url.toString())) {
+        final v = await _verifyPlayable(m.url.toString());
+        onProgress?.call('  -> ${v.ok ? "OK" : "FAIL"} (${v.detail})');
+        if (v.ok) {
           print('YT explode: muxed fallback OK ($videoId), isse audio nikaal ke play karo');
           return _AudioStream(
             url: m.url.toString(),
@@ -399,9 +410,10 @@ class YoutubeService {
         }
 
         onProgress?.call('$base: verifying...');
-        if (!await _verifyPlayable(url)) {
-          print('Piped streams: $base URL bana lekin fetch fail, trying next');
-          onProgress?.call('$base: verify failed, trying next...');
+        final v = await _verifyPlayable(url);
+        if (!v.ok) {
+          print('Piped streams: $base URL bana lekin fetch fail (${v.detail}), trying next');
+          onProgress?.call('$base: verify failed (${v.detail}), trying next...');
           continue;
         }
 
