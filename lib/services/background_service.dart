@@ -291,7 +291,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     if (song.filePath != null && await File(song.filePath!).exists()) {
       await playFromFile(song, song.filePath!);
     } else {
-      await playWithRetry(song, YoutubeService.instance.getAudioUrl);
+      await playWithRetry(song);
     }
   }
 
