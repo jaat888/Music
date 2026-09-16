@@ -1424,3 +1424,20 @@ pehli real build (CI) ke logs zaroor dekhna:
 - NewPipeExtractor (native Kotlin) layer isse cover NAHI hota — sirf
   youtube_explode_dart layer par lagा hai. Piped backup layer bhi jaanbujh
   kar chhoda gaya hai (proxy hai, apna alag domain/handling ho sakta hai).
+
+---
+
+## 2026-09-17 (v2) — PoToken fix ka pehla bug (TrustedScriptURL) — FIXED
+
+Real device log (`sursathi_app_log.txt`) se mila: `PoToken mint FAILED:
+Failed to set the 'src' property on 'HTMLScriptElement': This document
+requires 'TrustedScriptURL' assignment.` — youtube.com ka Trusted Types CSP
+`<script>` tag ke `.src` par direct string assignment block kar raha tha.
+Fix: `potoken_service.dart` me bgutils-js ko ab `<script src>` ki jagah
+`fetch()` + `new Function()` se load karte hain (Trusted Types ka ye
+specific sink bypass ho jaata hai). Ye is dev-environment me abhi bhi
+COMPILE/LIVE-TEST nahi ho saka — agla real-device log dekhna zaroori hai.
+Agar is fix ke baad bhi "PoToken mint FAILED" aaye (jaise CSP `unsafe-eval`
+bhi block kare — alag error hoga "EvalError: ... blocks the use of eval"),
+to poora WebView-in-youtube.com approach hi reconsider karna padega (jaise
+ek neutral/no-CSP page use karna, agar CORS allow kare).

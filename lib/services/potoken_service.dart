@@ -213,13 +213,24 @@ class PoTokenService {
   }
   try {
     if (!window.__bgUtilsLoaded) {
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = "BGUTILS_CDN_URL";
-        s.onload = () => { window.__bgUtilsLoaded = true; resolve(); };
-        s.onerror = () => reject(new Error('bgutils-js CDN load failed'));
-        document.head.appendChild(s);
-      });
+      // BUG FIX (2026-09-17): pehle yahan `<script>` tag banaake uska
+      // `.src` property seedha set karte the — youtube.com ka page khud
+      // "Trusted Types" CSP enforce karta hai (XSS-protection), jisme
+      // `HTMLScriptElement.src` par DIRECT string assignment disallowed
+      // hai (sirf ek pre-approved TrustedScriptURL chalta hai). Error tha:
+      // "Failed to set the 'src' property... requires 'TrustedScriptURL'
+      // assignment" — isi wajah se PoToken kabhi mint hi nahi ho paaya, aur
+      // silently purane (bina-pot) behavior pe fall back ho raha tha.
+      // Fix: script tag ki jagah `fetch()` se library ka JS TEXT download
+      // karke `new Function()` se seedha execute karte hain — ye Trusted
+      // Types ke `script.src` wale specific sink se hi guzarta nahi, isliye
+      // wahi restriction yahan lagu nahi hoti (ye bilkul wahi tarika hai jo
+      // niche interpreterJs ke liye already use ho raha tha, isi liye wo
+      // step is error se affected nahi tha).
+      const bgutilsSrc = await (await window.fetch("BGUTILS_CDN_URL")).text();
+      // eslint-disable-next-line no-new-func
+      new Function(bgutilsSrc)();
+      window.__bgUtilsLoaded = true;
     }
     if (!window.BgUtils && !window.BG) {
       reply({ok: false, error: 'bgutils-js global not found after load'});
