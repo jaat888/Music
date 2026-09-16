@@ -15,6 +15,35 @@ hai. Agar app closed-source rakhni hai:
 Ye purely legal/licensing decision hai, code fix nahi — khud decide karo
 kaunsa tradeoff chahiye.
 
+## RESOLVED IN BATCH 17-fix (post-Batch-18 user reports, 2026-09-16)
+- **Playlist cards khaali/"Kuch nahi mila"**: `dart_ytmusic_api`'s
+  `getPlaylistVideos()` khud package ke README me "not working as
+  expected — Invalid request error, under investigation" declare kiya
+  hua hai (package ka apna bug). Fix: `getYtMusicPlaylistTracks()` ab
+  isme fail/khaali hone par playlist ke title+subtitle se normal
+  `search()` fallback karta hai (`live_playlist_screen.dart` se
+  `fallbackTitle`/`fallbackSubtitle` pass hote hain) — approximation hai
+  (exact original tracklist nahi), lekin screen kabhi khaali nahi
+  rahegi.
+- **Search me "purane"/generic YouTube results (YT Music jaisa nahi)**:
+  `search_screen.dart` `onProgress` callback kabhi wire hi nahi hua tha,
+  isliye pata nahi chalta tha ki Layer 1 (YT Music) fail ho raha hai ya
+  Layer 2 (generic YouTube search, jo "purane"/kam-relevant results deta
+  hai) use ho raha hai. Ab Songs tab ke results ke upar ek chhota
+  "Source: YouTube Music" / "Source: YouTube (generic...)" debug badge
+  dikhta hai — agar baar-baar "generic" dikhe, iska matlab YT Music
+  layer (`searchSongs`) is device/query pe consistently fail ho raha
+  hai, real fix ke liye wo case reproduce karke dekhna hoga (package
+  "early development, may be unstable" khud bolta hai).
+- **Full player me download/radio button missing**: Mini player
+  (`mini_player.dart`) me pehle se the, full player screen me nahi.
+  Fix: `full_player_screen.dart` me same behaviour (in-progress spinner
+  ke saath) add kiya — chip row ab 6 items (heart, download, radio,
+  queue, timer, lyrics) hai, isliye `LayoutBuilder` +
+  `SingleChildScrollView` se wrap kiya taaki chhoti screens pe overflow
+  na ho (fit ho jaaye to pehle jaisa hi evenly-spaced dikhta hai, na ho
+  to side-scroll).
+
 ## RESOLVED IN BATCH 16 (CI build failure, 2026-09-16)
 - `lib/services/youtube_service.dart`: `SongDetailed`/`VideoDetailed`/
   `PlaylistDetailed` "isn't a type" errors — `dart_ytmusic_api`'s

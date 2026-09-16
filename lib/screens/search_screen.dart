@@ -59,6 +59,12 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
   Set<String> _likedIds = {};
   Set<String> _cachedIds = {};
   String? _debugError; // TEMPORARY — screen pe error dikhane ke liye
+  // NEW (2026-09-16, v15): kaunsa backend layer results de raha hai, ye
+  // pehle sirf print() logs me jaata tha (onProgress kabhi UI se wire hi
+  // nahi hua tha) — isliye "purane/generic YouTube results aa rahe hain,
+  // YT Music jaisa nahi" jaisi complaints debug karna mushkil tha. Ab
+  // results ke saath ek chhota source badge dikhta hai.
+  String? _searchSource;
 
   // NEW — "Artists" aur "Playlists" tabs (YouTube Music jaisa categorized
   // search). Lazy-loaded: jab tak user us tab pe tap na kare, unki apni
@@ -200,6 +206,7 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
       _loading = true;
       _searched = true;
       _query = query;
+      _searchSource = null;
       // Naya query — purane Artists/Playlists tab results ab stale hain
       _artistsLoaded = false;
       _artistResults = [];
@@ -223,13 +230,27 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
     // touch hi nahi hota).
     try {
       await SearchHistory.instance.add(query);
-      final results = await YoutubeService.instance.search(query);
+      // NEW: onProgress se pata chalta hai YT Music (Layer 1) ya generic
+      // YouTube search (Layer 2, fallback) — dono me se kaunsa results
+      // de raha hai. Sirf last/relevant status line rakhte hain.
+      String? source;
+      final results = await YoutubeService.instance.search(
+        query,
+        onProgress: (status) {
+          if (status.startsWith('YT Music: OK')) {
+            source = 'YouTube Music';
+          } else if (status.startsWith('YouTube search: OK')) {
+            source = 'YouTube (generic — YT Music se match nahi mila)';
+          }
+        },
+      );
       final liked = await LikedDB.instance.getAll();
       final cached = await CacheDB.instance.getAll();
 
       if (!mounted) return;
       setState(() {
         _results = results;
+        _searchSource = source;
         _likedIds = liked.map((s) => s.id).toSet();
         _cachedIds = cached.map((e) => e['id'] as String).toSet();
         _debugError = results.isEmpty
@@ -448,8 +469,24 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
 
     return ListView.builder(
       padding: const EdgeInsets.symmetric(horizontal: 16),
-      itemCount: _results.length,
+      itemCount: _results.length + (_searchSource != null ? 1 : 0),
       itemBuilder: (context, i) {
+        // TEMPORARY debug badge — batata hai results kaunse layer se aaye
+        // (YT Music vs generic YouTube fallback), taaki "purane/wrong
+        // gaane aa rahe hain" jaisi complaints me pata chal sake ki YT
+        // Music layer fail kyun ho raha tha.
+        if (_searchSource != null) {
+          if (i == 0) {
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                'Source: $_searchSource',
+                style: AppText.bodyS(color: kTextDim).copyWith(fontSize: 11),
+              ),
+            );
+          }
+          i -= 1;
+        }
         final r = _results[i];
         final song = r.toSong();
         return Padding(

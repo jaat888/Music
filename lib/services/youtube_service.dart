@@ -467,11 +467,26 @@ class YoutubeService {
 
   // Kisi live/curated YT Music playlist ke andar ke gaane — playlist
   // card tap karne pe call hota hai.
-  Future<List<YtResult>> getYtMusicPlaylistTracks(String playlistId) async {
+  //
+  // BUG FIX (2026-09-16, v15): dart_ytmusic_api khud apne README me maanta
+  // hai ki `getPlaylistVideos()` abhi "not working as expected" hai —
+  // "Invalid request" error deta hai, under investigation (package ka
+  // apna known bug, humari taraf koi galat usage nahi). Isi wajah se
+  // LivePlaylistScreen har playlist ke liye "Kuch nahi mila" dikhata
+  // tha. Ab agar ye fail ho ya khaali list de, playlist ke title/
+  // subtitle (artist) se normal search() fallback hota hai — jaisa
+  // getRadioQueue() pehle se karta hai. Ye exact original playlist
+  // tracklist nahi hoga (approximation hai), lekin screen kabhi khaali
+  // nahi rahegi jab tak package ka ye bug fix nahi ho jaata.
+  Future<List<YtResult>> getYtMusicPlaylistTracks(
+    String playlistId, {
+    String? fallbackTitle,
+    String? fallbackSubtitle,
+  }) async {
     try {
       final ytmusic = await _getYtMusic();
       final videos = await ytmusic.getPlaylistVideos(playlistId);
-      return videos
+      final results = videos
           .where((v) => v.videoId.isNotEmpty)
           .map((v) => YtResult(
                 id: v.videoId,
@@ -481,8 +496,27 @@ class YoutubeService {
                 duration: v.duration ?? 0,
               ))
           .toList();
+      if (results.isNotEmpty) return results;
+      print(
+        'YT MUSIC PLAYLIST TRACKS ($playlistId): 0 results (khaali/broken),'
+        ' fallback search try kar rahe hain',
+      );
     } catch (e) {
-      print('YT MUSIC PLAYLIST TRACKS ERROR ($playlistId): $e');
+      print('YT MUSIC PLAYLIST TRACKS ERROR ($playlistId): $e — fallback search try kar rahe hain');
+    }
+
+    // Fallback: playlist ka naam (+ artist/subtitle agar hai) se normal
+    // search() karo — getPlaylistVideos() ke fail hone pe bhi user ko
+    // "kuch nahi mila" ki jagah related gaane milte hain.
+    final query = (fallbackTitle ?? '').trim();
+    if (query.isEmpty) return [];
+    final fullQuery = (fallbackSubtitle != null && fallbackSubtitle.trim().isNotEmpty)
+        ? '$query ${fallbackSubtitle.trim()}'
+        : query;
+    try {
+      return await search(fullQuery, max: 25);
+    } catch (e) {
+      print('YT MUSIC PLAYLIST TRACKS fallback search bhi FAIL: $e');
       return [];
     }
   }

@@ -11,9 +11,11 @@ import 'package:just_audio/just_audio.dart' as ja;
 import '../theme/colors.dart';
 import '../theme/typography.dart';
 import '../models/song.dart';
+import '../db/download_db.dart';
 import '../services/background_service.dart';
 import '../services/queue_service.dart';
 import '../services/like_service.dart';
+import '../services/youtube_service.dart';
 import '../widgets/rotating_vinyl.dart';
 import '../widgets/progress_slider.dart';
 import '../widgets/animated_play_button.dart';
@@ -31,10 +33,66 @@ class FullPlayerScreen extends StatefulWidget {
 class _FullPlayerScreenState extends State<FullPlayerScreen> {
   Timer? _sleepTimer;
 
+  // NEW (2026-09-16, v15): mini player me download/radio buttons pehle se
+  // the (dekho mini_player.dart), lekin full player screen me nahi —
+  // isliye yahan bhi same behaviour add kiya, same in-progress spinner
+  // pattern ke saath.
+  bool _downloading = false;
+  bool _startingRadio = false;
+
   @override
   void dispose() {
     _sleepTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _handleDownload(Song song) async {
+    if (_downloading) return;
+    final already = await DownloadDB.instance.exists(song.id);
+    if (!mounted) return;
+    if (already) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Ye gaana pehle se downloaded hai')),
+      );
+      return;
+    }
+    setState(() => _downloading = true);
+    final path = await YoutubeService.instance.download(
+      song.id,
+      song.title,
+      author: song.artist,
+    );
+    if (!mounted) return;
+    setState(() => _downloading = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          path != null ? '${song.title} download ho gaya' : 'Download fail ho gaya',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _handleRadio(Song song) async {
+    if (_startingRadio) return;
+    setState(() => _startingRadio = true);
+    final added = await YoutubeService.instance.getRadioQueue(
+      song.id,
+      song.title,
+      song.artist,
+    );
+    if (!mounted) return;
+    setState(() => _startingRadio = false);
+    if (added.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Radio ke liye gaane nahi mile')),
+      );
+      return;
+    }
+    QueueService.instance.addAll(added);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Radio shuru — ${added.length} gaane queue me add ho gaye')),
+    );
   }
 
   // MediaItem (audioHandler.mediaItem) se ek poora Song object banao —
@@ -427,11 +485,37 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                       ],
                                     ),
                                     const SizedBox(height: 20),
-                                    Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 16,
-                                      ),
-                                      child: Row(
+                                    // NEW (2026-09-16, v15): download+radio
+                                    // chips add hone se ab 6 chips ho gaye
+                                    // — spaceEvenly Row chhoti screens
+                                    // (~360dp se kam) pe overflow kar
+                                    // sakta tha, isliye horizontally
+                                    // scrollable bana diya (jaisi screen
+                                    // utne chips fit karegi, baaki side-
+                                    // scroll se milenge).
+                                    LayoutBuilder(
+                                      builder: (context, constraints) =>
+                                          SingleChildScrollView(
+                                        scrollDirection: Axis.horizontal,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 16,
+                                        ),
+                                        child: ConstrainedBox(
+                                          // Jab sab 6 chips available
+                                          // width me fit ho jaayein, Row
+                                          // ko poori width diya jaata hai
+                                          // taaki spaceEvenly pehle jaisa
+                                          // hi evenly-spaced/centered
+                                          // dikhe. Jab fit na ho (chhoti
+                                          // screen), Row apni natural
+                                          // (chhoti) width leta hai aur
+                                          // SingleChildScrollView side-
+                                          // scroll allow karta hai.
+                                          constraints: BoxConstraints(
+                                            minWidth: constraints.maxWidth -
+                                                32, // horizontal padding
+                                          ),
+                                          child: Row(
                                         mainAxisAlignment:
                                             MainAxisAlignment.spaceEvenly,
                                         children: [
@@ -451,6 +535,53 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                               },
                                             ),
                                           ),
+                                          const SizedBox(width: 10),
+                                          _chip(
+                                            child: IconButton(
+                                              icon: _downloading
+                                                  ? const SizedBox(
+                                                      width: 18,
+                                                      height: 18,
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                        color: kTextDim,
+                                                      ),
+                                                    )
+                                                  : const Icon(
+                                                      Icons.download_rounded,
+                                                      color: kTextDim,
+                                                    ),
+                                              tooltip: 'Download',
+                                              onPressed: _downloading
+                                                  ? null
+                                                  : () => _handleDownload(song),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 10),
+                                          _chip(
+                                            child: IconButton(
+                                              icon: _startingRadio
+                                                  ? const SizedBox(
+                                                      width: 18,
+                                                      height: 18,
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                        color: kTextDim,
+                                                      ),
+                                                    )
+                                                  : const Icon(
+                                                      Icons.radio_rounded,
+                                                      color: kTextDim,
+                                                    ),
+                                              tooltip: 'Radio shuru karo',
+                                              onPressed: _startingRadio
+                                                  ? null
+                                                  : () => _handleRadio(song),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 10),
                                           _chip(
                                             child: IconButton(
                                               icon: const Icon(
@@ -466,6 +597,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                               ),
                                             ),
                                           ),
+                                          const SizedBox(width: 10),
                                           _chip(
                                             child: IconButton(
                                               icon: const Icon(
@@ -475,6 +607,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                               onPressed: _showSleepTimerDialog,
                                             ),
                                           ),
+                                          const SizedBox(width: 10),
                                           _chip(
                                             child: IconButton(
                                               icon: const Icon(
@@ -491,6 +624,8 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                             ),
                                           ),
                                         ],
+                                          ),
+                                        ),
                                       ),
                                     ),
                                     const Spacer(),

@@ -59,8 +59,11 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
     if (!mounted) return;
     setState(() => _loading = true);
     try {
-      final tracks =
-          await YoutubeService.instance.getYtMusicPlaylistTracks(widget.playlistId);
+      final tracks = await YoutubeService.instance.getYtMusicPlaylistTracks(
+        widget.playlistId,
+        fallbackTitle: widget.title,
+        fallbackSubtitle: widget.subtitle,
+      );
       final liked = await LikedDB.instance.getAll();
       final cached = await CacheDB.instance.getAll();
       if (!mounted) return;
