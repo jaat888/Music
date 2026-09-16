@@ -545,9 +545,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       try {
         url = await YoutubeService.instance
             .getAudioUrl(song.id, title: song.title, author: song.artist)
-            .timeout(const Duration(seconds: 45));
+            .timeout(const Duration(seconds: 60));
       } on TimeoutException {
-        print('playWithRetry: attempt $attempt timed out after 45s');
+        print('playWithRetry: attempt $attempt timed out after 60s');
         url = null;
       }
       if (token != _playToken) return; // resolve hone tak user aage badh chuka

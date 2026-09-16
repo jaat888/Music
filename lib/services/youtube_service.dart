@@ -1353,12 +1353,47 @@ class YoutubeService {
     }
   }
 
+  // BUG FIX (2026-09-17): log se pata chala ki "PoToken bug" nahi tha —
+  // Deno solver "Permission denied" sirf explode-layer ka JS-solver hai
+  // (Android kuch devices pe arbitrary extracted binary ko exec karne
+  // nahi deta, W^X restriction — NewPipe native layer Deno use hi nahi
+  // karta, isliye is se unaffected hai). Asli fail: _verifyPlayable() ka
+  // naya retry (8s+8s+0.7s ≈ 17s/candidate) HAR candidate pe lagta hai —
+  // agar network genuinely down ho (poora CDN hi unreachable), to NewPipe
+  // + explode ke multiple audio/muxed candidates + Piped instances, sab
+  // pe ye 17s multiply ho ke playWithRetry() ka 45s per-attempt budget
+  // fatafat khatam kar deta hai, chahe koi bhi source kaam kar sakta ho
+  // ya nahi. Fix: shuru me EK hi baar 3s ka sasta connectivity probe —
+  // agar wahi fail ho jaaye (genuinely offline), poora heavy layered
+  // pipeline (jo minutes le sakta hai) bilkul skip karo, turant null
+  // return karo taaki "3 attempts x 45s" wasted na ho aur error jaldi +
+  // clearly dikhe ("no internet", na ki confusing PoToken-jaisa symptom).
+  Future<bool> _quickConnectivityCheck() async {
+    try {
+      final socket = await Socket.connect(
+        'www.google.com',
+        443,
+        timeout: const Duration(seconds: 3),
+      );
+      socket.destroy();
+      return true;
+    } catch (e) {
+      print('YT: quick connectivity check fail — internet down lagta hai: $e');
+      return false;
+    }
+  }
+
   Future<_AudioStream?> _resolveAudioStream(
     String videoId, {
     void Function(String status)? onProgress,
     String? title,
     String? author,
   }) async {
+    if (!await _quickConnectivityCheck()) {
+      onProgress?.call('Internet down lagta hai (basic connectivity fail) — '
+          'source-layers try hi nahi kar rahe, pehle network check karo.');
+      return null;
+    }
     var resolvedId = videoId;
     try {
       final yt = await _getYt();
