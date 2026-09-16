@@ -287,15 +287,41 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                       padding: const EdgeInsets.symmetric(
                                         horizontal: 24,
                                       ),
+                                      // BUG FIX (2026-09-16, v10): "gaana
+                                      // change karne pe time delay". Ye
+                                      // StreamBuilder pehle bina key ke tha,
+                                      // isliye jab mediaItem (photo/naam)
+                                      // turant switch ho jaata tha, ye apna
+                                      // PURANA cached duration/position
+                                      // dikhata rehta tha — kyunki
+                                      // durationStream/positionStream tab
+                                      // tak naya value emit hi nahi karte
+                                      // jab tak naye source ka setUrl/
+                                      // setFilePath poora load na ho jaaye.
+                                      // Ab ValueKey(song.id) lagaya hai —
+                                      // gaana badalte hi ye StreamBuilders
+                                      // fresh restart hote hain (purana
+                                      // cached value turant clear), aur
+                                      // total ke liye turant mediaItem.
+                                      // duration (jo already pata hai)
+                                      // fallback ke roop me use hota hai
+                                      // jab tak player khud apna duration
+                                      // resolve na kar le — isse "0:00"
+                                      // flash bhi nahi hota.
                                       child: StreamBuilder<Duration?>(
+                                        key: ValueKey('duration-${song.id}'),
                                         stream:
                                             audioHandler.player.durationStream,
+                                        initialData: mediaItem.duration,
                                         builder: (context, durSnap) {
-                                          final total =
-                                              durSnap.data ?? Duration.zero;
+                                          final total = durSnap.data ??
+                                              mediaItem.duration ??
+                                              Duration.zero;
                                           return StreamBuilder<Duration>(
+                                            key: ValueKey('position-${song.id}'),
                                             stream: audioHandler
                                                 .player.positionStream,
+                                            initialData: Duration.zero,
                                             builder: (context, posSnap) {
                                               final pos = posSnap.data ??
                                                   Duration.zero;

@@ -3,6 +3,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 import '../theme/colors.dart';
 import '../theme/typography.dart';
@@ -22,6 +23,7 @@ import 'search_screen.dart';
 import 'library_screen.dart';
 import 'downloads_screen.dart';
 import 'full_player_screen.dart';
+import 'live_playlist_screen.dart';
 import 'debug_screen.dart';
 
 // Home ki 12 categories — naam, emoji, search query
@@ -109,6 +111,11 @@ class _HomeTabContent extends StatefulWidget {
 class _HomeTabContentState extends State<_HomeTabContent> {
   bool _loading = true;
   List<YtResult> _trending = [];
+  // NEW (2026-09-16, v11): YouTube Music jaisa live/curated home feed —
+  // "Quick picks", "Trending", "Mixed for you" jaise sections, seedhe YT
+  // Music se, har baar refresh pe naye/updated. _trending (fixed query)
+  // ab sirf FALLBACK hai — agar live feed kisi wajah se khaali aaye.
+  List<YtHomeSection> _homeSections = [];
   Set<String> _likedIds = {};
   Set<String> _cachedIds = {};
   String? _debugError; // TEMPORARY — screen pe error dikhane ke liye, taaki
@@ -132,25 +139,37 @@ class _HomeTabContentState extends State<_HomeTabContent> {
     // rehta tha, chahe YouTube search khud kaam kar raha ho (jaisa debug
     // screen me dikh raha tha).
     try {
-      final results = await YoutubeService.instance.search(
-        'top hindi songs 2024',
-        max: 30,
-      );
+      // Layer 1: YT Music ka live/curated home feed.
+      final homeSections = await YoutubeService.instance.getHomeFeed();
+
+      // Layer 2 (FALLBACK): agar live feed khaali aaye (parsing fail,
+      // network hiccup, etc.), purana fixed-query "Trending Now" use
+      // hota hai — home screen kabhi bilkul khaali nahi rehti.
+      List<YtResult> results = [];
+      if (homeSections.isEmpty) {
+        results = await YoutubeService.instance.search(
+          'top hindi songs 2024',
+          max: 30,
+        );
+      }
+
       final liked = await LikedDB.instance.getAll();
       final cached = await CacheDB.instance.getAll();
 
       if (!mounted) return;
       setState(() {
+        _homeSections = homeSections;
         _trending = results;
         _likedIds = liked.map((s) => s.id).toSet();
         _cachedIds = cached.map((e) => e['id'] as String).toSet();
-        // TEMPORARY debug info — agar results khaali hain par exception
-        // nahi aayi, to ye batata hai ki YouTube ne genuinely 0 results
-        // diye (rate-limit ya query issue), exception nahi hai.
-        _debugError = results.isEmpty
-            ? 'search() ne 0 results diye (exception nahi aayi — ho sakta'
-                ' hai YouTube rate-limit kar raha ho, thodi der baad'
-                ' refresh karke dekho)'
+        // TEMPORARY debug info — agar dono (live feed + fallback) khaali
+        // hain par exception nahi aayi, to ye batata hai ki YouTube ne
+        // genuinely 0 results diye (rate-limit ya query issue), exception
+        // nahi hai.
+        _debugError = (homeSections.isEmpty && results.isEmpty)
+            ? 'Home feed aur fallback search dono se 0 results (exception'
+                ' nahi aayi — ho sakta hai YouTube rate-limit kar raha ho,'
+                ' thodi der baad refresh karke dekho)'
             : null;
       });
     } catch (e) {
@@ -159,6 +178,7 @@ class _HomeTabContentState extends State<_HomeTabContent> {
       print('HOME _load() ERROR: $e');
       if (!mounted) return;
       setState(() {
+        _homeSections = [];
         _trending = []; // empty state dikhega, shimmer nahi
         _debugError = 'EXCEPTION: $e'; // TEMPORARY — screen pe dikhega
       });
@@ -175,6 +195,28 @@ class _HomeTabContentState extends State<_HomeTabContent> {
     final songs = _trending.map((r) => r.toSong()).toList();
     context.read<QueueService>().setQueue(songs, startIndex: index);
     await audioHandler.playWithRetry(songs[index]);
+  }
+
+  // NEW (2026-09-16, v11): home feed ke kisi bhi songs-section se play
+  // karne ke liye — us section ke gaano ki apni queue banti hai.
+  Future<void> _playFromSection(YtHomeSection section, int index) async {
+    final songs = section.songs.map((r) => r.toSong()).toList();
+    context.read<QueueService>().setQueue(songs, startIndex: index);
+    await audioHandler.playWithRetry(songs[index]);
+  }
+
+  void _openLivePlaylist(YtPlaylistPreview p) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LivePlaylistScreen(
+          playlistId: p.id,
+          title: p.title,
+          subtitle: p.subtitle,
+          thumb: p.thumb,
+        ),
+      ),
+    );
   }
 
   Future<void> _toggleLike(Song song) async {
@@ -210,6 +252,117 @@ class _HomeTabContentState extends State<_HomeTabContent> {
       context,
       MaterialPageRoute(builder: (_) => SearchScreen(initialQuery: query)),
     );
+  }
+
+  // NEW (2026-09-16, v11): home ka poora feed banata hai — agar loading
+  // hai to shimmer, agar live YT Music home feed mila hai to uske
+  // sections (songs ya curated live playlists dono), warna purana
+  // fixed-query "Trending Now" fallback.
+  List<Widget> _buildFeedWidgets() {
+    if (_loading) {
+      return [
+        SectionHeader(title: 'Trending Now'),
+        Column(children: List.generate(4, (_) => const ShimmerSongCard())),
+      ];
+    }
+
+    if (_homeSections.isNotEmpty) {
+      final widgets = <Widget>[];
+      for (final section in _homeSections) {
+        widgets.add(SectionHeader(title: section.title));
+        if (section.kind == YtHomeSectionKind.songs) {
+          widgets.add(
+            Column(
+              children: List.generate(section.songs.length, (i) {
+                final r = section.songs[i];
+                final song = r.toSong();
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: SongCard(
+                    song: song,
+                    isLiked: _likedIds.contains(song.id),
+                    isCached: _cachedIds.contains(song.id),
+                    onTap: () => _playFromSection(section, i),
+                    onPlay: () => _playFromSection(section, i),
+                    onDownload: () => _download(r),
+                    onLike: () => _toggleLike(song),
+                  ),
+                );
+              }),
+            ),
+          );
+        } else {
+          // Curated live playlists — horizontal scroll cards, tap karne
+          // pe LivePlaylistScreen khulti hai (tracks wahin load hote hain).
+          widgets.add(
+            SizedBox(
+              height: 170,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: section.playlists.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 10),
+                itemBuilder: (context, i) {
+                  final p = section.playlists[i];
+                  return _LivePlaylistCard(
+                    preview: p,
+                    onTap: () => _openLivePlaylist(p),
+                  );
+                },
+              ),
+            ),
+          );
+        }
+      }
+      return widgets;
+    }
+
+    // FALLBACK: live feed khaali aaya — purana fixed-query trending
+    return [
+      SectionHeader(title: 'Trending Now'),
+      if (_trending.isEmpty)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 30),
+          child: Center(
+            child: Column(
+              children: [
+                Text('Kuch nahi mila', style: AppText.bodyM(color: kTextDim)),
+                // TEMPORARY — debug ke liye, exact wajah screen pe dikha
+                // rahe hain taaki screenshot se pata chal sake.
+                if (_debugError != null) ...[
+                  const SizedBox(height: 10),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Text(
+                      _debugError!,
+                      textAlign: TextAlign.center,
+                      style: AppText.bodyS(color: kRed),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        )
+      else
+        Column(
+          children: List.generate(_trending.length, (i) {
+            final r = _trending[i];
+            final song = r.toSong();
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: SongCard(
+                song: song,
+                isLiked: _likedIds.contains(song.id),
+                isCached: _cachedIds.contains(song.id),
+                onTap: () => _playFromTrending(i),
+                onPlay: () => _playFromTrending(i),
+                onDownload: () => _download(r),
+                onLike: () => _toggleLike(song),
+              ),
+            );
+          }),
+        ),
+    ];
   }
 
   @override
@@ -309,63 +462,7 @@ class _HomeTabContentState extends State<_HomeTabContent> {
                       },
                     ),
                   ),
-                  SectionHeader(title: 'Trending Now'),
-                  if (_loading)
-                    Column(
-                      children: List.generate(
-                        4,
-                        (_) => const ShimmerSongCard(),
-                      ),
-                    )
-                  else if (_trending.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 30),
-                      child: Center(
-                        child: Column(
-                          children: [
-                            Text(
-                              'Kuch nahi mila',
-                              style: AppText.bodyM(color: kTextDim),
-                            ),
-                            // TEMPORARY — debug ke liye, exact wajah screen
-                            // pe dikha rahe hain taaki screenshot se pata
-                            // chal sake. Baad me ye block hata dena.
-                            if (_debugError != null) ...[
-                              const SizedBox(height: 10),
-                              Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 20,
-                                ),
-                                child: Text(
-                                  _debugError!,
-                                  textAlign: TextAlign.center,
-                                  style: AppText.bodyS(color: kRed),
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                    )
-                  else
-                    Column(
-                      children: List.generate(_trending.length, (i) {
-                        final r = _trending[i];
-                        final song = r.toSong();
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 6),
-                          child: SongCard(
-                            song: song,
-                            isLiked: _likedIds.contains(song.id),
-                            isCached: _cachedIds.contains(song.id),
-                            onTap: () => _playFromTrending(i),
-                            onPlay: () => _playFromTrending(i),
-                            onDownload: () => _download(r),
-                            onLike: () => _toggleLike(song),
-                          ),
-                        );
-                      }),
-                    ),
+                  ..._buildFeedWidgets(),
                   const SizedBox(height: 90), // mini player + bottom nav ke liye jagah
                 ],
               ),
@@ -373,6 +470,69 @@ class _HomeTabContentState extends State<_HomeTabContent> {
           ),
           _HomeMiniPlayerBar(),
         ],
+      ),
+    );
+  }
+}
+
+// ---------------- Live/curated playlist card (YT Music home feed) ----------------
+
+class _LivePlaylistCard extends StatelessWidget {
+  final YtPlaylistPreview preview;
+  final VoidCallback onTap;
+
+  const _LivePlaylistCard({required this.preview, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: SizedBox(
+        width: 130,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: preview.thumb.isNotEmpty
+                  ? CachedNetworkImage(
+                      imageUrl: preview.thumb,
+                      width: 130,
+                      height: 130,
+                      fit: BoxFit.cover,
+                      errorWidget: (_, __, ___) => Container(
+                        width: 130,
+                        height: 130,
+                        color: kSurface,
+                        child: const Icon(Icons.queue_music, color: kTextDim),
+                      ),
+                    )
+                  : Container(
+                      width: 130,
+                      height: 130,
+                      color: kSurface,
+                      child: const Icon(Icons.queue_music, color: kTextDim),
+                    ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              preview.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppText.bodyM(color: kText).copyWith(
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+              ),
+            ),
+            if (preview.subtitle.isNotEmpty)
+              Text(
+                preview.subtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppText.bodyS(color: kTextDim),
+              ),
+          ],
+        ),
       ),
     );
   }

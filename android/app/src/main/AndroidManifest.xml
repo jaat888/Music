@@ -28,6 +28,9 @@
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
+    <!-- Mic se search (voice search, speech_to_text) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <!-- VERIFIED (YouTube fix task): INTERNET permission upar line 5 pe
          hai — OK. usesCleartextTraffic jaanbujhke "false" hai kyunki
          YouTube ke saare requests HTTPS pe hote hain — "true" karne ki

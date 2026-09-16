@@ -7,10 +7,18 @@ import 'package:just_audio/just_audio.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 import '../theme/colors.dart';
+import '../db/download_db.dart';
 import '../services/background_service.dart';
+import '../services/queue_service.dart';
+import '../services/youtube_service.dart';
 import 'equalizer_bars.dart';
 
-class MiniPlayer extends StatelessWidget {
+// NEW: mini player ab currently-streaming gaana seedhe yahin se download
+// kar sakta hai (koi list/screen me jaake dobara dhundhna nahi padta), aur
+// isi gaane ke artist ke aas-paas ka "radio" bhi shuru kar sakta hai. Isi
+// wajah se ab StatefulWidget hai (download/radio ke "in progress" spinner
+// dikhane ke liye local state chahiye).
+class MiniPlayer extends StatefulWidget {
   final VoidCallback onTap;
   final VoidCallback onLike;
   final bool isLiked;
@@ -23,6 +31,63 @@ class MiniPlayer extends StatelessWidget {
   });
 
   @override
+  State<MiniPlayer> createState() => _MiniPlayerState();
+}
+
+class _MiniPlayerState extends State<MiniPlayer> {
+  bool _downloading = false;
+  bool _startingRadio = false;
+
+  Future<void> _handleDownload(MediaItem item) async {
+    if (_downloading) return;
+    final already = await DownloadDB.instance.exists(item.id);
+    if (!mounted) return;
+    if (already) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Ye gaana pehle se downloaded hai')),
+      );
+      return;
+    }
+    setState(() => _downloading = true);
+    final path = await YoutubeService.instance.download(
+      item.id,
+      item.title,
+      author: item.artist,
+    );
+    if (!mounted) return;
+    setState(() => _downloading = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          path != null ? '${item.title} download ho gaya' : 'Download fail ho gaya',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _handleRadio(MediaItem item) async {
+    if (_startingRadio) return;
+    setState(() => _startingRadio = true);
+    final added = await YoutubeService.instance.getRadioQueue(
+      item.id,
+      item.title,
+      item.artist ?? '',
+    );
+    if (!mounted) return;
+    setState(() => _startingRadio = false);
+    if (added.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Radio ke liye gaane nahi mile')),
+      );
+      return;
+    }
+    QueueService.instance.addAll(added);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Radio shuru — ${added.length} gaane queue me add ho gaye')),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
     return StreamBuilder<MediaItem?>(
       stream: audioHandler.mediaItem,
@@ -32,10 +97,10 @@ class MiniPlayer extends StatelessWidget {
         if (item == null) return const SizedBox.shrink();
 
         return GestureDetector(
-          onTap: onTap,
+          onTap: widget.onTap,
           onVerticalDragEnd: (details) {
             // Fast upar-swipe pe bhi full player khol do
-            if ((details.primaryVelocity ?? 0) < -200) onTap();
+            if ((details.primaryVelocity ?? 0) < -200) widget.onTap();
           },
           child: Container(
             height: 70,
@@ -112,9 +177,6 @@ class MiniPlayer extends StatelessWidget {
                     stream: audioHandler.playbackState,
                     builder: (context, pbSnap) {
                       final processingState = pbSnap.data?.processingState;
-                      final isLoading = processingState ==
-                              AudioProcessingState.loading ||
-                          processingState == AudioProcessingState.buffering;
                       // NEW (2026-09-16): pehle error state me bhi play
                       // icon hi dikhta rehta tha — tap karne pe kuch nahi
                       // hota tha (player.play() ek bina-URL/khaali source
@@ -129,20 +191,82 @@ class MiniPlayer extends StatelessWidget {
                         stream: audioHandler.player.playerStateStream,
                         builder: (context, stateSnap) {
                           final playing = stateSnap.data?.playing ?? false;
+                          // BUG FIX (2026-09-16, v8): "play/pause 1 sec
+                          // glitch". Pehle isLoading sirf processingState
+                          // (loading/buffering) pe based tha. Jab tap karke
+                          // resume karte hain, just_audio/ExoPlayer network
+                          // stream ko thodi der ke liye phir se "buffering"
+                          // report karta hai — chahe audio turant baj raha
+                          // ho (playerStateStream se playing: true already
+                          // aa chuka). Ye spinner ko pause icon ke upar
+                          // ~1 sec ke liye overlay kar deta tha, isliye
+                          // button "glitch/flicker" karta lagta tha. Ab
+                          // agar player already playing hai to buffering
+                          // blip ignore karte hain — spinner sirf tab
+                          // dikhega jab gaana abhi tak bilkul bhi bajna
+                          // shuru nahi hua (loading) ya buffering ho raha
+                          // hai AUR abhi playing nahi hai.
+                          final isLoading = processingState ==
+                                  AudioProcessingState.loading ||
+                              (processingState ==
+                                      AudioProcessingState.buffering &&
+                                  !playing);
                           return Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               if (playing) ...[
-                                const EqualizerBars(color: Colors.black, size: 22, isPlaying: true),
-                                const SizedBox(width: 6),
+                                const EqualizerBars(color: Colors.black, size: 20, isPlaying: true),
+                                const SizedBox(width: 4),
                               ],
+                              // NEW — jo abhi stream ho raha hai wahi seedha
+                              // yahin se download ho sake, bina kisi list
+                              // me jaake dhundhe.
+                              IconButton(
+                                icon: _downloading
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.black,
+                                        ),
+                                      )
+                                    : const Icon(Icons.download_rounded, color: Colors.black),
+                                iconSize: 20,
+                                tooltip: 'Download',
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                onPressed: _downloading ? null : () => _handleDownload(item),
+                              ),
+                              // NEW — isi gaane/artist jaisa "radio" queue
+                              // me add kar deta hai (current gaana disturb
+                              // nahi hota, baad me ye gaane bajenge).
+                              IconButton(
+                                icon: _startingRadio
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.black,
+                                        ),
+                                      )
+                                    : const Icon(Icons.radio_rounded, color: Colors.black),
+                                iconSize: 20,
+                                tooltip: 'Radio shuru karo',
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                onPressed: _startingRadio ? null : () => _handleRadio(item),
+                              ),
                               IconButton(
                                 icon: Icon(
-                                  isLiked ? Icons.favorite : Icons.favorite_border,
+                                  widget.isLiked ? Icons.favorite : Icons.favorite_border,
                                   color: Colors.black,
                                 ),
-                                iconSize: 26,
-                                onPressed: onLike,
+                                iconSize: 24,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                onPressed: widget.onLike,
                               ),
                               SizedBox(
                                 width: 42,

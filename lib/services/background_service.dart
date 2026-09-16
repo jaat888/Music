@@ -28,7 +28,14 @@ Future<void> initAudioHandler() async {
       androidNotificationChannelId: 'com.sursathi.audio',
       androidNotificationChannelName: 'SurSathi Playback',
       androidNotificationOngoing: true,
-      androidStopForegroundOnPause: true,
+      // BUG FIX (2026-09-16, v8): pehle "true" tha — pause karte hi
+      // foreground service demote ho jaati thi. MIUI jaise aggressive
+      // OEMs par isse notification/control-center media card
+      // controls-less (sirf title/artist/progress) ho jaata tha,
+      // kabhi-kabhi poora card hi gayab. Ab pause pe bhi foreground
+      // me rehta hai — controls hamesha dikhenge, jab tak user khud
+      // stop() na kare (queue khatam / explicit stop).
+      androidStopForegroundOnPause: false,
       preloadArtwork: true,
     ),
   );

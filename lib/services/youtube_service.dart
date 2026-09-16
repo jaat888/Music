@@ -83,6 +83,60 @@ class YtResult {
       );
 }
 
+// Artist search result — naya "Artists" search tab ke liye (dekho search()
+// ke saath searchArtists()).
+class YtArtistResult {
+  final String id;
+  final String name;
+  final String thumb;
+
+  YtArtistResult({required this.id, required this.name, required this.thumb});
+}
+
+// ---------------- Home feed (live/curated — YouTube Music jaisa) ----------------
+//
+// NEW (2026-09-16, v11): "YouTube Music jaisa live/curated playlist"
+// feature. YT Music khud har baar home feed request karne pe naye/
+// curated sections deta hai ("Quick picks", "Trending", "Mixed for
+// you" wagaira) — isliye "live" hai, koi hardcoded list nahi. Ek
+// section ya to seedhe gaano ki list hoti hai (turant play-able) ya
+// curated playlists ki list (tap karne pe uske andar ke gaane
+// getYtMusicPlaylistTracks() se load hote hain — LiveYtPlaylistScreen
+// dekho).
+
+enum YtHomeSectionKind { songs, playlists }
+
+class YtHomeSection {
+  final String title;
+  final YtHomeSectionKind kind;
+  final List<YtResult> songs;
+  final List<YtPlaylistPreview> playlists;
+
+  YtHomeSection.songs(this.title, this.songs)
+      : kind = YtHomeSectionKind.songs,
+        playlists = const [];
+
+  YtHomeSection.playlists(this.title, this.playlists)
+      : kind = YtHomeSectionKind.playlists,
+        songs = const [];
+}
+
+// YT Music curated playlist ka preview card — andar ke gaane tap karne
+// pe hi alag se load hote hain (getYtMusicPlaylistTracks).
+class YtPlaylistPreview {
+  final String id;
+  final String title;
+  final String subtitle;
+  final String thumb;
+
+  YtPlaylistPreview({
+    required this.id,
+    required this.title,
+    required this.subtitle,
+    required this.thumb,
+  });
+}
+
 // Ek resolved audio stream — URL + format (extension nikalne ke liye,
 // download() ko chahiye) + basic video info (title/author/thumb/duration,
 // taaki download ke baad dobara ek extra network call na karni pade).
@@ -230,6 +284,200 @@ class YoutubeService {
     } catch (e) {
       print('YT explode search failed: $e');
       onProgress?.call('All sources failed.');
+      return [];
+    }
+  }
+
+  // ---------------- Categorized search (Songs / Artists / Playlists) ----------------
+  //
+  // NEW: search_screen.dart ab YouTube Music jaisa 3 tabs me results dikhata
+  // hai — "Songs" (upar wala search() hi use hota hai), "Artists" aur
+  // "Playlists". dart_ytmusic_api ka `searchSongs()` pehle se search() me
+  // use ho raha hai aur confirmed kaam karta hai (same package, same
+  // `SongDetailed`/`PlaylistDetailed` typed models jo getHomeFeed() me
+  // upar use hue hain) — isi convention ke hisaab se `searchArtists()`/
+  // `searchPlaylists()` bhi maane gaye hain (dono ke liye field names
+  // upar getHomeFeed() ke `PlaylistDetailed` handling se match karte hain:
+  // `.playlistId`/`.name`/`.artist.name`/`.thumbnails`). Agar package ka
+  // real API thoda alag nikle (naam/field mismatch), dono methods apne
+  // try/catch me fail ho ke khaali list dete hain — us tab me sirf "kuch
+  // nahi mila" dikhega, baaki app (Songs tab, home feed, playback) is se
+  // bilkul unaffected rahega. Dekho NOTES.md.
+
+  Future<List<YtArtistResult>> searchArtists(String query) async {
+    if (query.trim().isEmpty) return [];
+    try {
+      final ytmusic = await _getYtMusic();
+      final artists = await ytmusic.searchArtists(query);
+      final results = <YtArtistResult>[];
+      for (final a in artists) {
+        if (a.artistId.isEmpty) continue;
+        results.add(YtArtistResult(
+          id: a.artistId,
+          name: a.name,
+          thumb: a.thumbnails.isNotEmpty ? a.thumbnails.last.url : '',
+        ));
+      }
+      return results;
+    } catch (e) {
+      print('YT MUSIC ARTIST SEARCH ERROR: $e');
+      return [];
+    }
+  }
+
+  Future<List<YtPlaylistPreview>> searchPlaylists(String query) async {
+    if (query.trim().isEmpty) return [];
+    try {
+      final ytmusic = await _getYtMusic();
+      final playlists = await ytmusic.searchPlaylists(query);
+      final results = <YtPlaylistPreview>[];
+      for (final pl in playlists) {
+        if (pl.playlistId.isEmpty) continue;
+        results.add(YtPlaylistPreview(
+          id: pl.playlistId,
+          title: pl.name,
+          subtitle: pl.artist.name,
+          thumb: pl.thumbnails.isNotEmpty ? pl.thumbnails.last.url : '',
+        ));
+      }
+      return results;
+    } catch (e) {
+      print('YT MUSIC PLAYLIST SEARCH ERROR: $e');
+      return [];
+    }
+  }
+
+  // ---------------- Radio ("current jaisa gaana chalate raho") ----------------
+  //
+  // NOTE: Ye asli YT Music ka "Radio"/"watch next" continuation feature
+  // NAHI hai (uske liye innertube ka private "next" endpoint chahiye, jo
+  // yahan available nahi hai — dekho FEATURE_ROADMAP.md #1). Ye ek simple
+  // approximation hai: current song ke artist naam se dobara search()
+  // karke, current gaana hata ke, baaki ko shuffle karke deta hai. Mini
+  // player ke radio button isi list ko queue me "add" karta hai (queue
+  // replace nahi karta) taaki abhi chal raha gaana disturb na ho.
+  Future<List<Song>> getRadioQueue(
+    String seedVideoId,
+    String seedTitle,
+    String seedArtist, {
+    int count = 15,
+  }) async {
+    try {
+      final query = seedArtist.trim().isNotEmpty ? seedArtist.trim() : seedTitle;
+      final results = await search(query, max: 30);
+      final filtered = results.where((r) => r.id != seedVideoId).toList()
+        ..shuffle();
+      return filtered.take(count).map((r) => r.toSong()).toList();
+    } catch (e) {
+      print('RADIO ERROR: $e');
+      return [];
+    }
+  }
+
+  // ---------------- Home feed (live/curated) ----------------
+
+  // YT Music ka poora home feed — "Quick picks"/"Trending"/"Mixed for
+  // you" jaise sections, jo YT Music khud curate karta hai aur baar
+  // baar refresh karne pe badalte rehte hain. maxSections/
+  // maxItemsPerSection isliye hain taaki home screen bahut lamba na ho
+  // jaaye. Sections jinme na koi playable song hota hai na koi playlist
+  // (jaise "Artists you might like") khud-ba-khud skip ho jaate hain.
+  Future<List<YtHomeSection>> getHomeFeed({
+    int maxSections = 8,
+    int maxItemsPerSection = 12,
+  }) async {
+    try {
+      final ytmusic = await _getYtMusic();
+      final raw = await ytmusic.getHomeSections();
+      final sections = <YtHomeSection>[];
+
+      for (final section in raw) {
+        if (sections.length >= maxSections) break;
+        final title = section.title.trim();
+        final contents = section.contents;
+        if (title.isEmpty || contents.isEmpty) continue;
+
+        final first = contents.first;
+        if (first is SongDetailed || first is VideoDetailed) {
+          final songs = <YtResult>[];
+          for (final item in contents) {
+            if (songs.length >= maxItemsPerSection) break;
+            String id, name, artist, thumb;
+            int duration;
+            if (item is SongDetailed) {
+              id = item.videoId;
+              name = item.name;
+              artist = item.artist.name;
+              thumb =
+                  item.thumbnails.isNotEmpty ? item.thumbnails.last.url : '';
+              duration = item.duration ?? 0;
+            } else if (item is VideoDetailed) {
+              id = item.videoId;
+              name = item.name;
+              artist = item.artist.name;
+              thumb =
+                  item.thumbnails.isNotEmpty ? item.thumbnails.last.url : '';
+              duration = item.duration ?? 0;
+            } else {
+              continue;
+            }
+            if (id.isEmpty) continue;
+            songs.add(YtResult(
+              id: id,
+              title: name,
+              author: artist,
+              thumb: thumb,
+              duration: duration,
+            ));
+          }
+          if (songs.isNotEmpty) sections.add(YtHomeSection.songs(title, songs));
+        } else if (first is PlaylistDetailed) {
+          final playlists = <YtPlaylistPreview>[];
+          for (final item in contents) {
+            if (playlists.length >= maxItemsPerSection) break;
+            if (item is! PlaylistDetailed) continue;
+            if (item.playlistId.isEmpty) continue;
+            playlists.add(YtPlaylistPreview(
+              id: item.playlistId,
+              title: item.name,
+              subtitle: item.artist.name,
+              thumb:
+                  item.thumbnails.isNotEmpty ? item.thumbnails.last.url : '',
+            ));
+          }
+          if (playlists.isNotEmpty) {
+            sections.add(YtHomeSection.playlists(title, playlists));
+          }
+        }
+        // AlbumDetailed ya koi aur type wale sections is version me
+        // skip hote hain (albums ke liye alag flow chahiye hoga).
+      }
+
+      return sections;
+    } catch (e) {
+      print('YT HOME FEED ERROR: $e');
+      return [];
+    }
+  }
+
+  // Kisi live/curated YT Music playlist ke andar ke gaane — playlist
+  // card tap karne pe call hota hai.
+  Future<List<YtResult>> getYtMusicPlaylistTracks(String playlistId) async {
+    try {
+      final ytmusic = await _getYtMusic();
+      final videos = await ytmusic.getPlaylistVideos(playlistId);
+      return videos
+          .where((v) => v.videoId.isNotEmpty)
+          .map((v) => YtResult(
+                id: v.videoId,
+                title: v.name,
+                author: v.artist.name,
+                thumb: v.thumbnails.isNotEmpty ? v.thumbnails.last.url : '',
+                duration: v.duration ?? 0,
+              ))
+          .toList();
+    } catch (e) {
+      print('YT MUSIC PLAYLIST TRACKS ERROR ($playlistId): $e');
       return [];
     }
   }

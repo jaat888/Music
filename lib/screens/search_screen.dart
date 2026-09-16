@@ -5,6 +5,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 
 import '../theme/colors.dart';
 import '../theme/typography.dart';
@@ -21,6 +23,8 @@ import '../widgets/section_header.dart';
 import '../widgets/mini_player.dart';
 import 'add_to_playlist_sheet.dart';
 import 'full_player_screen.dart';
+import 'artist_screen.dart';
+import 'live_playlist_screen.dart';
 
 // Popular chips ke liye 8 fixed categories (naam -> search query)
 const Map<String, String> _kPopular = {
@@ -42,22 +46,41 @@ class SearchScreen extends StatefulWidget {
   State<SearchScreen> createState() => _SearchScreenState();
 }
 
-class _SearchScreenState extends State<SearchScreen> {
+class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderStateMixin {
   late final TextEditingController _controller;
+  late final TabController _tabController;
   Timer? _debounce;
 
   bool _loading = false;
   bool _searched = false;
+  String _query = '';
   List<YtResult> _results = [];
   List<String> _history = [];
   Set<String> _likedIds = {};
   Set<String> _cachedIds = {};
   String? _debugError; // TEMPORARY — screen pe error dikhane ke liye
 
+  // NEW — "Artists" aur "Playlists" tabs (YouTube Music jaisa categorized
+  // search). Lazy-loaded: jab tak user us tab pe tap na kare, unki apni
+  // alag network call nahi hoti (Songs tab pehle se load hoti hai).
+  bool _artistsLoaded = false;
+  bool _loadingArtists = false;
+  List<YtArtistResult> _artistResults = [];
+
+  bool _playlistsLoaded = false;
+  bool _loadingPlaylists = false;
+  List<YtPlaylistPreview> _playlistResults = [];
+
+  // NEW — mic se search (voice search)
+  final SpeechToText _speech = SpeechToText();
+  bool _listening = false;
+
   @override
   void initState() {
     super.initState();
     _controller = TextEditingController(text: widget.initialQuery ?? '');
+    _tabController = TabController(length: 3, vsync: this);
+    _tabController.addListener(_onTabChanged);
     _loadHistory();
     if ((widget.initialQuery ?? '').trim().isNotEmpty) {
       _runSearch(widget.initialQuery!.trim());
@@ -68,7 +91,85 @@ class _SearchScreenState extends State<SearchScreen> {
   void dispose() {
     _debounce?.cancel();
     _controller.dispose();
+    _tabController.removeListener(_onTabChanged);
+    _tabController.dispose();
+    if (_listening) _speech.stop();
     super.dispose();
+  }
+
+  // Jis tab pe user pehli baar jaaye, uski results us waqt load hoti hain
+  // (query already _runSearch se pata chal chuki hoti hai).
+  void _onTabChanged() {
+    if (_tabController.indexIsChanging) return;
+    if (_tabController.index == 1 && !_artistsLoaded) {
+      _loadArtists(_query);
+    } else if (_tabController.index == 2 && !_playlistsLoaded) {
+      _loadPlaylists(_query);
+    }
+  }
+
+  Future<void> _loadArtists(String query) async {
+    if (query.isEmpty) return;
+    setState(() => _loadingArtists = true);
+    final results = await YoutubeService.instance.searchArtists(query);
+    if (!mounted) return;
+    setState(() {
+      _artistResults = results;
+      _artistsLoaded = true;
+      _loadingArtists = false;
+    });
+  }
+
+  Future<void> _loadPlaylists(String query) async {
+    if (query.isEmpty) return;
+    setState(() => _loadingPlaylists = true);
+    final results = await YoutubeService.instance.searchPlaylists(query);
+    if (!mounted) return;
+    setState(() {
+      _playlistResults = results;
+      _playlistsLoaded = true;
+      _loadingPlaylists = false;
+    });
+  }
+
+  // ---------------- Voice search ----------------
+
+  Future<void> _toggleListening() async {
+    if (_listening) {
+      await _speech.stop();
+      if (mounted) setState(() => _listening = false);
+      return;
+    }
+    final available = await _speech.initialize(
+      onStatus: (status) {
+        if ((status == 'done' || status == 'notListening') && mounted) {
+          setState(() => _listening = false);
+        }
+      },
+      onError: (error) {
+        if (mounted) setState(() => _listening = false);
+      },
+    );
+    if (!available) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Voice search is device pe available nahi hai')),
+      );
+      return;
+    }
+    setState(() => _listening = true);
+    await _speech.listen(
+      onResult: (result) {
+        _controller.text = result.recognizedWords;
+        _controller.selection = TextSelection.fromPosition(
+          TextPosition(offset: _controller.text.length),
+        );
+        if (result.finalResult && result.recognizedWords.trim().isNotEmpty) {
+          setState(() => _listening = false);
+          _runSearch(result.recognizedWords.trim());
+        }
+      },
+    );
   }
 
   Future<void> _loadHistory() async {
@@ -98,7 +199,19 @@ class _SearchScreenState extends State<SearchScreen> {
     setState(() {
       _loading = true;
       _searched = true;
+      _query = query;
+      // Naya query — purane Artists/Playlists tab results ab stale hain
+      _artistsLoaded = false;
+      _artistResults = [];
+      _playlistsLoaded = false;
+      _playlistResults = [];
     });
+    // Agar user pehle se Artists/Playlists tab pe hai, turant reload karo
+    if (_tabController.index == 1) {
+      _loadArtists(query);
+    } else if (_tabController.index == 2) {
+      _loadPlaylists(query);
+    }
 
     // BUG FIX: pehle yahan try-catch nahi tha. SearchHistory.add(),
     // LikedDB.getAll() ya CacheDB.getAll() me se koi bhi fail hota
@@ -190,15 +303,34 @@ class _SearchScreenState extends State<SearchScreen> {
             hintText: 'Gaana, artist, album...',
             hintStyle: AppText.bodyM(color: kTextDim),
             border: InputBorder.none,
-            suffixIcon: _controller.text.isNotEmpty
-                ? IconButton(
+            suffixIconConstraints: const BoxConstraints(minWidth: 84, maxHeight: 48),
+            suffixIcon: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // NEW — mic se bol ke search karo
+                IconButton(
+                  icon: Icon(
+                    _listening ? Icons.mic : Icons.mic_none,
+                    color: _listening ? kGreen : kTextDim,
+                  ),
+                  tooltip: 'Bol ke search karo',
+                  onPressed: _toggleListening,
+                ),
+                if (_controller.text.isNotEmpty)
+                  IconButton(
                     icon: const Icon(Icons.close, color: kTextDim),
                     onPressed: () {
                       _controller.clear();
                       _onChanged('');
                     },
                   )
-                : const Icon(Icons.search, color: kTextDim),
+                else
+                  const Padding(
+                    padding: EdgeInsets.only(right: 8),
+                    child: Icon(Icons.search, color: kTextDim),
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -253,6 +385,38 @@ class _SearchScreenState extends State<SearchScreen> {
       );
     }
 
+    // NEW — search ho chuki hai: ab YouTube Music jaisa 3 tabs me results
+    // (Songs / Artists / Playlists), har tab apni khud ki loading/empty
+    // state handle karta hai.
+    return Column(
+      children: [
+        TabBar(
+          controller: _tabController,
+          indicatorColor: kGreen,
+          labelColor: kGreen,
+          unselectedLabelColor: kTextDim,
+          labelStyle: AppText.bodyS().copyWith(fontWeight: FontWeight.bold),
+          tabs: const [
+            Tab(text: 'Songs'),
+            Tab(text: 'Artists'),
+            Tab(text: 'Playlists'),
+          ],
+        ),
+        Expanded(
+          child: TabBarView(
+            controller: _tabController,
+            children: [
+              _buildSongsTab(),
+              _buildArtistsTab(),
+              _buildPlaylistsTab(),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSongsTab() {
     if (_loading) {
       return const Center(child: CircularProgressIndicator(color: kGreen));
     }
@@ -298,6 +462,173 @@ class _SearchScreenState extends State<SearchScreen> {
             onPlay: () => _playResult(i),
             onAddToPlaylist: () => _addToPlaylist(song),
             onLike: () => _toggleLike(song),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildArtistsTab() {
+    if (_loadingArtists) {
+      return const Center(child: CircularProgressIndicator(color: kGreen));
+    }
+    if (_artistResults.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.person_off_outlined, color: Colors.white24, size: 64),
+            const SizedBox(height: 12),
+            Text('Koi artist nahi mila', style: AppText.bodyM(color: kTextDim)),
+          ],
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      itemCount: _artistResults.length,
+      itemBuilder: (context, i) {
+        final a = _artistResults[i];
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Material(
+            color: kBgElev,
+            borderRadius: BorderRadius.circular(10),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(10),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ArtistScreen(artistName: a.name, artistThumb: a.thumb),
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(8),
+                child: Row(
+                  children: [
+                    ClipOval(
+                      child: CachedNetworkImage(
+                        imageUrl: a.thumb,
+                        width: 52,
+                        height: 52,
+                        fit: BoxFit.cover,
+                        placeholder: (context, url) =>
+                            Container(width: 52, height: 52, color: kSurface),
+                        errorWidget: (context, url, error) => Container(
+                          width: 52,
+                          height: 52,
+                          color: kSurface,
+                          child: const Icon(Icons.person, color: kTextDim),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        a.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppText.bodyM(color: kText).copyWith(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right, color: kTextDim),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPlaylistsTab() {
+    if (_loadingPlaylists) {
+      return const Center(child: CircularProgressIndicator(color: kGreen));
+    }
+    if (_playlistResults.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.queue_music, color: Colors.white24, size: 64),
+            const SizedBox(height: 12),
+            Text('Koi playlist nahi mili', style: AppText.bodyM(color: kTextDim)),
+          ],
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      itemCount: _playlistResults.length,
+      itemBuilder: (context, i) {
+        final pl = _playlistResults[i];
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Material(
+            color: kBgElev,
+            borderRadius: BorderRadius.circular(10),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(10),
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => LivePlaylistScreen(
+                    playlistId: pl.id,
+                    title: pl.title,
+                    subtitle: pl.subtitle,
+                    thumb: pl.thumb,
+                  ),
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(8),
+                child: Row(
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: CachedNetworkImage(
+                        imageUrl: pl.thumb,
+                        width: 56,
+                        height: 56,
+                        fit: BoxFit.cover,
+                        placeholder: (context, url) =>
+                            Container(width: 56, height: 56, color: kSurface),
+                        errorWidget: (context, url, error) => Container(
+                          width: 56,
+                          height: 56,
+                          color: kSurface,
+                          child: const Icon(Icons.queue_music, color: kTextDim),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            pl.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppText.bodyM(color: kText).copyWith(fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            pl.subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppText.bodyS().copyWith(fontSize: 11),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right, color: kTextDim),
+                  ],
+                ),
+              ),
+            ),
           ),
         );
       },

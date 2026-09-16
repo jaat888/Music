@@ -13,6 +13,7 @@ import '../models/playlist.dart';
 import '../db/playlist_db.dart';
 import '../db/liked_db.dart';
 import '../db/cache_db.dart';
+import '../db/download_db.dart';
 import '../services/background_service.dart';
 import '../services/queue_service.dart';
 import '../services/like_service.dart';
@@ -110,6 +111,75 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
       SnackBar(
         content:
             Text(path != null ? '${song.title} download ho gaya' : 'Download fail ho gaya'),
+      ),
+    );
+  }
+
+  // NEW — poori playlist ek baar me download karo. Already-downloaded songs
+  // skip ho jaate hain (dobara download nahi hoti), ek chhota non-dismissible
+  // progress dialog dikhata hai jab tak sab process na ho jaayein.
+  Future<void> _downloadAll() async {
+    if (_songs.isEmpty) return;
+    var done = 0;
+    var failed = 0;
+    var skipped = 0;
+    final total = _songs.length;
+
+    late void Function(void Function()) dialogSetState;
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          dialogSetState = setDialogState;
+          return AlertDialog(
+            backgroundColor: kBgElev,
+            title: Text('Playlist download ho rahi hai', style: AppText.displayS()),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                LinearProgressIndicator(
+                  value: total == 0 ? 0 : (done + failed + skipped) / total,
+                  color: kGreen,
+                  backgroundColor: kSurface,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  '${done + failed + skipped}/$total ho gaye · $done download · $skipped pehle se · $failed fail',
+                  style: AppText.bodyS(),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+
+    for (final song in List<Song>.of(_songs)) {
+      final already = await DownloadDB.instance.exists(song.id);
+      if (already) {
+        skipped++;
+      } else {
+        final path = await YoutubeService.instance
+            .download(song.id, song.title, author: song.artist);
+        if (path != null) {
+          done++;
+        } else {
+          failed++;
+        }
+      }
+      dialogSetState(() {});
+    }
+
+    if (!mounted) return;
+    Navigator.pop(context); // progress dialog band karo
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Playlist download poori — $done naye, $skipped pehle se, $failed fail',
+        ),
       ),
     );
   }
@@ -381,6 +451,12 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
           style: AppText.displayM(color: kGreen).copyWith(fontSize: 20),
         ),
         actions: [
+          // NEW — poori playlist ek tap me download.
+          IconButton(
+            icon: const Icon(Icons.download_for_offline_outlined, color: kText),
+            tooltip: 'Playlist download karo',
+            onPressed: (playlist == null || _songs.isEmpty) ? null : _downloadAll,
+          ),
           IconButton(
             icon: const Icon(Icons.more_vert, color: kText),
             onPressed: playlist == null ? null : _showMenu,

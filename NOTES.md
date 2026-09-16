@@ -725,3 +725,150 @@ warning hai, error nahi — lekin agar kisi din achanak build fail ho aur
 error "Built-in Kotlin"/KGP ka mention kare, ye wahi cheez hai. Fix:
 in teeno plugins ko latest version pe check/update karna (ya wait karna
 unke fix ka).
+
+---
+
+### Batch 17 (2026-09-16) — Notification controls, play/pause flicker, time-delay, live home feed
+
+**#38 — Notification panel me controls nahi aate (MIUI)**
+**File:** `lib/services/background_service.dart`
+**Issue:** `AudioServiceConfig.androidStopForegroundOnPause: true` tha —
+pause karte hi service foreground se demote ho jaati thi. MIUI jaise
+aggressive OEMs isi wajah se notification/control-center media card ko
+controls-less (sirf title/artist/progress) kar dete hain.
+**Fix:** `androidStopForegroundOnPause: false` — service pause ke baad
+bhi foreground me rehti hai, controls hamesha dikhte hain.
+
+**#39 — Play/pause tap pe 1 sec ka icon flicker (mini player)**
+**File:** `lib/widgets/mini_player.dart`
+**Issue:** Loading-spinner sirf `playbackState.processingState`
+(loading/buffering) pe based tha. Resume karte waqt just_audio/ExoPlayer
+thodi der ke liye phir se "buffering" report karta hai — chahe audio
+turant baj raha ho (`playerStateStream` se `playing: true` already aa
+chuka). Isse spinner pause icon ke upar ~1 sec overlay ho jaata tha.
+**Fix:** `isLoading` ab `playing` bhi dekhta hai — agar player already
+playing hai, buffering-blip ignore hota hai (spinner sirf tab jab abhi
+tak playing false hai).
+
+**#40 — Gaana change karne pe time/seekbar me delay**
+**File:** `lib/screens/full_player_screen.dart`
+**Issue:** Duration/position `StreamBuilder`s bina key ke the, isliye
+gaana change hone par (mediaItem turant update hone ke bawajood) purana
+cached duration/position dikhate rehte the jab tak naye source ka
+`setUrl`/`setFilePath` poora load na ho jaaye.
+**Fix:** `ValueKey('duration-${song.id}')` / `ValueKey('position-${song.id}')`
+laga diya — gaana badalte hi ye StreamBuilders fresh restart hote hain,
+aur `total` ke liye turant `mediaItem.duration` (already known) fallback
+milta hai jab tak player khud resolve na kare.
+
+**#41 — YouTube Music jaisa live/curated home feed**
+**Files:** `lib/services/youtube_service.dart` (naya `getHomeFeed()` +
+`getYtMusicPlaylistTracks()`), `lib/screens/live_playlist_screen.dart`
+(naya), `lib/screens/home_screen.dart`
+**Kya:** `dart_ytmusic_api`'s `getHomeSections()` use karke home screen
+ab YT Music ka live/curated feed dikhata hai ("Trending", "Quick picks"
+jaise sections) — har section ya seedhe gaano ki list hota hai ya
+curated live playlists ki list (tap karne pe `LivePlaylistScreen` khulti
+hai jo tracks `getPlaylistVideos()` se live load karti hai). Agar live
+feed khaali aaye (parsing fail/network), purana fixed-query "Trending
+Now" fallback ke roop me chalta hai — home screen kabhi khaali nahi
+rehti.
+**Limitation:** Album-type sections (jaise "New Albums") is version me
+skip ho jaate hain — unke liye `getAlbum()` se alag flow chahiye hoga,
+abhi implement nahi kiya.
+**Test on real device zaroori hai** — home feed ek se zyada network
+calls karta hai (search se heavier), CI/GitHub Actions pe test mat karo.
+
+---
+
+### Batch 18 (2026-09-16) — Download reliability fix, mini player download+radio, playlist bulk-download, categorized search, voice search
+
+**#42 — "Download nahi hota" — asli root cause mila aur fix kiya**
+**File:** `lib/services/storage_service.dart`
+**Root cause:** `getMusicDir()` hamesha hardcoded public path
+`/storage/emulated/0/Music/SurSathi` pe seedha likhne ki koshish karta
+tha. Manifest me `requestLegacyExternalStorage="true"` hai, lekin ye flag
+Android 11+ (API 30+) pe **Android khud ignore kar deta hai** — sirf
+Android 10 tak kaam karta hai. Isliye Android 11+ devices pe har download
+`FileSystemException` (permission denied) se fail hota tha, chahe
+`Permission.storage.request()` "granted" hi kyun na bole (scoped storage
+alag cheez hai runtime permission se). `youtube_service.dart`'s
+`download()` ka try/catch isko chup-chaap pakad leta tha — sirf generic
+"Download fail ho gaya" SnackBar dikhta tha, kabhi asli reason screen pe
+nahi aata tha.
+**Fix:** `getMusicDir()` ab pehle public `Music/SurSathi` try karta hai
+(ek chhota real write-test file banake confirm karta hai ki likha ja
+sakta hai, sirf `create()` pe bharosa nahi karta) — agar wo fail ho
+(exception), `getExternalStorageDirectory()/Music` (app-specific,
+kisi bhi Android version pe bina kisi permission ke likha ja sakta hai)
+pe fallback karta hai.
+**Trade-off:** App-specific fallback path pe gaye downloads file
+manager/other music apps ke "Music" folder me nahi dikhenge (wo
+`Android/data/com.sursathi.../files/Music` me honge) — lekin app ki apni
+Downloads screen (jo `DownloadDB` se aati hai, disk path se nahi) hamesha
+sahi dikhayegi, aur sabse important: download ab actually **succeed**
+hoga jahan pehle silently fail ho raha tha.
+
+**#43 — Mini player: download + radio buttons**
+**File:** `lib/widgets/mini_player.dart`
+**Kya:** Mini player ab `StatelessWidget` se `StatefulWidget` ban gaya
+hai (download/radio ke "in progress" spinner ke liye local state
+chahiye tha). Do naye compact icon buttons add hue:
+- **Download** — jo gaana abhi stream ho raha hai (current `MediaItem`)
+  usko seedha yahin se download karta hai (`YoutubeService.download()`),
+  pehle check karta hai `DownloadDB.exists()` se ki already download to
+  nahi (agar hai to "pehle se downloaded hai" SnackBar).
+- **Radio** — naya `YoutubeService.getRadioQueue()` call karke queue me
+  similar gaane **add** karta hai (queue replace nahi karta — abhi chal
+  raha gaana disturb nahi hota).
+**Space constraint:** 70dp height wale row me pehle se heart+play/pause
+the — naye buttons 20px icon + 32×32 tap target ke saath compact rakhe
+gaye hain taaki row overflow na ho. Chhoti screens pe abhi bhi tight ho
+sakta hai — agar overflow dikhe, future batch me heart button ko full
+player me move karke mini player se hata sakte hain.
+
+**#44 — Playlist bulk download**
+**File:** `lib/screens/playlist_detail_screen.dart`
+**Kya:** AppBar me naya download icon (more_vert ke bagal me) —
+`_downloadAll()` poori playlist ke saare gaane sequentially download
+karta hai, ek non-dismissible progress dialog (`X/N ho gaye · done ·
+skipped · failed`) ke saath. Already-downloaded songs (`DownloadDB.exists()`
+se check) skip ho jaate hain, dobara download nahi hoti.
+
+**#45 — Search: YouTube Music jaisa Songs/Artists/Playlists tabs**
+**Files:** `lib/services/youtube_service.dart`, `lib/screens/search_screen.dart`
+**Kya:** Search screen ab search hone ke baad 3 tabs dikhata hai
+(`TabBar`/`TabBarView`, `SingleTickerProviderStateMixin`). Songs tab
+purana hi hai (`search()`). Artists/Playlists tabs naye `searchArtists()`/
+`searchPlaylists()` (`youtube_service.dart`) use karte hain, jo lazy-load
+hote hain (sirf jab user pehli baar us tab pe tap kare). Artist tap →
+`ArtistScreen(artistName, artistThumb)`, Playlist tap →
+`LivePlaylistScreen(playlistId, title, subtitle, thumb)` — dono existing
+screens hain, koi naya navigation code nahi likhna pada.
+**IMPORTANT ASSUMPTION (test on real device se confirm karna):**
+`searchArtists()`/`searchPlaylists()` `dart_ytmusic_api`'s `YTMusic`
+client pe call hote hain — package me `searchSongs()` already confirmed
+kaam kar raha hai (`getHomeFeed()`/`search()` me use hota hai) usi
+jagah se maana gaya hai ki `searchArtists(query)`/`searchPlaylists(query)`
+bhi exist karte hain, aur unke result objects ke fields
+(`artistId`/`name`/`thumbnails` aur `playlistId`/`name`/`artist.name`/
+`thumbnails`) `getHomeFeed()` ke andar already-confirmed `PlaylistDetailed`
+handling se match karte hain — isliye confidence high hai, lekin agar
+package ka real API thoda alag nikle, dono methods apne try/catch me fail
+ho ke sirf khaali list dete hain (us tab me "kuch nahi mila" dikhega) —
+Songs tab, home feed, playback, sab kuch is se bilkul unaffected rahega.
+Real device pe build karke Artists/Playlists tab test karna zaroori hai.
+
+**#46 — Mic se search (voice search)**
+**Files:** `pubspec.yaml` (naya `speech_to_text: ^7.0.0`),
+`android/app/src/main/AndroidManifest.xml` (naya `RECORD_AUDIO`
+permission), `lib/screens/search_screen.dart`
+**Kya:** Search bar me naya mic icon — tap karne pe
+`SpeechToText.initialize()` (jo khud runtime mic permission maangta hai)
+aur `listen()` shuru hota hai, bolte hi text field me live transcribe
+hota hai, aur final result milte hi automatically `_runSearch()` call ho
+jaata hai. Agar device pe speech recognition available na ho (`initialize()`
+false de), SnackBar dikhta hai — koi crash nahi.
+
+**Repo me push karne ke baad zaroori:** `flutter pub get` (naya
+`speech_to_text` dependency ke liye).
