@@ -12,6 +12,7 @@ import 'package:share_plus/share_plus.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
 import '../services/youtube_service.dart';
+import '../services/app_logger.dart';
 import '../db/app_database.dart';
 
 // BUILD MARKER — is text ko yahan se badal ke naya zip banaya jaata hai.
@@ -131,6 +132,73 @@ class _DebugScreenState extends State<DebugScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _crashLogStatus = 'Clear fail: $e');
+    }
+  }
+
+  // App Log state (poore app ka log — har print()/debugPrint()/error,
+  // sirf crash nahi. Dekho lib/services/app_logger.dart)
+  bool _loadingAppLog = false;
+  String? _appLogStatus;
+  String? _appLogPreview;
+
+  Future<void> _loadAndShareAppLog() async {
+    setState(() {
+      _loadingAppLog = true;
+      _appLogStatus = null;
+      _appLogPreview = null;
+    });
+    try {
+      final content = await AppLogger.instance.readFullLog();
+      final path = AppLogger.instance.filePath;
+      if (content == null || content.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _loadingAppLog = false;
+          _appLogStatus = 'Abhi tak koi log nahi mila.';
+        });
+        return;
+      }
+      if (!mounted) return;
+      setState(() {
+        _loadingAppLog = false;
+        // Preview me sirf aakhri ~4000 characters (poora log bahut lamba
+        // ho sakta hai, share hamesha poori file se hota hai).
+        _appLogPreview = content.length > 4000
+            ? '...[upar aur bhi hai, share se poora file milega]...\n'
+                '${content.substring(content.length - 4000)}'
+            : content;
+        _appLogStatus = '${content.length} characters mile. Neeche '
+            '"Share" se WhatsApp/Telegram/Files pe bhej sakte ho.';
+      });
+      if (path != null) {
+        await Share.shareXFiles([XFile(path)], text: 'SurSathi app log');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingAppLog = false;
+        _appLogStatus = 'Error: $e';
+      });
+    }
+  }
+
+  Future<void> _shareAppLogAgain() async {
+    final path = AppLogger.instance.filePath;
+    if (path == null) return;
+    await Share.shareXFiles([XFile(path)], text: 'SurSathi app log');
+  }
+
+  Future<void> _clearAppLog() async {
+    try {
+      await AppLogger.instance.clear();
+      if (!mounted) return;
+      setState(() {
+        _appLogPreview = null;
+        _appLogStatus = 'App log clear kar diya gaya.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _appLogStatus = 'Clear fail: $e');
     }
   }
 
@@ -434,6 +502,87 @@ class _DebugScreenState extends State<DebugScreen> {
                       child: SelectableText(
                         _crashLogPreview!,
                         style: AppText.bodyS(color: const Color(0xFFEF4444)),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // --- APP LOG (poore app ka log — sirf crash nahi, har
+          // print()/debugPrint()/error automatically yahan jama hota hai.
+          // Dekho lib/services/app_logger.dart + main.dart ka Zone print
+          // override) ---
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A2333),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFF3A4560)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('App Log (sara app ka log)',
+                    style: AppText.bodyM(color: kTextDim)),
+                const SizedBox(height: 4),
+                Text(
+                  'App chalte waqt jo bhi print/debugPrint ya koi error '
+                  'hota hai, sab yahan automatically save hota rehta hai — '
+                  'sirf crash ka moment nahi, uske pehle ka pura context '
+                  'bhi milega.',
+                  style: AppText.bodyS(color: kTextDim),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _buildButton(
+                        label: 'Load + Share App Log',
+                        loading: _loadingAppLog,
+                        onTap: _loadAndShareAppLog,
+                      ),
+                    ),
+                  ],
+                ),
+                if (_appLogPreview != null) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      TextButton(
+                        onPressed: _shareAppLogAgain,
+                        child: const Text('Share again'),
+                      ),
+                      TextButton(
+                        onPressed: _clearAppLog,
+                        child: const Text('Clear log'),
+                      ),
+                    ],
+                  ),
+                ],
+                if (_appLogStatus != null) ...[
+                  const SizedBox(height: 8),
+                  SelectableText(
+                    _appLogStatus!,
+                    style: AppText.bodyM(color: kText),
+                  ),
+                ],
+                if (_appLogPreview != null) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    constraints: const BoxConstraints(maxHeight: 240),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0F1522),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: SingleChildScrollView(
+                      child: SelectableText(
+                        _appLogPreview!,
+                        style: AppText.bodyS(color: kText),
                       ),
                     ),
                   ),

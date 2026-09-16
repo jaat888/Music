@@ -1,9 +1,13 @@
 // lib/main.dart
+import 'dart:async';
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'services/app_logger.dart';
 import 'services/background_service.dart';
 import 'services/cache_service.dart';
 import 'services/like_service.dart';
@@ -27,33 +31,75 @@ final scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
 // navigate karne ke liye use hota hai.
 final navigatorKey = GlobalKey<NavigatorState>();
 
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+// APP-WIDE LOGGING (2026-09-16): poori app ko ek custom Zone ke andar run
+// karte hain jiska `print` handler override hai. Is wajah se codebase me
+// jahan bhi `print(...)` / `debugPrint(...)` calls hain (youtube_service.dart,
+// background_service.dart, waghera — 60+ jagah) unme se EK bhi line chhuye
+// bina, sab automatically AppLogger me (aur isliye disk pe ek file me) save
+// ho jaate hain. Saath hi Flutter framework errors (FlutterError.onError),
+// aur async Zone ke bahar ke uncaught errors (PlatformDispatcher.onError)
+// bhi yahi se pakde jaate hain. Ye native CrashLogger.kt se ALAG/extra hai —
+// wo sirf native uncaught crash ke liye hai, ye poore app ke logs ke liye.
+void main() {
+  runZonedGuarded<void>(() async {
+    WidgetsFlutterBinding.ensureInitialized();
 
-  try {
-    await SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-    ]);
+    await AppLogger.instance.init();
 
-    // Audio handler fail ho to bhi app crash na ho — sirf error store karo
+    FlutterError.onError = (FlutterErrorDetails details) {
+      AppLogger.instance.log(
+        'FLUTTER ERROR: ${details.exceptionAsString()}\n${details.stack}',
+        level: 'ERROR',
+      );
+      // Normal debug-console output (red screen etc.) bhi waisa hi rahe.
+      FlutterError.presentError(details);
+    };
+
+    PlatformDispatcher.instance.onError = (Object error, StackTrace stack) {
+      AppLogger.instance.log(
+        'PLATFORM DISPATCHER ERROR: $error\n$stack',
+        level: 'ERROR',
+      );
+      return true; // handled — process crash na ho
+    };
+
     try {
-      await initAudioHandler();
-      audioHandler.onError = (message) {
-        scaffoldMessengerKey.currentState?.showSnackBar(
-          SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
-        );
-      };
-    } catch (e) {
-      _startupError = 'Audio init failed: $e';
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.portraitDown,
+      ]);
+
+      // Audio handler fail ho to bhi app crash na ho — sirf error store karo
+      try {
+        await initAudioHandler();
+        audioHandler.onError = (message) {
+          scaffoldMessengerKey.currentState?.showSnackBar(
+            SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
+          );
+        };
+      } catch (e) {
+        _startupError = 'Audio init failed: $e';
+        AppLogger.instance.logError('Audio init failed', e, StackTrace.current);
+      }
+
+      await LikeService.instance.init();
+    } catch (e, st) {
+      _startupError = 'Startup failed: $e';
+      AppLogger.instance.logError('Startup failed', e, st);
     }
 
-    await LikeService.instance.init();
-  } catch (e) {
-    _startupError = 'Startup failed: $e';
-  }
-
-  runApp(const SurSathiApp());
+    runApp(const SurSathiApp());
+  }, (error, stack) {
+    // Zone ke andar kahin bhi uncaught async error — ye ho to bhi log ho
+    // jaaye, app crash hone se pehle.
+    AppLogger.instance.logError('UNCAUGHT ZONE ERROR', error, stack);
+  }, zoneSpecification: ZoneSpecification(
+    print: (Zone self, ZoneDelegate parent, Zone zone, String line) {
+      AppLogger.instance.log(line);
+      // Normal console output bhi bana rahe (IDE/logcat me dikhta rahe).
+      parent.print(zone, line);
+    },
+  ));
 }
 
 class SurSathiApp extends StatelessWidget {
