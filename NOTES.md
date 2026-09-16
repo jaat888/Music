@@ -691,3 +691,37 @@ kabhi-kabhi unavailability ka risk hai) — lekin 7 independent instances
 ka fallback isse kaafi kam karta hai, aur agar zaroorat pade to
 `_instances` list me se koi bhi instance add/remove kiya ja sakta hai
 (latest list: `github.com/TeamPiped/Piped/wiki/Instances`).
+
+---
+
+### Batch 16 (2026-09-16) — CI build hardening (Gradle/AGP9/R8)
+
+- `android/build.gradle` (root, naya) — `jitpack.io` repo add kiya
+  (`newpipeextractor_dart` ki transitive `NewPipeExtractor` dependency
+  sirf JitPack pe hosted hai, Maven Central/Google pe nahi)
+- `android/gradle.properties` (naya) — `android.r8.proguardAndroidTxt.disallowed=false`.
+  `flutter_inappwebview_android` (har released version incl. 1.1.3) abhi
+  bhi purana `getDefaultProguardFile('proguard-android.txt')` call karta
+  hai jo AGP 9 pe hard-fail karta hai — ye open upstream bug hai
+  (flutter_inappwebview#2852, ab tak unfixed). Jab fix release ho jaye,
+  ye line hata dena.
+- `android/app/build.gradle` — `compileSdk` 35→36 (androidx.browser:1.9.0,
+  androidx.core:1.17.0, shared_preferences_android, sqflite_android,
+  url_launcher_android sab 36 maangte the)
+- `android/app/proguard-rules.pro` (naya) — NewPipeExtractor ke README ke
+  apne recommended keep rules (`org.mozilla.javascript`/Rhino ke liye) +
+  `-dontwarn java.beans.**` (Rhino ka optional JavaBean introspection
+  path Android pe exist hi nahi karta)
+- `coreLibraryDesugaring`: plain `desugar_jdk_libs` se `desugar_jdk_libs_nio`
+  pe shift kiya — NewPipeExtractor docs ke mutabik minSdk 33 se neeche
+  (hamara 23 hai) NIO variant chahiye java.nio.file desugaring ke liye.
+
+**Known future landmine (abhi fix nahi kiya, plugin-authors ka scope):**
+Build log warn karta hai ki `device_info_plus`, `newpipeextractor_dart`,
+`share_plus` purana-style Kotlin Gradle Plugin (KGP) apply karte hain,
+aur **future Flutter versions me ye build hi nahi honge** jab tak
+in plugins ke authors "Built-in Kotlin" pe migrate nahi karte. Filhaal
+warning hai, error nahi — lekin agar kisi din achanak build fail ho aur
+error "Built-in Kotlin"/KGP ka mention kare, ye wahi cheez hai. Fix:
+in teeno plugins ko latest version pe check/update karna (ya wait karna
+unke fix ka).

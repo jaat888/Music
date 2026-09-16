@@ -47,6 +47,12 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.debug
+            // proguard-android-optimize.txt (na ki purana proguard-android.txt)
+            // seedha use kar rahe — AGP 9 ka wahi requirement hai jo
+            // gradle.properties me flutter_inappwebview_android ke liye
+            // opt-out kiya tha, lekin apni file me shuru se hi sahi likhna
+            // behtar hai.
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 }
@@ -56,5 +62,11 @@ flutter {
 }
 
 dependencies {
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    // desugar_jdk_libs_NIO (na ki plain desugar_jdk_libs): NewPipeExtractor
+    // ke apne docs ke mutabik minSdk 33 se neeche NIO variant chahiye
+    // (java.nio.file.* desugaring ke liye) — hamara minSdk 23 hai. Plain
+    // desugar_jdk_libs se aage chal ke java.beans.* jaisa hi ek "missing
+    // classes" R8 error java.nio.file.* ke liye aa sakta tha. NIO variant
+    // plain wale ka superset hai, kuch todta nahi.
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.4")
 }
