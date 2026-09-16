@@ -277,7 +277,14 @@ class YoutubeService {
       request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-1023');
       final response =
           await request.close().timeout(const Duration(seconds: 6));
-      await response.drain<List<int>>();
+      // BUG FIX (2026-09-16): drain<T>() ka T stream ke data ka type NAHI
+      // hai — ye us value ka type hai jo function return karta hai (agar
+      // kuch na do to default null hota hai). Pehle yahan drain<List<int>>()
+      // likha tha, jisse Dart null ko List<int> (non-nullable) me cast
+      // karne ki koshish karta tha aur har stream verify pe crash hota
+      // tha: "type 'Null' is not a subtype of type 'List<int>' in type
+      // cast" — isi wajah se saare audio/muxed streams fail dikh rahe the.
+      await response.drain<void>();
       final ok = response.statusCode == 200 || response.statusCode == 206;
       return (ok: ok, detail: 'HTTP ${response.statusCode}');
     } catch (e) {
