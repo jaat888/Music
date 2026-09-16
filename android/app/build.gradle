@@ -6,11 +6,13 @@ plugins {
 
 android {
     namespace = "com.sursathi.sursathi"
-    // NewPipeExtractor_Dart (v2, added 2026-09-16) requires compileSdk 35+.
-    // flutter.compileSdkVersion usually already covers this on a current
-    // Flutter install, but pinned explicitly here so the build doesn't
-    // silently fail on an older Flutter SDK.
-    compileSdk = 35
+    // compileSdk 36 (2026-09-16 bump): androidx.browser:1.9.0,
+    // androidx.core:1.17.0, aur plugins (shared_preferences_android,
+    // sqflite_android, url_launcher_android) sab 36 maangte hain — 35 pe
+    // pin karne se build FAILED hota hai. Pinned explicitly (na ki sirf
+    // flutter.compileSdkVersion pe chhoda) taaki purane Flutter SDK pe bhi
+    // sahi value use ho.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
