@@ -22,13 +22,18 @@ jobs:
           channel: 'stable'
 
       - name: Cache Flutter
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.pub-cache
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.lock') }}
+          # pubspec.lock ke saath-saath android/*.gradle*, gradle.properties
+          # aur gradle-wrapper.properties bhi hash me shaamil kiye — taaki
+          # in me se kisi bhi file me change (jaise proguard/repo/version
+          # fix) hone par cache key turant badle aur naya/changed dependency
+          # fresh download ho, purana stale cache silently reuse na ho.
+          key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.lock', 'android/**/*.gradle*', 'android/gradle.properties', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-flutter-
 
