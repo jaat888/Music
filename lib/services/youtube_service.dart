@@ -290,17 +290,29 @@ class YoutubeService {
       String thumb = '';
       int duration = 0;
       try {
-        final video = await yt.videos.get(videoId);
+        final video =
+            await yt.videos.get(videoId).timeout(const Duration(seconds: 10));
         title = video.title;
         author = video.author;
         thumb = video.thumbnails.highResUrl;
         duration = video.duration?.inSeconds ?? 0;
       } catch (e) {
+        // BUG FIX: pehle yahan koi timeout nahi tha — agar ye request
+        // stall ho jaaye (network hiccup ya YouTube silently connection
+        // drop kar de bina kisi error ke), poora flow hamesha ke liye
+        // "Resolving via YouTube..." pe atka reh jaata tha (na error, na
+        // success) — player 0:00/0:00 pe freeze ho jaata tha. Ab 10s me
+        // ye step khud-ba-khud fail ho jaata hai aur aage badh jaate hain.
         print('YT explode: video metadata fetch fail hui ($videoId): $e');
       }
 
+      // BUG FIX: getManifest() pe bhi pehle koi timeout nahi tha — same
+      // hang risk. 30s ke baad TimeoutException throw hogi, jo neeche
+      // wale catch(e) me pakdi jaake Piped backup layer try karega
+      // (poori flow hang nahi hogi).
       final manifest = await yt.videos.streams
-          .getManifest(videoId, ytClients: _ytClients);
+          .getManifest(videoId, ytClients: _ytClients)
+          .timeout(const Duration(seconds: 30));
 
       String fmt(Object container) => container.toString().toLowerCase();
 
@@ -413,33 +425,99 @@ class YoutubeService {
     return null;
   }
 
+  // ---- videoId sanity check + self-heal ----
+  //
+  // BUG FIX (2026-09-16, matched from Test-music/bin/piped_test.dart —
+  // jo Termux pe PASS hota tha): app me ye poora step MISSING tha, aur
+  // yahi asli wajah thi ki Termux test pass hota tha par app me wahi
+  // gaana fail ho jaata tha. dart_ytmusic_api khud "early development,
+  // may be unstable" bolta hai — iska videoId field kabhi-kabhi
+  // corrupt/wrong nikalta hai (title/author sahi hote hain, par ID
+  // asli YouTube par exist hi nahi karta). App pehle ye galat ID seedha
+  // getManifest() ko de deta tha, jo hamesha fail hota — chahe title/
+  // author bilkul sahi ho. Ab candidate ID ko pehle verify karte hain;
+  // agar invalid nikle to title+author se fresh explode search karke
+  // real ID dhoondh lete hain (jaisa Termux test karta hai).
+  Future<String> _resolvePlayableVideoId(
+    YoutubeExplode yt,
+    String candidateId,
+    String? title,
+    String? author, {
+    void Function(String status)? onProgress,
+  }) async {
+    try {
+      await yt.videos.get(candidateId).timeout(const Duration(seconds: 10));
+      return candidateId; // valid hai, isi ko use karo
+    } catch (e) {
+      print('YT id-check: "$candidateId" invalid ($e) — ID kharab nikla');
+    }
+    if (title == null || title.isEmpty) return candidateId;
+    final requery = (author != null && author.isNotEmpty) ? '$title $author' : title;
+    onProgress?.call('Video ID galat nikla, "$requery" se real ID dhoond rahe hain...');
+    try {
+      final results = await yt.search
+          .getVideos(requery)
+          .timeout(const Duration(seconds: 15));
+      if (results.isEmpty) return candidateId;
+      final realId = results.first.id.value;
+      print('YT id-check: real ID mila: $realId (original: $candidateId)');
+      return realId;
+    } catch (e) {
+      print('YT id-check: fallback search bhi fail: $e');
+      return candidateId;
+    }
+  }
+
   Future<_AudioStream?> _resolveAudioStream(
     String videoId, {
     void Function(String status)? onProgress,
+    String? title,
+    String? author,
   }) async {
+    var resolvedId = videoId;
+    try {
+      final yt = await _getYt();
+      resolvedId = await _resolvePlayableVideoId(
+        yt,
+        videoId,
+        title,
+        author,
+        onProgress: onProgress,
+      );
+    } catch (e) {
+      print('YT id-check: skip kiya, error: $e');
+    }
     final viaExplode =
-        await _audioViaExplode(videoId, onProgress: onProgress);
+        await _audioViaExplode(resolvedId, onProgress: onProgress);
     if (viaExplode != null) return viaExplode;
-    return _audioViaPipedBackup(videoId, onProgress: onProgress);
+    return _audioViaPipedBackup(resolvedId, onProgress: onProgress);
   }
 
   Future<String?> getAudioUrl(
     String videoId, {
     void Function(String status)? onProgress,
+    String? title,
+    String? author,
   }) async {
-    final stream = await _resolveAudioStream(videoId, onProgress: onProgress);
+    final stream = await _resolveAudioStream(
+      videoId,
+      onProgress: onProgress,
+      title: title,
+      author: author,
+    );
     return stream?.url;
   }
 
   // ---------------- Download (permanent, Music/SurSathi/) ----------------
 
-  Future<String?> download(String videoId, String title) async {
+  Future<String?> download(String videoId, String title, {String? author}) async {
     // Storage permission maango (Android 13+ pe scoped, purane pe legacy)
     await Permission.storage.request();
     // Android 13+ pe storage permission zaroori nahi hoti (scoped storage) —
     // isliye request fail ho to bhi aage try karte hain
 
-    final stream = await _resolveAudioStream(videoId);
+    final stream =
+        await _resolveAudioStream(videoId, title: title, author: author);
     if (stream == null) {
       print('YT DOWNLOAD ERROR: audio stream resolve nahi hua for $videoId');
       return null;

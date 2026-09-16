@@ -88,18 +88,12 @@ class _ArtistScreenState extends State<ArtistScreen> {
   Future<void> _playAll() async {
     if (_songs.isEmpty) return;
     context.read<QueueService>().setQueue(_songs, startIndex: 0);
-    await audioHandler.playWithRetry(
-      _songs.first,
-      YoutubeService.instance.getAudioUrl,
-    );
+    await audioHandler.playWithRetry(_songs.first);
   }
 
   Future<void> _playFrom(int index) async {
     context.read<QueueService>().setQueue(_songs, startIndex: index);
-    await audioHandler.playWithRetry(
-      _songs[index],
-      YoutubeService.instance.getAudioUrl,
-    );
+    await audioHandler.playWithRetry(_songs[index]);
   }
 
   Future<void> _toggleLike(Song song) async {
@@ -115,7 +109,7 @@ class _ArtistScreenState extends State<ArtistScreen> {
   }
 
   Future<void> _download(Song song) async {
-    final path = await YoutubeService.instance.download(song.id, song.title);
+    final path = await YoutubeService.instance.download(song.id, song.title, author: song.artist);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(

@@ -206,10 +206,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // Ab yahan turant (URL fetch shuru hone se pehle) mediaItem + "loading"
   // playbackState broadcast karte hain taaki mini player/full player turant
   // dikhe aur spinner/loading state UI me nazar aaye.
-  Future<void> playWithRetry(
-    Song song,
-    Future<String?> Function(String videoId) urlFetcher,
-  ) async {
+  Future<void> playWithRetry(Song song) async {
     mediaItem.add(_toMediaItem(song));
     playbackState.add(
       playbackState.value.copyWith(
@@ -220,7 +217,29 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     );
 
     for (var attempt = 1; attempt <= 3; attempt++) {
-      final url = await urlFetcher(song.id);
+      // BUG FIX: pehle yahan koi timeout nahi tha, aur youtube_service.dart
+      // ke andar bhi network calls unbounded the — agar koi request stall
+      // ho jaaye to poora player hamesha ke liye "loading" pe atka reh
+      // jaata tha (0:00/0:00, pause icon freeze), na koi error na kuch
+      // play hota. Ab har attempt max 45s tak try karta hai, uske baad
+      // fail maan ke agle attempt ya final error pe chala jaata hai.
+      //
+      // BUG FIX 2: pehle sirf song.id pass hota tha. song.title/artist
+      // (jo humein already pata hai) YoutubeService ko diya hi nahi
+      // jaata tha, isliye videoId-corrupt-hone-pe self-heal (dekho
+      // youtube_service.dart _resolvePlayableVideoId) kabhi trigger hi
+      // nahi hota tha yahan se — sirf standalone Termux test me hota
+      // tha. Ab title/author bhi pass karte hain taaki asli app me bhi
+      // wahi self-heal chale jo Termux test me pass hota tha.
+      String? url;
+      try {
+        url = await YoutubeService.instance
+            .getAudioUrl(song.id, title: song.title, author: song.artist)
+            .timeout(const Duration(seconds: 45));
+      } on TimeoutException {
+        print('playWithRetry: attempt $attempt timed out after 45s');
+        url = null;
+      }
       if (url != null) {
         await playSong(song, url);
         return;

@@ -174,10 +174,7 @@ class _HomeTabContentState extends State<_HomeTabContent> {
   Future<void> _playFromTrending(int index) async {
     final songs = _trending.map((r) => r.toSong()).toList();
     context.read<QueueService>().setQueue(songs, startIndex: index);
-    await audioHandler.playWithRetry(
-      songs[index],
-      YoutubeService.instance.getAudioUrl,
-    );
+    await audioHandler.playWithRetry(songs[index]);
   }
 
   Future<void> _toggleLike(Song song) async {
@@ -196,6 +193,7 @@ class _HomeTabContentState extends State<_HomeTabContent> {
     final path = await YoutubeService.instance.download(
       result.id,
       result.title,
+      author: result.author,
     );
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(

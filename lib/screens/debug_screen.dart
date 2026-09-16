@@ -16,7 +16,7 @@ import '../db/app_database.dart';
 // bheja gaya hai, to confirm ho jaata hai ki NAYA code hi build/run ho
 // raha hai. Agar purana marker dikhe (ya ye poori section hi missing ho),
 // to matlab build abhi bhi purane source se ban raha hai.
-const String kBuildMarker = 'DB-FIX-2026-09-16-piped-v1';
+const String kBuildMarker = 'ID-SELFHEAL-2026-09-16-v4';
 
 class DebugScreen extends StatefulWidget {
   const DebugScreen({super.key});
@@ -38,6 +38,7 @@ class _DebugScreenState extends State<DebugScreen> {
   String? _audioUrlResult;
   String? _audioUrlError;
   String? _audioUrlProgress;
+  final List<String> _audioUrlLog = [];
 
   String? _directResult;
   String? _directError;
@@ -119,14 +120,16 @@ class _DebugScreenState extends State<DebugScreen> {
     // chalao") — user ko lagta button hi kaam nahi kar raha. Ab search
     // results na ho to seedha hardcoded test video ($_kTestVideoId) use
     // kar lete hain, koi extra step nahi chahiye.
-    final testId =
-        _searchResults.isNotEmpty ? _searchResults.first.id : _kTestVideoId;
+    final testResult = _searchResults.isNotEmpty ? _searchResults.first : null;
+    final testId = testResult?.id ?? _kTestVideoId;
 
     setState(() {
       _testingAudio = true;
       _audioUrlResult = null;
       _audioUrlError = null;
       _audioUrlProgress = 'Starting...';
+      _audioUrlLog.clear();
+      _audioUrlLog.add('Starting...');
     });
 
     try {
@@ -137,12 +140,26 @@ class _DebugScreenState extends State<DebugScreen> {
       // onProgress callback se har client ka live status dikhta hai, aur
       // poore call pe ek 3-minute hard timeout hai taaki genuinely stuck
       // na rahe.
+      // BUG FIX 2: pehle sirf latest progress line dikhti thi aur test
+      // khatam hote hi wo bhi clear ho jaati thi — beech ke saare steps
+      // (kaunsa client try hua, kahan fail hua) gum ho jaate the, sirf
+      // generic "URL FAIL" bachta tha jisse kuch pata nahi chalta tha.
+      // Ab har step _audioUrlLog me accumulate hota hai aur test khatam
+      // hone ke baad bhi dikhta rehta hai.
+      // BUG FIX 3: title/author bhi pass karte hain (jaise Termux test
+      // karta hai) — is se videoId-sanity-check self-heal actually chalta
+      // hai yahan se bhi, na ki sirf standalone script me.
       final url = await YoutubeService.instance
           .getAudioUrl(
             testId,
+            title: testResult?.title,
+            author: testResult?.author,
             onProgress: (status) {
               if (!mounted) return;
-              setState(() => _audioUrlProgress = status);
+              setState(() {
+                _audioUrlProgress = status;
+                _audioUrlLog.add(status);
+              });
             },
           )
           .timeout(
@@ -301,6 +318,30 @@ class _DebugScreenState extends State<DebugScreen> {
               isError: _audioUrlResult!.contains('FAIL'),
             ),
           if (_audioUrlError != null) _errorBox(_audioUrlError!),
+          if (_audioUrlLog.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A2333),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFF3A4560)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Full log (har step):',
+                      style: AppText.bodyM(color: kTextDim)),
+                  const SizedBox(height: 6),
+                  SelectableText(
+                    _audioUrlLog.join('\n'),
+                    style: AppText.bodyS(color: kText),
+                  ),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 24),
           _buildButton(
             label: 'Test Direct Video ($_kTestVideoId)',

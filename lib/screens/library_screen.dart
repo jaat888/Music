@@ -68,7 +68,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (song.filePath != null && await File(song.filePath!).exists()) {
       await audioHandler.playFromFile(song, song.filePath!);
     } else {
-      await audioHandler.playWithRetry(song, YoutubeService.instance.getAudioUrl);
+      await audioHandler.playWithRetry(song);
     }
   }
 

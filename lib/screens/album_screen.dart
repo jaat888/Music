@@ -85,18 +85,12 @@ class _AlbumScreenState extends State<AlbumScreen> {
       context.read<QueueService>().setShuffle(true);
     }
     context.read<QueueService>().setQueue(list, startIndex: 0);
-    await audioHandler.playWithRetry(
-      list.first,
-      YoutubeService.instance.getAudioUrl,
-    );
+    await audioHandler.playWithRetry(list.first);
   }
 
   Future<void> _playFrom(int index) async {
     context.read<QueueService>().setQueue(_songs, startIndex: index);
-    await audioHandler.playWithRetry(
-      _songs[index],
-      YoutubeService.instance.getAudioUrl,
-    );
+    await audioHandler.playWithRetry(_songs[index]);
   }
 
   Future<void> _toggleLike(Song song) async {
@@ -112,7 +106,7 @@ class _AlbumScreenState extends State<AlbumScreen> {
   }
 
   Future<void> _download(Song song) async {
-    final path = await YoutubeService.instance.download(song.id, song.title);
+    final path = await YoutubeService.instance.download(song.id, song.title, author: song.artist);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(

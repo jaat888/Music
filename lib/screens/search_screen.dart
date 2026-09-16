@@ -153,10 +153,7 @@ class _SearchScreenState extends State<SearchScreen> {
   Future<void> _playResult(int index) async {
     final songs = _results.map((r) => r.toSong()).toList();
     context.read<QueueService>().setQueue(songs, startIndex: index);
-    await audioHandler.playWithRetry(
-      songs[index],
-      YoutubeService.instance.getAudioUrl,
-    );
+    await audioHandler.playWithRetry(songs[index]);
   }
 
   Future<void> _toggleLike(Song song) async {
