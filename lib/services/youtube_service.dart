@@ -1010,17 +1010,30 @@ class YoutubeService {
   // kabhi nahi pata chalta tha, jo asli debugging ke liye sabse zaroori
   // cheez hai. Ab exact status code ya error reason bhi return karte
   // hain, aur onProgress se wo bhi dikhta hai.
-  Future<({bool ok, String detail})> _verifyPlayable(String url) async {
+  // BUG FIX (2026-09-17): pehle connect-timeout (6s) pe seedha fail maan
+  // ke poora ache-khaase NewPipe URL discard kar dete the — isse poora
+  // slow fallback chain (explode getManifest() 30s+, phir Piped) trigger
+  // ho jaata tha, sirf ek chhoti mobile-network hiccup ki wajah se. Ab
+  // SIRF connect/timeout-class errors pe (403/blocked jaise real HTTP
+  // response pe NAHI) ek single quick retry karte hain — agar genuinely
+  // offline/blocked ho to ye retry bhi fail hoga aur turant aage fallback
+  // chain me chale jaayenge (extra delay sirf ~1.5s, poore 60-90s chain
+  // se bachne ke liye chhota trade-off).
+  Future<({bool ok, String detail})> _verifyPlayable(
+    String url, {
+    bool _isRetry = false,
+  }) async {
     HttpClient? client;
     try {
-      client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+      client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 8);
       final request = await client
           .getUrl(Uri.parse(url))
-          .timeout(const Duration(seconds: 6));
+          .timeout(const Duration(seconds: 8));
       request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-1023');
       cdnHeaders.forEach(request.headers.set);
       final response =
-          await request.close().timeout(const Duration(seconds: 6));
+          await request.close().timeout(const Duration(seconds: 8));
       // BUG FIX (2026-09-16): drain<T>() ka T stream ke data ka type NAHI
       // hai — ye us value ka type hai jo function return karta hai (agar
       // kuch na do to default null hota hai). Pehle yahan drain<List<int>>()
@@ -1032,6 +1045,17 @@ class YoutubeService {
       final ok = response.statusCode == 200 || response.statusCode == 206;
       return (ok: ok, detail: 'HTTP ${response.statusCode}');
     } catch (e) {
+      final msg = e.toString();
+      final isConnectIssue = msg.contains('TimeoutException') ||
+          msg.contains('SocketException') ||
+          msg.contains('Connection') ||
+          msg.contains('Network is unreachable');
+      if (!_isRetry && isConnectIssue) {
+        print('Stream verify: connect issue ($msg), 1x retry karte hain...');
+        client?.close(force: true);
+        await Future.delayed(const Duration(milliseconds: 700));
+        return _verifyPlayable(url, _isRetry: true);
+      }
       print('Stream verify failed: $e');
       return (ok: false, detail: e.toString());
     } finally {
