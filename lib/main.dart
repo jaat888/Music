@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:newpipeextractor_dart/newpipeextractor_dart.dart';
 
 import 'services/background_service.dart';
 import 'services/cache_service.dart';
@@ -24,29 +23,12 @@ String? _startupError;
 // sakte hain.
 final scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
 
-// NEW (2026-09-16, v4): newpipeextractor_dart ke liye — YouTube kabhi-kabhi
-// automated requests pe reCAPTCHA maang leta hai. Isse solve karne ke liye
-// package ek WebView-based ReCaptchaPage deta hai, jise open karne ke liye
-// hume ek Navigator chahiye — is global key se hum MaterialApp ke bina
-// context pass kiye kahin se bhi navigate kar sakte hain.
+// Navigator key MaterialApp ke bina context pass kiye kahin se bhi
+// navigate karne ke liye use hota hai.
 final navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // NEW (2026-09-16, v4): ek baar app startup pe register karna hota hai —
-  // jab bhi koi NewPipeExtractor call ReCaptchaRequiredException fenke,
-  // package khud is callback ko bulayega challengeUrl ke saath.
-  setReCaptchaNavigator((String challengeUrl) async {
-    final ctx = navigatorKey.currentContext;
-    if (ctx == null) return;
-    await Navigator.of(ctx).push(
-      MaterialPageRoute(
-        builder: (_) => const ReCaptchaPage(),
-        settings: RouteSettings(arguments: challengeUrl),
-      ),
-    );
-  });
 
   try {
     await SystemChrome.setPreferredOrientations([
