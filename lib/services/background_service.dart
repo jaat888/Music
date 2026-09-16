@@ -388,6 +388,16 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       _prefetchNext();
     } catch (e) {
       if (token != _playToken) return;
+      // BUG FIX (2026-09-17): ye catch block hi asli gap tha — agar URL
+      // resolve to ho jaata (getAudioUrl OK) lekin just_audio ka
+      // player.setUrl()/player.play() khud fail karta (expired URL, CDN
+      // 403 jab actually stream karte waqt, codec/format issue, etc.),
+      // to sirf ek SnackBar dikhta tha jo gayab ho jaata — file log me
+      // KUCH bhi nahi likha jaata tha. Isliye "sab gaane fail ho rahe
+      // hain" waale sessions me bhi log khaali dikhta tha. Ab explicit
+      // likhte hain.
+      print('YT PLAYER FAIL: "${song.title}" (${song.id}) — URL mila tha '
+          'lekin just_audio play nahi kar paya: $e');
       // URL kharab nikla — processing state error kar do, UI ko pata chal jaaye
       playbackState.add(
         playbackState.value.copyWith(

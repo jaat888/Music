@@ -1460,6 +1460,20 @@ class YoutubeService {
       title: title,
       author: author,
     );
+    // BUG FIX (2026-09-17): ab tak SIRF failure/retry pe hi log line
+    // aati thi — agar poora resolve chup-chaap fail ho jaata (koi
+    // exception nahi, seedha null return) ya chup-chaap succeed ho
+    // jaata, log me kuch bhi nahi dikhta tha. Ab dono cases explicit
+    // likhte hain taaki debug log se saaf pata chale ki playback
+    // actually attempt hua tha ya nahi, aur agar hua to kaamyab hua ya
+    // nahi (bina kisi lower-level retry/timeout ke bhi).
+    if (stream == null) {
+      print('YT PLAY FAIL: $videoId ($title) — koi bhi source (NewPipe/'
+          'explode/Piped) audio stream nahi de paaya.');
+    } else {
+      print('YT PLAY OK: $videoId ($title) — stream mil gaya '
+          '(${stream.format}).');
+    }
     return stream?.url;
   }
 
