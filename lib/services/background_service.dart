@@ -293,28 +293,58 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // dikhe aur spinner/loading state UI me nazar aaye.
   Future<void> playWithRetry(Song song) async {
     final token = ++_playToken;
+
+    // BUG FIX (2026-09-16, v12): "gaana change karo to photo/naam turant
+    // badal jaata hai lekin AUDIO purana hi 10-12 sec tak bajta rehta hai,
+    // aur notification ka time bhi purane gaane ka hi chalta rehta hai".
+    // Root cause: mediaItem turant naye gaane ka set ho jaata tha, lekin
+    // PURANE `player` ko kabhi pause/stop nahi kaha jaata tha — wo apna
+    // resolve (NewPipe/retry pipeline, jo 10-12 sec tak le sakta hai) khatam
+    // hone tak bajta hi rehta tha, poori tarah unaware ki UI pe ek naya
+    // (different) gaana already dikh raha hai. Fix: naya gaana tap hote hi
+    // sabse pehle purane audio ko pause karo, taaki "wrong song" kabhi na
+    // baje — silence better hai galat gaane se.
+    if (token == _playToken) {
+      try {
+        await player.pause();
+      } catch (_) {
+        // player me abhi koi source hi na ho to pause() error de sakta
+        // hai — usse ignore karo, ye sirf best-effort silence hai
+      }
+    }
+    if (token != _playToken) return; // pause ke dauraan koi naya tap aa gaya
+
     mediaItem.add(_toMediaItem(song));
     playbackState.add(
       playbackState.value.copyWith(
-        controls: const [MediaControl.stop],
-        // BUG FIX (crash log 2026-09-16): `controls` yahan sirf 1 item
-        // (`stop`, index 0) tak shrink kiya jaata hai, lekin
-        // `androidCompactActionIndices` copyWith() me pichhli value
-        // (`_broadcastState()` se aaya [0, 1, 3], normal playback ke
-        // controls — previous/play-pause/stop/next — ke liye) carry
-        // forward kar deta tha kyunki yahan explicitly overwrite nahi
-        // kiya gaya tha. Notification compact-view index 1 aur 3 maangta
-        // tha jabki sirf 1 control (index 0) tha — Android ka
-        // `RemoteServiceException: setShowActionsInCompactView: action 1
-        // out of bounds (max 0)` isi mismatch se aata hai, aur ye poore
-        // app process ko turant crash kar deta hai (system-level
-        // notification-inflation crash, Dart try/catch se bilkul bhi
-        // pakda nahi ja sakta — matlab jab bhi koi naya gaana load hona
-        // shuru hota (loading state) is line ke through guzarta, crash
-        // ho jaata tha). Fix: `controls` jab bhi shrink/badle,
-        // `androidCompactActionIndices` ko bhi USI list ke saath explicitly
-        // match karo.
-        androidCompactActionIndices: const [0],
+        // BUG FIX (crash log 2026-09-16, v11): pehle yahan `controls` ko
+        // sirf 1 item (`stop`) tak shrink kiya jaata tha, jabki
+        // `androidCompactActionIndices` purani [0,1,3] wali value carry
+        // forward karta tha — is mismatch se Android crash karta tha
+        // (`setShowActionsInCompactView: action 1 out of bounds`).
+        //
+        // BUG FIX (2026-09-16, v12): us v11 fix ka side-effect tha —
+        // `androidCompactActionIndices: [0]` ke saath notification
+        // 10-12 sec tak sirf EK hi button (Stop) wali "skeleton" state me
+        // atka reh jaata tha, aur MIUI jaisi OEMs is 1-button state ko
+        // khaali/bina-buttons dikha deti hain (screenshot me yahi dikha).
+        // Isse bhi bura: agar ismein koi naya `playbackEventStream` event
+        // nahi aata (steady state me aisa hona normal hai), to notification
+        // waisi hi atki reh jaati thi jab tak naya URL resolve na ho jaaye.
+        // Fix: loading ke dauraan bhi HAMESHA standard 4-control set
+        // (previous/play-pause/stop/next) hi use karo — jaise normal
+        // playback me hota hai — sirf `playing: false` aur
+        // `processingState: loading` badlo. Isse controls/indices ka size
+        // kabhi mismatch nahi hota (crash-safe) aur notification hamesha
+        // full button row dikhata hai, kabhi bhi ek-button "broken" state
+        // nahi dikhti.
+        controls: const [
+          MediaControl.skipToPrevious,
+          MediaControl.play,
+          MediaControl.stop,
+          MediaControl.skipToNext,
+        ],
+        androidCompactActionIndices: const [0, 1, 3],
         processingState: AudioProcessingState.loading,
         playing: false,
       ),
