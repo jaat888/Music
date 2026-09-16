@@ -921,3 +921,74 @@ false de), SnackBar dikhta hai — koi crash nahi.
 
 **Repo me push karne ke baad zaroori:** `flutter pub get` (naya
 `speech_to_text` dependency ke liye).
+
+---
+
+### Batch 19 (2026-09-16) — Next/previous crash fix + unlimited search scroll
+
+**#47 — "Next par bahut baar tap karo to app crash ho jaata hai" (RESOLVED)**
+**File:** `lib/services/background_service.dart`
+**Root cause:** `skipToNext()`/`skipToPrevious()` pehle turant har tap pe
+`_playCurrentFromQueue()` call karte the, jo turant `playWithRetry()` ->
+`YoutubeService.getAudioUrl()` shuru kar deta hai — ismein NewPipeExtractor
+(WebView-based JS solver), youtube_explode_dart, aur Piped, teeno heavy
+network/native calls hain. `_playToken` sirf ye rokta hai ki PURANA result
+final playback-state ko overwrite kare — lekin har tap ka poora resolve
+pipeline (WebView spin-up sameet) fir bhi background me chalta rehta hai,
+chahe uska result baad me discard ho jaaye. Jab user next ko bahut
+jaldi-jaldi (ek ke baad ek) dabata hai, kai saare in-flight
+WebView/network extractions ek saath overlap ho jaate hain — MIUI jaise
+kam-RAM/aggressive OEMs par ye native crash (OOM ya WebView instance
+limit) trigger karta hai, sirf Flutter-side error nahi (isliye koi
+catch/onError isko pakad nahi paata tha, aur "next kaam nahi karta" jaisa
+symptom bhi isi wajah se aata tha).
+**Fix:** `skipToNext()`/`skipToPrevious()` ab turant resolve shuru nahi
+karte — sirf `QueueService` ka current index turant update hota hai, aur
+asli `_playCurrentFromQueue()` ek chhoti 350ms debounce (`Timer`) ke baad
+hi chalta hai. Isse agar user 5 baar jaldi-jaldi next dabaye, sirf EK hi
+resolve pipeline shuru hoga (aakhri index ke liye) — beech ke saare taps
+sirf debounce timer reset karte hain, koi extra heavy call nahi karte.
+`stop()` ab is naye `_skipDebounce` timer ko bhi cancel karta hai.
+
+**#48 — "Search unlimited nahi hai, limited hi gaane aate hain" (RESOLVED,
+device pe confirm karna)**
+**Files:** `lib/services/youtube_service.dart`, `lib/screens/search_screen.dart`
+**Root cause:** `search()` ka Layer 1 (`dart_ytmusic_api`'s `searchSongs()`)
+ek single API call hai jiska koi continuation/pagination is wrapper me
+expose hi nahi hota — jitne results ek baar me aa jaayein bas utne hi,
+dobara wahi call karne pe wahi results wapas aate. Isi wajah se search
+list hamesha ek fixed chhoti size pe atak jaati thi, chahe `max` param
+jitna bhi bada rakho.
+**Fix:** `youtube_explode_dart`'s generic `yt.search.getVideos()` (jo
+already Layer 2 fallback me use hota hai) actual me paginated hota hai
+(`.nextPage()` se agla page milta hai) — isko naye
+`YoutubeService.loadMoreSearchResults(query)` method me "load more"
+source banaya hai:
+- Pehla page (best-ranked, YT Music curated) ab bhi normal `search()` se
+  hi aata hai — koi change nahi.
+- `search_screen.dart` ke Songs tab me ab `ScrollController` hai — list
+  ke aakhri ~400px reh jaane pe khud-ba-khud agla page load hota hai
+  (infinite scroll, jaisa YouTube Music karta hai). Agar results itne
+  kam hain ki list scroll hi nahi hoti (chhoti screen), ek post-frame
+  check (`_maybeAutoLoadMore()`) khud hi agla page mangwa leta hai.
+- Duplicate IDs (jo Layer 1 ke pehle batch me already dikh chuke) naye
+  pages se filter ho jaate hain.
+- List ke bilkul aakhir me ek chhota marker hai — "Aur gaane nahi bache"
+  jab YouTube ke paas sach me is query ke liye kuch bacha na ho, warna
+  loading spinner (khud-ba-khud agla page laata hua).
+- Naya search (`_runSearch`) hamesha pagination state (`_hasMore`,
+  `_loadingMore`) reset karta hai taaki purani query ka "load more" naye
+  query me continue na ho.
+**IMPORTANT ASSUMPTION (device pe confirm karna):** `getVideos()` ke
+return object (jiska exact type-name is codebase me kahin explicitly
+likha nahi gaya — existing Layer 2 code bhi sirf type-inference se
+use karta hai) par `.nextPage()` method available hone ka assumption
+hai (youtube_explode_dart ka well-known pagination pattern). Isko
+verify karne ke liye jaanbujhke `dynamic` + per-item try/catch use kiya
+gaya hai (dekho NOTES #34/#45 ke jaise assumptions) — agar `.nextPage()`
+kisi wajah se na ho ya package ka real behaviour alag nikle,
+`loadMoreSearchResults()` bas khaali list de dega (list turant "Aur
+gaane nahi bache" pe end ho jayegi, jaise pehle se tha) — koi crash ya
+compile error nahi hoga, bas "unlimited scroll" wapas purane fixed-size
+jaisa reduce ho jayega. Real device pe scroll karke confirm karna zaroori
+hai ki naye pages sach me aa rahe hain.

@@ -171,20 +171,50 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> stop() async {
     _playToken++; // koi bhi pending stale resolve ab kuch overwrite nahi karega
+    _skipDebounce?.cancel();
     await player.stop();
     await super.stop();
   }
 
+  // BUG FIX (2026-09-16, v16): "next par bahut baar tap karo to app crash".
+  // Root cause: skipToNext()/skipToPrevious() pehle turant har tap pe
+  // _playCurrentFromQueue() call karte the, jo turant playWithRetry() ->
+  // YoutubeService.getAudioUrl() shuru kar deta hai — ismein NewPipeExtractor
+  // (WebView-based JS solver) + youtube_explode_dart + Piped, teeno heavy
+  // network/native calls hain. _playToken sirf ye rokta hai ki PURANA result
+  // final state ko overwrite kare — lekin har tap ka poora resolve pipeline
+  // (WebView spin-up sameet) fir bhi background me chalta rehta hai, chahe
+  // uska result baad me discard ho jaaye. User jab next ko bahut jaldi-jaldi
+  // (ek ke baad ek) dabata hai, kai saare in-flight WebView/network
+  // extractions ek saath overlap ho jaate hain — MIUI jaise kam-RAM/aggressive
+  // OEMs par ye native crash (OOM ya WebView instance limit) trigger karta
+  // hai, sirf Flutter-side error nahi (isliye koi catch/onError isko pakad
+  // nahi paata tha).
+  // Fix: skip ab turant resolve shuru nahi karta — sirf queue index turant
+  // update hota hai (taaki UI/index turant sahi rahe), aur asli
+  // _playCurrentFromQueue() ek chhoti 350ms debounce ke baad hi chalta hai.
+  // Isse agar user 5 baar jaldi-jaldi next dabaye, sirf EK hi resolve
+  // pipeline shuru hoga (aakhri wale index ke liye) — beech ke saare taps
+  // sirf debounce timer ko reset karte hain, koi extra heavy call nahi karte.
+  Timer? _skipDebounce;
+
   @override
   Future<void> skipToNext() async {
     QueueService.instance.next();
-    await _playCurrentFromQueue();
+    _debouncedPlayCurrent();
   }
 
   @override
   Future<void> skipToPrevious() async {
     QueueService.instance.previous();
-    await _playCurrentFromQueue();
+    _debouncedPlayCurrent();
+  }
+
+  void _debouncedPlayCurrent() {
+    _skipDebounce?.cancel();
+    _skipDebounce = Timer(const Duration(milliseconds: 350), () {
+      _playCurrentFromQueue();
+    });
   }
 
   @override

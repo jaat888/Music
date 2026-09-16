@@ -192,6 +192,77 @@ class YoutubeService {
 
   final http.Client _http = http.Client();
 
+  // ---------------- Search pagination state ("unlimited" scroll) ----------------
+  //
+  // BUG FIX (2026-09-16, v17): "search me limited hi gaane aate hain,
+  // unlimited nahi". Root cause: search() hamesha sirf EK request karta
+  // tha — Layer 1 (dart_ytmusic_api's searchSongs()) apne aap me ek single
+  // API call hai jiska koi continuation/pagination is wrapper me expose
+  // hi nahi hota (jitne results ek baar me aa jaayein, bas utne hi —
+  // dobara wahi call karne pe wahi results wapas aayenge, "agla page"
+  // jaisa kuch nahi hai). Isi wajah se list hamesha ek fixed chhoti size
+  // (~20-30) pe atak jaati thi, chahe max jitna bhi bada rakho.
+  // Fix: youtube_explode_dart ka generic search (`yt.search.search()`)
+  // asal me paginated hai (`SearchList.nextPage()` se agla page milta
+  // hai, jab tak YouTube ke paas aur results hon) — isko "load more"
+  // source banaya hai. Pehla page (best-ranked, YT Music curated) ab bhi
+  // search() se hi aata hai; jab user list ke end tak scroll kare,
+  // loadMoreSearchResults() is naye paginated explode search se agla
+  // page laata hai aur jode chala jaata hai — isse scroll karte rehne pe
+  // results khatam hone ka koi fixed limit nahi rehta (jab tak YouTube
+  // khud ke paas results khatam na kar de).
+  // `dynamic` jaanbujhke — youtube_explode_dart ke getVideos() ka exact
+  // return type (SearchList<Video> ya kuch alag naam) is codebase me kahin
+  // explicitly likha/verify nahi hua (upar wala existing Layer 2 code bhi
+  // `final videos = await yt.search.getVideos(query);` type-inference se
+  // hi karta hai, kabhi explicit type nahi likhta). Galat type-naam guess
+  // karne se pehle bhi compile error aa chuka hai (NOTES.md Batch 16),
+  // isliye yahan dynamic + try/catch (jaisa searchArtists/searchPlaylists
+  // upar karte hain) — agar package ka `.nextPage()` kisi wajah se na ho
+  // ya alag kaam kare, "load more" bas khaali list de dega (list end jaisa
+  // dikhega), poori app crash nahi hogi.
+  dynamic _moreSearchList;
+  String? _moreSearchQuery;
+
+  // "next page" chahiye ho to isko call karo — pehli baar isi query ke
+  // liye call hone par explode search ka PEHLA page deta hai (jo already
+  // search() screen pe dikh chuka hoga, isliye caller apni taraf se
+  // duplicate IDs filter kare), uske baad har call agla page deti hai.
+  // Khaali list wapas aane ka matlab hai YouTube ke paas is query ke liye
+  // aur results nahi bache — list yahi khatam maano.
+  Future<List<YtResult>> loadMoreSearchResults(String query) async {
+    if (query.trim().isEmpty) return [];
+    try {
+      final yt = await _getYt();
+      if (_moreSearchQuery != query || _moreSearchList == null) {
+        _moreSearchList = await yt.search.getVideos(query);
+        _moreSearchQuery = query;
+      } else {
+        final dynamic next = await _moreSearchList.nextPage();
+        if (next == null) return []; // aur page nahi bache
+        _moreSearchList = next;
+      }
+      final results = <YtResult>[];
+      for (final dynamic v in (_moreSearchList as Iterable)) {
+        try {
+          results.add(YtResult(
+            id: v.id.value as String,
+            title: v.title as String,
+            author: v.author as String,
+            thumb: v.thumbnails.highResUrl as String,
+            duration: (v.duration as Duration?)?.inSeconds ?? 0,
+          ));
+        } catch (_) {
+          continue; // ek item ka shape alag nikla to bas usko skip karo
+        }
+      }
+      return results;
+    } catch (e) {
+      print('LOAD MORE SEARCH ERROR ($query): $e');
+      return [];
+    }
+  }
+
   // youtube_explode_dart client — lazily banta hai, ek baar bante hi
   // reuse hota hai (naya banane me Deno solver dobara init karna padega).
   YoutubeExplode? _yt;

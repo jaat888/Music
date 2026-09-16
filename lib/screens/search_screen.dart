@@ -81,12 +81,23 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
   final SpeechToText _speech = SpeechToText();
   bool _listening = false;
 
+  // BUG FIX (2026-09-16, v17): "search unlimited nahi hai, limited gaane
+  // aate hain" — ab Songs tab scroll ke end tak pahunchne pe khud-ba-khud
+  // agla page load karta hai (dekho youtube_service.dart ka
+  // loadMoreSearchResults()). _hasMore false hone ka matlab hai YouTube
+  // ke paas is query ke liye aur results nahi bache (list khud khatam ho
+  // gayi hai, koi bug nahi).
+  final ScrollController _songsScrollController = ScrollController();
+  bool _loadingMore = false;
+  bool _hasMore = true;
+
   @override
   void initState() {
     super.initState();
     _controller = TextEditingController(text: widget.initialQuery ?? '');
     _tabController = TabController(length: 3, vsync: this);
     _tabController.addListener(_onTabChanged);
+    _songsScrollController.addListener(_onSongsScroll);
     _loadHistory();
     if ((widget.initialQuery ?? '').trim().isNotEmpty) {
       _runSearch(widget.initialQuery!.trim());
@@ -99,8 +110,62 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
     _controller.dispose();
     _tabController.removeListener(_onTabChanged);
     _tabController.dispose();
+    _songsScrollController.removeListener(_onSongsScroll);
+    _songsScrollController.dispose();
     if (_listening) _speech.stop();
     super.dispose();
+  }
+
+  // List ke aakhri ~400px reh jaane pe agla page load shuru kar do —
+  // isse user ko "load more" button dabana nahi padta, YouTube Music jaisa
+  // seamless infinite scroll milta hai.
+  void _onSongsScroll() {
+    if (_loadingMore || !_hasMore || !_searched) return;
+    if (!_songsScrollController.hasClients) return;
+    final pos = _songsScrollController.position;
+    if (pos.pixels >= pos.maxScrollExtent - 400) {
+      _loadMoreResults();
+    }
+  }
+
+  // BUG FIX (v17, cont.): agar results itne kam hain ki list screen ko
+  // scroll hi nahi karti (chhoti screen ya bahut kam results), to
+  // _onSongsScroll() kabhi trigger hi nahi hota (scroll listener sirf
+  // asal scroll event pe fire hota hai) — list "unlimited" feel hone ke
+  // bajaye hamesha wahi chhota batch dikhati reh jaati. Isliye har naye
+  // results set ke baad (initial search ya load-more), ek frame ke baad
+  // check karte hain ki list abhi bhi scrollable nahi hai — agar nahi
+  // hai aur aur results ho sakte hain, to khud hi agla page load kar
+  // dete hain.
+  void _maybeAutoLoadMore() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _loadingMore || !_hasMore) return;
+      if (!_songsScrollController.hasClients) return;
+      if (_songsScrollController.position.maxScrollExtent <= 0) {
+        _loadMoreResults();
+      }
+    });
+  }
+
+  Future<void> _loadMoreResults() async {
+    if (_loadingMore || !_hasMore || _query.isEmpty) return;
+    setState(() => _loadingMore = true);
+    final more = await YoutubeService.instance.loadMoreSearchResults(_query);
+    if (!mounted) return;
+    // Pehle se dikh rahe IDs (Layer 1 ka pehla batch ya pichhle pages) ko
+    // dobara na dikhaye — explode ka page 1 kabhi-kabhi YT Music ke
+    // results se overlap kar sakta hai.
+    final existingIds = _results.map((r) => r.id).toSet();
+    final fresh = more.where((r) => !existingIds.contains(r.id)).toList();
+    setState(() {
+      _results = [..._results, ...fresh];
+      _loadingMore = false;
+      // Agar YouTube ne bilkul khaali page diya (list khud khatam), ya
+      // lagataar sirf duplicate hi mile (matlab naya kuch nahi bacha), to
+      // aage try karna band kar do.
+      if (more.isEmpty) _hasMore = false;
+    });
+    _maybeAutoLoadMore();
   }
 
   // Jis tab pe user pehli baar jaaye, uski results us waqt load hoti hain
@@ -212,6 +277,10 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
       _artistResults = [];
       _playlistsLoaded = false;
       _playlistResults = [];
+      // Naya query — purani pagination state reset karo taaki naye query
+      // ke "load more" purane query ke page se continue na ho.
+      _hasMore = true;
+      _loadingMore = false;
     });
     // Agar user pehle se Artists/Playlists tab pe hai, turant reload karo
     if (_tabController.index == 1) {
@@ -258,6 +327,7 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
                 ' hai YouTube rate-limit kar raha ho)'
             : null;
       });
+      _maybeAutoLoadMore();
     } catch (e) {
       print('SEARCH _runSearch() ERROR: $e');
       if (!mounted) return;
@@ -467,15 +537,20 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
       );
     }
 
+    // Extra rows: 1 source badge (agar hai) + 1 "load more" spinner/end
+    // marker row hamesha aakhir me (jab tak search ho chuki hai).
+    final hasHeader = _searchSource != null;
+
     return ListView.builder(
+      controller: _songsScrollController,
       padding: const EdgeInsets.symmetric(horizontal: 16),
-      itemCount: _results.length + (_searchSource != null ? 1 : 0),
+      itemCount: _results.length + (hasHeader ? 1 : 0) + 1,
       itemBuilder: (context, i) {
         // TEMPORARY debug badge — batata hai results kaunse layer se aaye
         // (YT Music vs generic YouTube fallback), taaki "purane/wrong
         // gaane aa rahe hain" jaisi complaints me pata chal sake ki YT
         // Music layer fail kyun ho raha tha.
-        if (_searchSource != null) {
+        if (hasHeader) {
           if (i == 0) {
             return Padding(
               padding: const EdgeInsets.only(bottom: 8),
@@ -487,6 +562,39 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
           }
           i -= 1;
         }
+
+        // BUG FIX (2026-09-16, v17): "search unlimited nahi hai" — list
+        // ka aakhri item ab ek "load more" marker hai. Jab tak aur
+        // results available ho sakte hain (_hasMore), yahan pahunchte hi
+        // _onSongsScroll() khud-ba-khud agla page load kar deta hai
+        // (spinner dikhta hai). Jab YouTube ke paas is query ke liye
+        // sach me aur kuch bacha na ho (_hasMore false), "Aur gaane nahi
+        // bache" dikhta hai — taaki ye clear ho ki list-end hai, koi
+        // atka hua loading nahi.
+        if (i == _results.length) {
+          if (!_hasMore) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 20),
+              child: Center(
+                child: Text(
+                  'Aur gaane nahi bache',
+                  style: AppText.bodyS(color: kTextDim),
+                ),
+              ),
+            );
+          }
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 20),
+            child: Center(
+              child: SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2.5, color: kGreen),
+              ),
+            ),
+          );
+        }
+
         final r = _results[i];
         final song = r.toSong();
         return Padding(
