@@ -1,0 +1,25 @@
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        // NewPipeExtractor (newpipeextractor_dart ki transitive Android
+        // dependency, com.github.teamnewpipe:NewPipeExtractor) sirf
+        // JitPack pe hosted hai, Maven Central/Google pe nahi. Isके
+        // bina "Could not find com.github.teamnewpipe:NewPipeExtractor"
+        // error aata hai kyunki flutter create se generate hone wale
+        // scaffold me ye repo by default include nahi hoti.
+        maven { url 'https://jitpack.io' }
+    }
+}
+
+rootProject.buildDir = '../build'
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(':app')
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}
