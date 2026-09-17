@@ -352,7 +352,14 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       final params = await _equalizer.parameters;
       for (final band in params.bands) {
         final target = _interpolatedGainDb(uiGains, band.centerFrequency);
-        final clamped = target.clamp(band.lowerGainDb, band.upperGainDb);
+        // BUG FIX (build break): `AndroidEqualizerBand` khud lowerGainDb/
+        // upperGainDb expose nahi karta — allowed dB range poori equalizer
+        // (`params`) pe hoti hai, har band pe alag nahi. `num.clamp()` bhi
+        // `num` deta hai, `double` nahi — `setGain()` ko double chahiye,
+        // isliye `.toDouble()`.
+        final clamped = target
+            .clamp(params.minDecibels, params.maxDecibels)
+            .toDouble();
         await band.setGain(clamped);
       }
     } catch (e) {
