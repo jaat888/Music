@@ -79,6 +79,23 @@
 // confirmed) pe update kiya — purana `2.6.0/dist/index.min.js` version
 // hi wrong path tha.
 //
+// ===================== ATTEMPT #4 (yahi file, current) =====================
+// Attempt #3 se real device log me NAYA error mila: "bgutils-js module
+// load hua lekin Challenge export nahi mila" — matlab ES module ab load
+// ho raha tha (syntax error gaya), lekin module ke exports galat jagah
+// se padhe ja rahe the. bgutils-js@3.2.0 ka actual source seedha check
+// kiya (jsdelivr/unpkg pe) aur DO bugs mile:
+//   1. `dist/index.js` ke top-level exports `BG` (namespace) + `default`
+//      + kuch utils hain — `Challenge`/`BotGuardClient` seedha top-level
+//      pe nahi hote, `BG` ke ANDAR hote hain. Fix: `moduleNamespace.BG`.
+//   2. Manual mint-flow me `BG.GenerateIT` naam ka export hi exist nahi
+//      karta (library actual me sirf Challenge/PoToken/WebPoMinter/
+//      BotGuardClient export karti hai), aur `mintAsWebSafeString`
+//      (capital S) bhi galat method-name tha (real: `mintAsWebsafeString`,
+//      lowercase s). Fix: manual BotGuardClient+GenerateIT+Minter steps
+//      hata ke library ka apna tested helper `BG.PoToken.generate()` use
+//      kiya — same kaam, kam naming-mismatch risk.
+//
 // *** IMPORTANT — HONESTY NOTE (isko README/NOTES.md me bhi rakhna) ***
 // - Ye is environment (sandboxed container, no network/Android SDK) me
 //   COMPILE ya LIVE-TEST NAHI ho saka hai. `loadHtmlString(..., baseUrl:)`
@@ -256,12 +273,22 @@ class PoTokenService {
     // `import()` browser ka native module loader use karta hai, jo ES
     // module syntax ko sahi tarah samajhta hai — aur classic (non-module)
     // script context se bhi legal hai.
-    if (!window.__bgUtils) {
-      window.__bgUtils = await import("BGUTILS_CDN_URL");
+    if (!window.__bgUtilsModule) {
+      window.__bgUtilsModule = await import("BGUTILS_CDN_URL");
     }
-    const BG = window.__bgUtils;
-    if (!BG || !BG.Challenge) {
-      reply({ok: false, error: 'bgutils-js module load hua lekin Challenge export nahi mila'});
+    // ATTEMPT #4 fix (dekho sursathi_app_log.txt: "Challenge export nahi
+    // mila" — matlab syntax load ho gaya tha, ab ye NAYA issue tha):
+    // `dist/index.js` ke top-level exports `BG`, `default`, aur kuch
+    // utils hain — `Challenge`/`BotGuardClient` seedha top-level pe NAHI
+    // hote, wo `BG` namespace ke ANDAR hote hain (bgutils-js source pe
+    // khud confirm kiya: `dist/core/index.js` me
+    // `export * as Challenge from './challengeFetcher.js'` waghera, aur
+    // `dist/index.js` ye sab `BG` naam se re-export karta hai). Isliye
+    // `moduleNamespace.Challenge` hamesha undefined tha — sahi path
+    // `moduleNamespace.BG.Challenge` hai.
+    const BG = window.__bgUtilsModule.BG;
+    if (!BG || !BG.Challenge || !BG.PoToken) {
+      reply({ok: false, error: 'bgutils-js module load hua lekin BG.Challenge/BG.PoToken export nahi mile'});
       return;
     }
 
@@ -321,22 +348,28 @@ class PoTokenService {
       return;
     }
 
-    const botguardClient = await BG.BotGuardClient.create({
+    // ATTEMPT #4 fix (dusra issue jo isi step me chhupa hua tha, agla
+    // round-trip lagne se pehle hi source check karke pakड़ liya):
+    // 1) `BG.GenerateIT` naam ka export bgutils-js me EXIST HI NAHI karta
+    //    (library ka actual `core/index.js` sirf `Challenge`, `PoToken`,
+    //    `WebPoMinter`, `BotGuardClient` export karta hai — `GenerateIT`
+    //    kahi nahi hai) — ye call `undefined.fetch(...)` pe crash karta.
+    // 2) `minter.mintAsWebSafeString()` (capital S) bhi galat naam tha —
+    //    real method `mintAsWebsafeString()` (lowercase s) hai.
+    // Fix: manual BotGuardClient+GenerateIT+WebPoMinter steps hata ke
+    // library ka apna tested all-in-one helper `BG.PoToken.generate()`
+    // use kiya — ye andar hi ye poora flow (snapshot -> GenerateIT ->
+    // mint) sahi method names ke saath karta hai, isliye naming-mismatch
+    // ka risk khatam.
+    const { poToken } = await BG.PoToken.generate({
       program: challenge.program,
       globalName: challenge.globalName,
-      globalObj: window,
+      bgConfig,
     });
-
-    const webPoSignalOutput = [];
-    const botguardResponse = await botguardClient.snapshot({ webPoSignalOutput });
-
-    const integrityTokenResponse = await BG.GenerateIT.fetch(
-      "REQUEST_KEY", botguardResponse, bgConfig);
-
-    const minter = await BG.WebPoMinter.create(
-      { integrityTokenResponse }, webPoSignalOutput);
-
-    const poToken = await minter.mintAsWebSafeString(visitorData);
+    if (!poToken) {
+      reply({ok: false, error: 'BG.PoToken.generate() se empty/null poToken mila'});
+      return;
+    }
     reply({ok: true, token: poToken, visitorData: visitorData});
   } catch (e) {
     reply({ok: false, error: String(e && e.message || e)});
