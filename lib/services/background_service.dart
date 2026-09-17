@@ -392,25 +392,16 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
   // Streaming URL se seedha play karo (YouTube stream)
   Future<void> playSong(Song song, String url) =>
-      _playSong(song, url, ++_playToken, useHeaders: true);
+      _playSong(song, url, ++_playToken, useHeaders: false);
 
-  // BUG FIX (2026-09-17, Attempt #5 — poToken confirm mint ho gaya
-  // (real-device log: "PoToken mint OK"), lekin stream fir bhi turant
-  // drop hua — matlab is case (NewPipeExtractor-resolved URL) ke liye
-  // poToken hi asli wajah NAHI thi. Doosra strong suspect: `cdnHeaders`
-  // (hardcoded DESKTOP Chrome User-Agent/Referer/Origin) — jo har URL pe
-  // blindly lagaya jaata hai, chahe wo kisi bhi client (native
-  // NewPipeExtractor/Android/iOS) se aaya ho. Real mobile-client se aaya
-  // signed URL pe desktop-browser headers bhejna khud mismatch/CDN-reject
-  // ka reason ho sakta hai.
-  // Isko guess-karke-dobara-build karne ki jagah, retry cycle ke andar hi
-  // DONO strategy khud test hoti hai (same build, agla real-device log hi
-  // definitively bata dega): pehla attempt headers ke saath (purana
-  // behavior), stream-drop retry #1 BINA headers ke, retry #2 phir headers
-  // ke saath (fresh URL), retry #3 phir bina — jo bhi attempt "YT PLAY OK"
-  // ke baad drop NAHI hota, uske log se pata chal jayega sahi strategy
-  // kaunsi hai.
-  bool _useHeadersForAttempt(int attemptNumber) => attemptNumber.isEven;
+  // BUG FIX (2026-09-17, Attempt #5 RESULT — real-device log confirm
+  // kiya): "WITH cdnHeaders" (desktop Chrome UA) har baar turant "Source
+  // error" deta tha; "WITHOUT headers" (raw URL, jaisa real native
+  // client bhejta) attempts ke baad koi aur drop log nahi hua — matlab
+  // WAHI sahi strategy hai. Ab "WITHOUT headers" hi PRIMARY/default hai;
+  // "WITH headers" sirf ek dur ka fallback rahega (retry ke ek attempt
+  // me) — kabhi kisi rare stream ko fir bhi unki zaroorat pad jaaye.
+  bool _useHeadersForAttempt(int attemptNumber) => attemptNumber == 2;
 
   Future<void> _playSong(
     Song song,
@@ -578,7 +569,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // NewPipe/explode/Piped resolve nahi, isliye "next" ab instant hai.
     final cached = _urlCache.remove(song.id);
     if (cached != null) {
-      await _playSong(song, cached, token, useHeaders: true);
+      await _playSong(song, cached, token, useHeaders: false);
       return;
     }
     for (var attempt = 1; attempt <= 3; attempt++) {
@@ -613,7 +604,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       }
       if (token != _playToken) return; // resolve hone tak user aage badh chuka
       if (url != null) {
-        await _playSong(song, url, token, useHeaders: true);
+        await _playSong(song, url, token, useHeaders: false);
         return;
       }
       if (attempt < 3) {
