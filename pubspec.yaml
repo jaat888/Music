@@ -97,7 +97,13 @@ dependencies:
   # ke liye add kiya. UNTESTED (sandbox me build/run nahi ho saka, dekho
   # NOTES.md) — standard/well-maintained package hai, par pehli real CI
   # build ka log dekhna zaroori hai.
-  file_picker: ^8.1.3
+  # BUG FIX (build break, 2026-09-17): 8.1.3 ka AAR android-34 ke against
+  # compiled tha, jabki project compileSdk 36 pe hai — 'file_picker is
+  # currently compiled against android-34' error. 11.0.2 pe bump kiya
+  # (abhi bhi purani FilePickerResult/`.platform.pickFiles()` API hai,
+  # backup_restore_screen.dart me koi code-change nahi chahiye — v12 me ye
+  # API hat jaayegi, isliye 12+ pe mat jaana bina us screen ko update kiye).
+  file_picker: ^11.0.2
 
   # ---------- Misc utils ----------
   intl: ^0.18.1
