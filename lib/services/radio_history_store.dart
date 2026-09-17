@@ -25,6 +25,8 @@ class RadioHistoryEntry {
   final String title;
   final List<String> tags;
   final String language;
+  final String artist;
+  final int duration;
   final DateTime playedAt;
   final bool wasSkipped;
   final int? skipPositionSec;
@@ -34,6 +36,8 @@ class RadioHistoryEntry {
     required this.title,
     required this.tags,
     required this.language,
+    this.artist = '',
+    this.duration = 0,
     required this.playedAt,
     required this.wasSkipped,
     this.skipPositionSec,
@@ -45,6 +49,8 @@ class RadioHistoryEntry {
       title: json['title'] as String? ?? '',
       tags: (json['tags'] as List?)?.cast<String>() ?? const [],
       language: json['language'] as String? ?? '',
+      artist: json['artist'] as String? ?? '',
+      duration: (json['duration'] as num?)?.toInt() ?? 0,
       playedAt: DateTime.fromMillisecondsSinceEpoch(
         (json['playedAt'] as num?)?.toInt() ?? 0,
       ),
@@ -59,6 +65,8 @@ class RadioHistoryEntry {
       'title': title,
       'tags': tags,
       'language': language,
+      'artist': artist,
+      'duration': duration,
       'playedAt': playedAt.millisecondsSinceEpoch,
       'wasSkipped': wasSkipped,
       'skipPositionSec': skipPositionSec,
@@ -130,6 +138,8 @@ class RadioHistoryStore {
     required String title,
     required List<String> tags,
     required String language,
+    String artist = '',
+    int duration = 0,
     required bool wasSkipped,
     int? skipPositionSec,
   }) async {
@@ -140,6 +150,8 @@ class RadioHistoryStore {
         title: title,
         tags: tags,
         language: language,
+        artist: artist,
+        duration: duration,
         playedAt: DateTime.now(),
         wasSkipped: wasSkipped,
         skipPositionSec: skipPositionSec,
@@ -179,6 +191,8 @@ class RadioHistoryStore {
         title: entry.title,
         tags: entry.tags,
         language: entry.language,
+        artist: entry.artist,
+        duration: entry.duration,
         playedAt: entry.playedAt,
         wasSkipped: true,
         skipPositionSec: math.max(0, skipPositionSec),
@@ -186,6 +200,62 @@ class RadioHistoryStore {
       await _persist();
       return;
     }
+  }
+
+  /// Lightweight persisted behaviour signals for Radio ranking.
+  /// Values are intentionally small, so history informs recommendations but
+  /// cannot overpower language/mood/randomness.
+  Map<String, double> tagAffinity() {
+    final out = <String, double>{};
+    for (final entry in _entries) {
+      final signal = _entrySignal(entry);
+      for (final tag in entry.tags) {
+        out[tag] = (out[tag] ?? 0) + signal;
+      }
+    }
+    return out;
+  }
+
+  Map<String, double> artistAffinity() {
+    final out = <String, double>{};
+    for (final entry in _entries) {
+      if (entry.artist.trim().isEmpty) continue;
+      final key = entry.artist.trim().toLowerCase();
+      out[key] = (out[key] ?? 0) + _entrySignal(entry);
+    }
+    return out;
+  }
+
+  Map<String, double> languageAffinity() {
+    final out = <String, double>{};
+    for (final entry in _entries) {
+      final key = entry.language.trim().toLowerCase();
+      if (key.isEmpty) continue;
+      out[key] = (out[key] ?? 0) + _entrySignal(entry);
+    }
+    return out;
+  }
+
+  double songAffinity(String songId) {
+    var value = 0.0;
+    for (final entry in _entries) {
+      if (entry.songId == songId) value += _entrySignal(entry);
+    }
+    return value;
+  }
+
+  double _entrySignal(RadioHistoryEntry entry) {
+    if (!entry.wasSkipped) return 1.0;
+    final duration = entry.duration;
+    final position = entry.skipPositionSec ?? 0;
+    if (duration > 0) {
+      final ratio = (position / duration).clamp(0.0, 1.0);
+      if (ratio >= .85) return .45;
+      if (ratio >= .60) return .10;
+      if (ratio >= .30) return -.35;
+      if (ratio >= .10) return -.80;
+    }
+    return -1.0;
   }
 
   /// Sirf testing/debug/reset ke liye — poori history clear karo.

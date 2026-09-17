@@ -84,6 +84,11 @@ class RadioEngine {
   static const Duration likedBoostCooldown = Duration(hours: 12);
   static const double latestSoftBoost = 1.5;
   static const double randomJitter = 2.5;
+  // Adaptive behaviour layer: listening history gently changes future picks.
+  static const double behaviourWeight = 3.5;
+  static const double artistWeight = 2.5;
+  static const double languageAffinityWeight = 1.5;
+  static const double explorationWeight = 1.2;
   static const double scoreFloor = 0.1;
 
   // Radio-session failures are hard blocked until the screen/session is reset.
@@ -186,6 +191,11 @@ class RadioEngine {
     final targetShare = languageSet.isEmpty ? 1.0 : 1.0 / languageSet.length;
 
     final weights = <double>[];
+    // Build persisted behaviour aggregates once per selection pass, not once
+    // per candidate. This keeps Radio ranking cheap even with large pools.
+    final tagAffinity = _history.tagAffinity();
+    final artistAffinity = _history.artistAffinity();
+    final languageAffinity = _history.languageAffinity();
     for (final candidate in pool) {
       // 1) Mood score, including the existing temporary skip penalty.
       final tags = candidate.tags.isEmpty ? const ['mixed'] : candidate.tags;
@@ -203,13 +213,29 @@ class RadioEngine {
         score += likedWeight;
       }
 
-      // 3) Search-rank popularity and latest/newness remain soft hints.
+      // 3) Behaviour learning: completion/skip history teaches Radio what
+      // the listener actually enjoys, even when they never press Like.
+      final songAffinity = _history.songAffinity(candidate.song.id);
+      final language = candidate.language.trim().toLowerCase();
+      final tagSignal = tags.fold<double>(0, (sum, tag) => sum + (tagAffinity[tag] ?? 0)) / tags.length;
+      final artistSignal = artistAffinity[candidate.song.artist.trim().toLowerCase()] ?? 0;
+      final languageSignal = languageAffinity[language] ?? 0;
+      score += _boundedBehaviour(tagSignal + songAffinity * .5) * behaviourWeight;
+      score += _boundedBehaviour(artistSignal) * artistWeight;
+      score += _boundedBehaviour(languageSignal) * languageAffinityWeight;
+
+      // 4) Search-rank popularity and latest/newness remain soft hints.
       score += _clamp01(candidate.popularity) * popularityWeight;
       score += _clamp01(candidate.recency) * recencyWeight;
       if (candidate.isLatest) score += latestSoftBoost;
 
-      // 4) Language balance is session-aware, not a fixed ratio/bucket.
-      final language = candidate.language.trim().toLowerCase();
+      // 5) Give unseen candidates a small exploration bonus so Radio can
+      // discover new artists instead of becoming an echo chamber.
+      if (artistSignal == 0 && tagSignal == 0 && songAffinity == 0) {
+        score += explorationWeight;
+      }
+
+      // 6) Language balance is session-aware, not a fixed ratio/bucket.
       score += _languageWeight(
         pool,
         language,
@@ -217,7 +243,7 @@ class RadioEngine {
         recentLanguageCounts,
       );
 
-      // 5) Keep the weighted random nature of Radio.
+      // 7) Keep the weighted random nature of Radio.
       score += (_random.nextDouble() * 2 - 1) * randomJitter;
       weights.add(math.max(scoreFloor, score));
     }
@@ -271,4 +297,6 @@ class RadioEngine {
   }
 
   double _clamp01(double value) => value.clamp(0.0, 1.0).toDouble();
+
+  double _boundedBehaviour(double value) => value.clamp(-4.0, 4.0).toDouble();
 }

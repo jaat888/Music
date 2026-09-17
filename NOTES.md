@@ -2330,3 +2330,52 @@ This section is appended only; all earlier NOTES.md content remains unchanged.
 - NOTES.md appended only.
 - Dart source delimiter/lexical-balance checks pass for modified files.
 - Flutter SDK is not installed in this build environment, so a device/Gradle build could not be executed here.
+
+
+# v55.2 Adaptive Radio Recommendation — 2026-09-17
+
+## RADIO-ADAPT-01 — Behaviour-based recommendation learning
+- Previous behavior: Radio primarily used mood scores, likes, language balance,
+  search popularity/recency and randomness. A listener who repeatedly completed
+  or quickly skipped songs without pressing Like had limited influence on future
+  selections.
+- New behavior: Radio now learns from persisted Radio playback history. Full or
+  near-complete listens provide positive signals; early skips provide negative
+  signals. These signals softly influence song/tag, artist and language affinity.
+- The adaptive layer is deliberately bounded so it cannot overpower the existing
+  language, mood, freshness and weighted-random behavior.
+- Unseen artists/tags receive a small exploration bonus to prevent an overly
+  narrow recommendation loop.
+
+## RADIO-ADAPT-02 — Richer playback history
+- Radio history now stores artist and duration in addition to the existing song,
+  language, tags, timestamp and skip position.
+- Existing history remains backward compatible: old entries without artist or
+  duration load with safe empty/zero defaults.
+- On a skip, the existing history entry is updated with the actual skip position,
+  allowing the recommender to distinguish an early skip from a song skipped near
+  completion.
+
+## RADIO-ADAPT-03 — Like + behaviour signals work together
+- Explicit Likes remain a strong soft boost with their existing cooldown behavior.
+- Listening behavior is now an independent signal, so Radio can learn even when
+  the user never taps Like.
+- The hard 150-day exact-song repeat exclusion and session failed-song exclusion
+  remain unchanged.
+
+## Modified files
+- lib/services/radio_engine.dart
+- lib/services/radio_history_store.dart
+- lib/screens/radio_player_screen.dart
+
+## Compatibility
+- Existing package name, project structure, navigation, theme and assets are
+  preserved.
+- NOTES.md was append-only.
+- No database migration is required because Radio history is JSON in
+  SharedPreferences and the new fields are optional/backward-compatible.
+
+## Verification
+- Source-level delimiter/lexical checks were run after the update.
+- Flutter SDK/Android Gradle build is not available in this environment, so a
+  device APK build could not be performed here.

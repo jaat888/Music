@@ -118,6 +118,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
 
   Future<void> _start() async {
     final generation = ++_sessionGeneration;
+    await RadioHistoryStore.instance.init();
     _engine.clearFailed();
     _candidates.clear();
     _upcoming.clear();
@@ -279,6 +280,8 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         title: candidate.song.title,
         tags: candidate.tags,
         language: candidate.language,
+        artist: candidate.song.artist,
+        duration: candidate.song.duration,
         wasSkipped: false,
       );
     }
