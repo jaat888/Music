@@ -1441,3 +1441,35 @@ Agar is fix ke baad bhi "PoToken mint FAILED" aaye (jaise CSP `unsafe-eval`
 bhi block kare — alag error hoga "EvalError: ... blocks the use of eval"),
 to poora WebView-in-youtube.com approach hi reconsider karna padega (jaise
 ek neutral/no-CSP page use karna, agar CORS allow kare).
+
+---
+
+## 2026-09-17 (v3) — PoToken fix ka DOOSRA bug (eval bhi CSP-blocked) — FIXED
+
+Real device log se mila: fetch+Function() wala v2 fix bhi fail hua — naya
+error: `Evaluating a string as JavaScript violates this document's Trusted
+Type assignment requirements.` Matlab: youtube.com ka CSP sirf `<script
+src>` nahi, EVAL/Function() bhi poori tarah block karta hai (poore document
+pe restriction hai, kisi ek DOM sink pe nahi). Asli youtube.com page ke
+andar humari koi bhi arbitrary JS chal hi nahi sakti thi.
+
+**Fix (ATTEMPT #2):** WebView ab asli `youtube.com` load hi nahi karta.
+Iske bajaye apna khud ka khaali HTML (`loadHtmlString`) load hota hai,
+jiski koi CSP hi nahi hai (isliye eval/Function/script sab chalte hain),
+lekin `baseUrl: 'https://www.youtube.com'` diya jaata hai taaki `fetch()`
+calls youtube.com-origin maane jaayein (CORS-safe Google APIs ke liye).
+Isi wajah se `visitorData` bhi ab `ytcfg` scrape karne ki jagah khud ek
+chhota `youtubei/v1/player` fetch call se bootstrap hota hai.
+
+**STATUS: abhi bhi UNTESTED** (is dev-environment me Flutter SDK/network
+nahi hai). Agla real-device log dekhna — agar phir bhi fail ho:
+- Error "player response me visitorData nahi mila" → matlab visitorData
+  bootstrap call khud fail/blocked hui (CORS ya key issue) — is case me
+  ek REAL request key/version chahiye hoga, ya alag bootstrap tarika.
+- Error jisme "CORS"/"Failed to fetch" ho → matlab `baseUrl` trick is
+  WebView/Android version pe kaam nahi kar rahi — poora approach hi
+  reconsider karna padega (jaise Dart-side se Create/GenerateIT calls karna
+  aur WebView sirf pure-computation VM steps ke liye use karna).
+- Agar bgutils-js load ho gaya (`window.BG`/`window.BgUtils` mila) lekin
+  aage koi step fail ho, wo error text bhi seedha dikhega — us hisaab se
+  next iteration.

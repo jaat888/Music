@@ -9,55 +9,63 @@
 // de deta — poora "URL mila -> chala -> beech me drop" cycle. Ye bilkul
 // wahi signature hai jo YouTube ka CDN "unverified client" streams ke
 // saath karta hai jab request me PoToken (Google BotGuard/Proof-of-Origin
-// token) attach nahi hota: chhota "cold start" data turant de deta hai
-// (isliye setUrl/pehle few sec "chalta hua" lagta hai), phir verify fail
-// hone pe stream cut kar deta hai.
-//
-// Poore codebase me PoToken mint karne ka koi code nahi tha — sirf
-// signature-cipher solve (Deno JS solver / NewPipeExtractor) tha, jo ek
-// ALAG cheez hai (wo stream-URL ki signature decode karta hai, wo URL
-// "verified" hai ya nahi — ye BotGuard decide karta hai).
+// token) attach nahi hota.
 //
 // ===================== FIX (Option 1 — real BotGuard solver) =====================
-// Ye service YouTube web player ka wahi flow replicate karta hai jo asli
-// browser (aur OpenTune/InnerTune jaisi verified clients) karte hain:
-//   1. Ek HIDDEN (offstage) WebView `https://www.youtube.com` load karta
-//      hai — isi se real visitorData milta hai aur fetch() calls same-
-//      origin (CORS-safe) rehte hain.
-//   2. WebView ke andar `bgutils-js` (LuanRT/BgUtils — public, open-source,
-//      reverse-engineered library jo isi BotGuard/PoToken flow ko implement
-//      karti hai, wahi jo yt-dlp ke PO-Token-Guide aur rustypipe-botguard
-//      jaisे projects reference karte hain) CDN se load karke, uske
-//      documented high-level API (Challenge.create -> BotGuardClient.create
-//      -> snapshot -> GenerateIT -> WebPoMinter -> mintAsWebSafeString) se
-//      asli BotGuard challenge solve karke ek "session-bound" PO Token mint
-//      karta hai.
-//   3. Ye token youtube_service.dart me har resolved stream URL pe
-//      `&pot=<token>` query param ki tarah attach hota hai (documented
-//      usage: "Stream URLs need a `pot` param, session-bound, visitorData
-//      se bound") — verify aur playback dono isi URL se hote hain.
+// Hidden WebView me `bgutils-js` (LuanRT/BgUtils — public, open-source,
+// documented BotGuard/PoToken flow: Challenge.create -> BotGuardClient
+// -> snapshot -> GenerateIT -> WebPoMinter -> mintAsWebSafeString) chala
+// ke ek session-bound PO Token mint karte hain, aur usse youtube_service.dart
+// me har resolved stream URL pe `&pot=<token>` attach karte hain.
+//
+// ===================== ATTEMPT #1 FAILED (2026-09-17) =====================
+// Pehla version seedha `https://www.youtube.com` WebView me load karta
+// tha — asli YouTube page khud "Trusted Types" CSP enforce karta hai, jo
+// SIRF `<script>.src` assignment nahi, `eval`/`new Function()` (koi bhi
+// string-to-JS execution) bhi poori tarah block karta hai. Real-device log:
+// "Evaluating a string as JavaScript violates this document's Trusted Type
+// assignment requirements." Matlab: asli youtube.com page ke andar humari
+// khud ki arbitrary JS (bgutils-js load karna, ya use run karna) chalti hi
+// nahi — chahe `<script src>` se ho ya `fetch()+Function()` se, dono
+// blocked hain, kyunki restriction poore document pe hai, sirf ek DOM sink
+// pe nahi.
+//
+// ===================== ATTEMPT #2 (yahi file, current) =====================
+// Fix: WebView ko asli youtube.com URL load karne ki jagah ek apna
+// KHAALI/NEUTRAL HTML page (`loadHtmlString`) diya jaata hai — is page ki
+// apni koi CSP hi nahi hai (hum khud HTML bana rahe hain, koi CSP header/
+// meta tag nahi daal rahe), isliye eval/Function/script-tag sab normally
+// chalते hain. Lekin `baseUrl: 'https://www.youtube.com'` pass karte hain
+// (Android WebView ka `loadDataWithBaseURL` — webview_flutter isko
+// `loadHtmlString(html, baseUrl: ...)` se expose karta hai) — isse page ka
+// ORIGIN (fetch()/CORS ke liye) youtube.com jaisa treat hota hai, bina
+// asli youtube.com ka HTTP response (aur uske saath aane wale CSP headers)
+// actually load kiye. Matlab: CORS-safe (Google APIs ko same-origin
+// dikhega) + CSP-free (apni JS chala sakte hain) — dono fayde.
+//
+// Is wajah se ab humein `ytcfg` (jo sirf asli page pe available hota) se
+// visitorData nikalne wala purana tarika bhi hata diya — uski jagah khud
+// ek chhota innertube `player` API call (`fetch()` se, isi WebView ke
+// andar, isi liye same-origin) karke response ke `responseContext.
+// visitorData` se visitorData nikalte hain (koi bhi innertube endpoint ka
+// response ye field deta hai, chahe request khud kisi aur reason se fail
+// ho jaaye — ye common/documented tarika hai visitorData bootstrap karne
+// ka).
 //
 // *** IMPORTANT — HONESTY NOTE (isko README/NOTES.md me bhi rakhna) ***
 // - Ye is environment (sandboxed container, no network/Android SDK) me
-//   COMPILE ya LIVE-TEST nahi ho saka hai. BotGuard ka exact wire-protocol
-//   khud Google/BgUtils library ke andar hai (hum usko CDN se load karke
-//   uski hi high-level API call kar rahe hain — hum khud protocol
-//   reimplement nahi kar rahe, isse fragile-guessing ka risk kam hota hai),
-//   lekin YouTube ye script/endpoints kabhi bhi badal sakta hai. Pehli real
-//   build pe agar mint fail ho (debug screen me "PoToken: FAILED..." log
-//   dikhega), poora system FAIL-SOFT hai — pot param bas skip ho jaata hai,
-//   app pehle jaisa (bina poToken ke) behave karti hai, koi crash/regression
+//   COMPILE ya LIVE-TEST NAHI ho saka hai. `loadHtmlString(..., baseUrl:)`
+//   se same-origin fetch() milna Android WebView ki well-known technique
+//   hai, lekin device/WebView-version ke hisaab se behavior thoda alag ho
+//   sakta hai — agla real-device log hi confirm karega.
+// - Fail-soft hai: mint kisi bhi step pe fail ho (debug/app log me
+//   "PoToken mint FAILED: ..." dikhega) to bas `pot` param skip ho jaata
+//   hai, app purane (bina-pot) behavior pe chalti rehti hai — koi crash
 //   nahi.
-// - `requestKey` (niche) ek public constant hai jo BgUtils/yt-dlp docs me
-//   publish hui hai; agar YouTube kabhi rotate kare to ye bhi fail-soft hi
-//   fail hoga (naya key BgUtils README/yt-dlp PO-Token-Guide se update
-//   karna padega).
-// - NewPipeExtractor (native Kotlin layer) is fix se abhi bhi cover NAHI
-//   hota — poToken sirf youtube_explode_dart/Piped layers ke resolved URL
-//   pe attach hota hai. NewPipeExtractor library khud PoToken support nahi
-//   karti (upstream limitation), isliye us layer ka apna 403-rate jaisa hi
-//   rahega. Agar NewPipe layer bhi PoToken chahiye ho to uski library hi
-//   patch karni padegi — bada, alag scope.
+// - `requestKey` public constant hai (BgUtils/yt-dlp docs), koi secret
+//   nahi. YouTube kabhi rotate kare to fail-soft hi fail hoga.
+// - NewPipeExtractor (native Kotlin layer) is fix se cover NAHI hota — sirf
+//   youtube_explode_dart layer ke resolved URL pe poToken lagta hai.
 
 import 'dart:async';
 import 'dart:convert';
@@ -69,30 +77,29 @@ class PoTokenService {
   static final PoTokenService instance = PoTokenService._internal();
 
   // BgUtils/yt-dlp docs me publish hua public "web" requestKey — koi secret
-  // nahi, isi tarah har open-source PoToken implementation (yt-dlp,
-  // rustypipe-botguard, InnerTune forks) me hardcoded milta hai.
+  // nahi, isi tarah har open-source PoToken implementation me hardcoded
+  // milta hai.
   static const String _requestKey = 'O43z0dpjhgX20SCx4KAo';
 
-  // bgutils-js UMD bundle — jsdelivr CDN, pinned version (isse agar upstream
-  // breaking change kare to bhi ye build achanak break nahi hogi).
+  // bgutils-js UMD bundle — jsdelivr CDN, pinned version.
   static const String _bgutilsCdnUrl =
       'https://cdn.jsdelivr.net/npm/bgutils-js@2.6.0/dist/index.min.js';
+
+  // Public YouTube WEB client InnerTube API key — koi secret nahi, YouTube
+  // ke apne web player bundle me hardcoded hota hai, dozens of open-source
+  // projects (yt-dlp waghera) me bhi yahi milega. Sirf visitorData
+  // bootstrap karne ke liye ek minimal `player` call ke liye chahiye.
+  static const String _webApiKey = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
 
   WebViewController? _controller;
   bool _pageReady = false;
 
   String? _cachedToken;
   DateTime? _cachedAt;
-  // Conservative — real cold tokens usually last longer, lekin refresh
-  // sasta hai (ek hi WebView call) isliye safe side rakha.
   static const Duration _cacheTtl = Duration(hours: 4);
 
   Completer<Map<String, dynamic>>? _pendingMint;
 
-  // Host widget (dekho main.dart) ye controller banwata/attach karta hai —
-  // WebView platform-view ko actually widget tree me mount hona zaroori hai
-  // taaki uska JS engine reliably chale (Android WebView background me
-  // bina View ke run nahi hota).
   WebViewController get controller {
     _controller ??= _buildController();
     return _controller!;
@@ -117,13 +124,17 @@ class PoTokenService {
           onPageFinished: (_) => _pageReady = true,
         ),
       )
-      ..loadRequest(Uri.parse('https://www.youtube.com'));
+      // ATTEMPT #2 fix: asli youtube.com load NAHI karte (uska CSP saari
+      // arbitrary JS block kar deta hai) — apna khaali HTML, youtube.com
+      // ko sirf ORIGIN (baseUrl) ki tarah pass karte hain taaki fetch()
+      // calls CORS-safe rahein.
+      ..loadHtmlString(
+        '<!DOCTYPE html><html><head></head><body></body></html>',
+        baseUrl: 'https://www.youtube.com',
+      );
     return c;
   }
 
-  // Session-bound PoToken (visitorData se bound) — ye woh token hai jo
-  // stream URL me `&pot=` ki tarah lagana hai. Fail-soft: kisi bhi step
-  // pe error aaye to null return karta hai (caller pot skip kar dega).
   Future<String?> getSessionPoToken({
     void Function(String status)? onProgress,
   }) async {
@@ -164,19 +175,12 @@ class PoTokenService {
   }
 
   Future<Map<String, dynamic>> _mintViaWebView() async {
-    // Ek waqt me sirf ek mint chale — do parallel calls aaye (e.g. do
-    // songs almost-saath resolve ho rahe hain) to dusra pehle wale ka hi
-    // result wait/share kare, WebView ko do baar concurrent script na
-    // milein (JS globals overwrite ho jaate).
     if (_pendingMint != null) {
       return _pendingMint!.future;
     }
     final completer = Completer<Map<String, dynamic>>();
     _pendingMint = completer;
     try {
-      // Controller lazily initialize hota hai (getter) — agar host widget
-      // abhi tak mount nahi hua (bahut jaldi call aa gayi app-start pe), to
-      // thoda wait kar lo taaki WebView page actually load ho chuka ho.
       final c = controller;
       var waited = 0;
       while (!_pageReady && waited < 8000) {
@@ -199,34 +203,15 @@ class PoTokenService {
     return result;
   }
 
-  // WebView ke andar chalne wali JS — bgutils-js ko CDN se load karke uski
-  // hi documented high-level API se poora Challenge -> BotGuardClient ->
-  // snapshot -> GenerateIT -> WebPoMinter flow chalata hai (hum khud
-  // protocol reimplement nahi kar rahe — library khud karti hai, dekho file
-  // ke top ka comment). visitorData YouTube ke apne `ytcfg` se nikalte hain
-  // (isi page pe already available hai kyunki hum youtube.com pe loaded
-  // hain).
   static final String _bootstrapJs = r'''
 (async function () {
   function reply(obj) {
     try { PoTokenBridge.postMessage(JSON.stringify(obj)); } catch (e) {}
   }
   try {
+    // Neutral page hai (koi CSP nahi) — fetch+Function dono safe hain yahan
+    // (dekho file ke top ka "ATTEMPT #2" comment).
     if (!window.__bgUtilsLoaded) {
-      // BUG FIX (2026-09-17): pehle yahan `<script>` tag banaake uska
-      // `.src` property seedha set karte the — youtube.com ka page khud
-      // "Trusted Types" CSP enforce karta hai (XSS-protection), jisme
-      // `HTMLScriptElement.src` par DIRECT string assignment disallowed
-      // hai (sirf ek pre-approved TrustedScriptURL chalta hai). Error tha:
-      // "Failed to set the 'src' property... requires 'TrustedScriptURL'
-      // assignment" — isi wajah se PoToken kabhi mint hi nahi ho paaya, aur
-      // silently purane (bina-pot) behavior pe fall back ho raha tha.
-      // Fix: script tag ki jagah `fetch()` se library ka JS TEXT download
-      // karke `new Function()` se seedha execute karte hain — ye Trusted
-      // Types ke `script.src` wale specific sink se hi guzarta nahi, isliye
-      // wahi restriction yahan lagu nahi hoti (ye bilkul wahi tarika hai jo
-      // niche interpreterJs ke liye already use ho raha tha, isi liye wo
-      // step is error se affected nahi tha).
       const bgutilsSrc = await (await window.fetch("BGUTILS_CDN_URL")).text();
       // eslint-disable-next-line no-new-func
       new Function(bgutilsSrc)();
@@ -238,20 +223,39 @@ class PoTokenService {
     }
     const BG = window.BG || window.BgUtils;
 
-    // visitorData: YouTube page ke apne config se (session ke liye
-    // identifier/content-binding chahiye).
+    // visitorData: asli page nahi hai isliye `ytcfg` nahi milega — khud
+    // ek chhota innertube `player` call se bootstrap karte hain (fetch()
+    // baseUrl trick ki wajah se youtube.com-origin maani jaati hai,
+    // CORS-safe).
     let visitorData = null;
     try {
-      visitorData = (window.ytcfg && window.ytcfg.data_ &&
-        window.ytcfg.data_.INNERTUBE_CONTEXT &&
-        window.ytcfg.data_.INNERTUBE_CONTEXT.client &&
-        window.ytcfg.data_.INNERTUBE_CONTEXT.client.visitorData) || null;
-      if (!visitorData && window.ytcfg && window.ytcfg.get) {
-        visitorData = window.ytcfg.get('VISITOR_DATA') || null;
-      }
-    } catch (e) {}
+      const vdResp = await window.fetch(
+        "https://www.youtube.com/youtubei/v1/player?key=WEB_API_KEY&prettyPrint=false",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            videoId: "dQw4w9WgXcQ",
+            context: {
+              client: {
+                clientName: "WEB",
+                clientVersion: "2.20240101.00.00",
+                hl: "en",
+                gl: "US",
+              },
+            },
+          }),
+        }
+      );
+      const vdJson = await vdResp.json();
+      visitorData = vdJson && vdJson.responseContext &&
+        vdJson.responseContext.visitorData || null;
+    } catch (e) {
+      reply({ok: false, error: 'visitorData bootstrap fetch failed: ' + (e && e.message || e)});
+      return;
+    }
     if (!visitorData) {
-      reply({ok: false, error: 'visitorData not found on page'});
+      reply({ok: false, error: 'visitorData not found in player response'});
       return;
     }
 
@@ -298,5 +302,6 @@ class PoTokenService {
 })();
 '''
       .replaceAll('BGUTILS_CDN_URL', _bgutilsCdnUrl)
-      .replaceAll('REQUEST_KEY', _requestKey);
+      .replaceAll('REQUEST_KEY', _requestKey)
+      .replaceAll('WEB_API_KEY', _webApiKey);
 }
