@@ -52,6 +52,33 @@
 // ho jaaye — ye common/documented tarika hai visitorData bootstrap karne
 // ka).
 //
+// ===================== ATTEMPT #2 — REAL-DEVICE RESULT (2026-09-17) =====================
+// CSP wala Attempt #1 issue neutral-page trick se solve ho gaya (koi
+// "Trusted Types" error ab nahi aaya) — lekin real device log
+// (sursathi_app_log.txt) me ek NAYA issue dikha: har baar exact ye: "PoToken mint FAILED:
+// Invalid or unexpected token" — turant fail, phir bina-pot stream jo
+// kuch second me CDN drop kar deta. Root cause: `bgutils-js` npm package
+// koi UMD/IIFE browser bundle publish hi NAHI karta — jsdelivr listing
+// confirm karti hai ki us package me `dist/index.min.js` naam ki file
+// exist hi nahi karti; jo real file hai (`dist/index.js`), wo package.json
+// me `"type": "module"` hai — matlab pure ES module syntax (`export`,
+// `import`) use karta hai. Us file ka text fetch karke `new
+// Function(text)()` se chalane ki koshish karna seedha JS SyntaxError deta
+// hai — `new Function()` sirf classic-script grammar parse kar sakta hai,
+// module grammar nahi — aur wahi error, verbatim, "Invalid or unexpected
+// token" hota hai. Isliye poora mint pehle step pe hi, hamesha, fail ho
+// raha tha.
+//
+// ===================== ATTEMPT #3 (yahi file, current) =====================
+// Fix: fetch()+`new Function()` ki jagah `await import("...")` (dynamic
+// import) — ye browser ka native ES-module loader use karta hai, jo
+// `export`/`import` syntax ko sahi tarah samajhta hai, aur classic
+// (non-module) script context se call karna bhi fully legal hai (isi liye
+// dynamic import exist karta hai — lazy-load ESM from anywhere). CDN URL
+// bhi real existing version (`bgutils-js@3.2.0/dist/index.js`, jsdelivr pe
+// confirmed) pe update kiya — purana `2.6.0/dist/index.min.js` version
+// hi wrong path tha.
+//
 // *** IMPORTANT — HONESTY NOTE (isko README/NOTES.md me bhi rakhna) ***
 // - Ye is environment (sandboxed container, no network/Android SDK) me
 //   COMPILE ya LIVE-TEST NAHI ho saka hai. `loadHtmlString(..., baseUrl:)`
@@ -81,9 +108,22 @@ class PoTokenService {
   // milta hai.
   static const String _requestKey = 'O43z0dpjhgX20SCx4KAo';
 
-  // bgutils-js UMD bundle — jsdelivr CDN, pinned version.
+  // BUG FIX (2026-09-17, Attempt #3 — dekho sursathi_app_log.txt:
+  // "PoToken mint FAILED: Invalid or unexpected token"): bgutils-js koi
+  // UMD/IIFE browser bundle publish hi nahi karta — `dist/index.min.js`
+  // naam ki file us package me EXIST NAHI karti. Jo real file hai
+  // (`dist/index.js`) wo ES MODULE hai (`export`/`import` syntax). Uska
+  // text fetch karke `new Function(text)()` se chalane ki koshish karna
+  // seedha JS SyntaxError deta hai ("Invalid or unexpected token" =
+  // `export` keyword pe, kyunki Function() sirf classic-script grammar
+  // parse karta hai, module grammar nahi) — isliye mint hamesha turant
+  // fail ho raha tha, aur pura poToken flow silently skip ho jaata tha.
+  // Fix: neeche `_bootstrapJs` me ab `await import(url)` (dynamic import,
+  // classic script se bhi legal) use hota hai jo iska ES module sahi
+  // tarah load karta hai. URL bhi real existing version (3.2.0, jsdelivr
+  // listing se confirmed) pe update kiya.
   static const String _bgutilsCdnUrl =
-      'https://cdn.jsdelivr.net/npm/bgutils-js@2.6.0/dist/index.min.js';
+      'https://cdn.jsdelivr.net/npm/bgutils-js@3.2.0/dist/index.js';
 
   // Public YouTube WEB client InnerTube API key — koi secret nahi, YouTube
   // ke apne web player bundle me hardcoded hota hai, dozens of open-source
@@ -209,19 +249,21 @@ class PoTokenService {
     try { PoTokenBridge.postMessage(JSON.stringify(obj)); } catch (e) {}
   }
   try {
-    // Neutral page hai (koi CSP nahi) — fetch+Function dono safe hain yahan
-    // (dekho file ke top ka "ATTEMPT #2" comment).
-    if (!window.__bgUtilsLoaded) {
-      const bgutilsSrc = await (await window.fetch("BGUTILS_CDN_URL")).text();
-      // eslint-disable-next-line no-new-func
-      new Function(bgutilsSrc)();
-      window.__bgUtilsLoaded = true;
+    // ATTEMPT #3 fix: bgutils-js sirf ES module ke roop me publish hota
+    // hai (koi UMD/IIFE bundle nahi) — isliye fetch+`new Function()` se
+    // eval karna hamesha "Invalid or unexpected token" deta tha (module
+    // grammar, classic-script parser me syntax error). Dynamic
+    // `import()` browser ka native module loader use karta hai, jo ES
+    // module syntax ko sahi tarah samajhta hai — aur classic (non-module)
+    // script context se bhi legal hai.
+    if (!window.__bgUtils) {
+      window.__bgUtils = await import("BGUTILS_CDN_URL");
     }
-    if (!window.BgUtils && !window.BG) {
-      reply({ok: false, error: 'bgutils-js global not found after load'});
+    const BG = window.__bgUtils;
+    if (!BG || !BG.Challenge) {
+      reply({ok: false, error: 'bgutils-js module load hua lekin Challenge export nahi mila'});
       return;
     }
-    const BG = window.BG || window.BgUtils;
 
     // visitorData: asli page nahi hai isliye `ytcfg` nahi milega — khud
     // ek chhota innertube `player` call se bootstrap karte hain (fetch()
