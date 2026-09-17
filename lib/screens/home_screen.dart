@@ -53,6 +53,15 @@ const List<_Category> _kCategories = [
   _Category('Hip-Hop', '🎧', 'hip-hop hits songs'),
 ];
 
+// NEW (2026-09-17) — curated `_homeSections` khatam hone ke baad, scroll
+// ko "genuinely infinite" banane ke liye category-search se generate hue
+// extra sections (dekho _HomeTabContentState._loadMoreExtraCategory).
+class _ExtraSection {
+  final String title;
+  final List<YtResult> songs;
+  _ExtraSection({required this.title, required this.songs});
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -124,6 +133,11 @@ class _HomeTabContentState extends State<_HomeTabContent> {
   Set<String> _cachedIds = {};
   // NEW (2026-09-17) — "Your Daily Mixes" (dekho daily_mix_service.dart).
   List<DailyMix> _dailyMixes = [];
+  // NEW (2026-09-17, diagnostic): Daily Mix khaali kyun aayi (agar aayi) —
+  // sirf tab dikhta hai jab genuinely kuch fail hua ho (naya user jiski
+  // history hi nahi hai, uske liye ye null rehta hai aur section chupa
+  // rehta hai, jaisa pehle tha).
+  String? _dailyMixDebug;
   String? _debugError; // TEMPORARY — screen pe error dikhane ke liye, taaki
   // bina logcat/computer ke bhi pata chal sake kya fail ho raha hai
 
@@ -146,6 +160,18 @@ class _HomeTabContentState extends State<_HomeTabContent> {
   bool _loadingMoreSections = false;
   final ScrollController _scrollController = ScrollController();
 
+  // NEW (2026-09-17, HONEST fix — "neeche aur playlist generate nahi ho
+  // rahi, pehle jaisa hai"): `getHomeSections()` khud FINITE hai (upar
+  // wala HONESTY NOTE dekho) — ek baar `_homeSections` khatam ho jaaye to
+  // us list se aage kabhi kuch naya nahi milega, scroll "dead end" ho
+  // jaata tha. Ab jab curated sections khatam ho jaate hain, feed khud
+  // `_kCategories` (12 categories) ko ek-ek karke asli
+  // `YoutubeService.search()` se fetch karke naye sections banata rehta
+  // hai — aur 12 khatam hone par wapas pehli category se cycle kar deta
+  // hai, taaki scroll sach me kabhi "khatam" na ho.
+  int _extraCategoryCursor = 0;
+  final List<_ExtraSection> _extraSections = [];
+
   @override
   void initState() {
     super.initState();
@@ -163,13 +189,17 @@ class _HomeTabContentState extends State<_HomeTabContent> {
 
   void _onScroll() {
     if (_loadingMoreSections) return;
-    if (_visibleSectionCount >= _homeSections.length) return;
     if (!_scrollController.hasClients) return;
     final pos = _scrollController.position;
     // Neeche se ~400px pehle hi agla batch reveal karo, taaki user ko
     // scroll rukta hua na dikhe.
-    if (pos.pixels >= pos.maxScrollExtent - 400) {
+    if (pos.pixels < pos.maxScrollExtent - 400) return;
+    if (_visibleSectionCount < _homeSections.length) {
       _revealMoreSections();
+    } else {
+      // Curated feed khatam ho chuka — ab category-search se agla section
+      // generate karo (dekho upar wala NOTE).
+      _loadMoreExtraCategory();
     }
   }
 
@@ -185,6 +215,26 @@ class _HomeTabContentState extends State<_HomeTabContent> {
           (_visibleSectionCount + _kSectionBatchStep).clamp(0, _homeSections.length);
       _loadingMoreSections = false;
     });
+  }
+
+  Future<void> _loadMoreExtraCategory() async {
+    setState(() => _loadingMoreSections = true);
+    final cat = _kCategories[_extraCategoryCursor % _kCategories.length];
+    _extraCategoryCursor++;
+    try {
+      final results = await YoutubeService.instance.search(cat.query, max: 12);
+      if (mounted && results.isNotEmpty) {
+        setState(() {
+          _extraSections.add(_ExtraSection(title: '${cat.emoji} ${cat.name} — aur gaane', songs: results));
+        });
+      }
+    } catch (e) {
+      // Ek category fail ho to bhi scroll "atka hua" nahi lagega — agli
+      // baar scroll karne pe agli category try hogi.
+      print('HOME extra-category ERROR ($cat): $e');
+    } finally {
+      if (mounted) setState(() => _loadingMoreSections = false);
+    }
   }
 
   Future<void> _load() async {
@@ -226,10 +276,18 @@ class _HomeTabContentState extends State<_HomeTabContent> {
       // try/catch — inme koi bhi dikkat ho to poora home feed fail nahi
       // hona chahiye, mixes bas section hide ho jaata hai).
       List<DailyMix> dailyMixes = [];
+      String? dailyMixDebug;
       try {
         dailyMixes = await DailyMixService.instance.getTodaysMixes();
+        // Sirf tab dikhega jab genuinely radio-pull fail hua ho (naye
+        // user ke "abhi history hi nahi hai" case me chhupa rehta hai —
+        // dekho daily_mix_service.dart ka lastDebugInfo).
+        if (dailyMixes.isEmpty) {
+          dailyMixDebug = DailyMixService.instance.lastDebugInfo;
+        }
       } catch (e) {
         print('DAILY MIX _load() ERROR: $e');
+        dailyMixDebug = 'EXCEPTION: $e';
       }
 
       if (!mounted) return;
@@ -239,9 +297,14 @@ class _HomeTabContentState extends State<_HomeTabContent> {
         _likedIds = liked.map((s) => s.id).toSet();
         _cachedIds = cached.map((e) => e['id'] as String).toSet();
         _dailyMixes = dailyMixes;
+        _dailyMixDebug = dailyMixDebug;
         // Refresh (pull-to-refresh ya pehli load) — reveal-count reset,
         // taaki purane scroll-position ka batch naye feed pe carry na ho.
         _visibleSectionCount = _kInitialSectionBatch;
+        // Extra (category-generated) sections bhi reset — naya feed aane
+        // ke baad purani "aur gaane" sections dobara se cycle honi chahiye.
+        _extraSections.clear();
+        _extraCategoryCursor = 0;
         // TEMPORARY debug info — agar dono (live feed + fallback) khaali
         // hain par exception nahi aayi, to ye batata hai ki YouTube ne
         // genuinely 0 results diye (rate-limit ya query issue), exception
@@ -280,6 +343,14 @@ class _HomeTabContentState extends State<_HomeTabContent> {
   // NEW (2026-09-16, v11): home feed ke kisi bhi songs-section se play
   // karne ke liye — us section ke gaano ki apni queue banti hai.
   Future<void> _playFromSection(YtHomeSection section, int index) async {
+    final songs = section.songs.map((r) => r.toSong()).toList();
+    context.read<QueueService>().setQueue(songs, startIndex: index);
+    await audioHandler.playWithRetry(songs[index]);
+  }
+
+  // NEW (2026-09-17): "aur gaane" (category-generated) extra sections se
+  // play karne ke liye.
+  Future<void> _playFromExtra(_ExtraSection section, int index) async {
     final songs = section.songs.map((r) => r.toSong()).toList();
     context.read<QueueService>().setQueue(songs, startIndex: index);
     await audioHandler.playWithRetry(songs[index]);
@@ -400,22 +471,9 @@ class _HomeTabContentState extends State<_HomeTabContent> {
           );
         }
       }
-      // "Infinite scroll" spinner — jab tak neeche scroll karke agla
-      // batch load ho raha ho (chhota, list ke end me).
-      if (_loadingMoreSections) {
-        widgets.add(
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 16),
-            child: Center(
-              child: SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(strokeWidth: 2.4, color: kGreen),
-              ),
-            ),
-          ),
-        );
-      }
+      // NEW (2026-09-17): curated feed khatam hone ke baad generate hue
+      // "aur gaane" (category-search) sections — asli infinite scroll.
+      widgets.addAll(_buildExtraSectionWidgets());
       return widgets;
     }
 
@@ -465,7 +523,55 @@ class _HomeTabContentState extends State<_HomeTabContent> {
             );
           }),
         ),
+      // Fallback (Trending Now) ke khatam hone ke baad bhi wahi extra
+      // category-generated sections — yahan bhi scroll kabhi dead-end
+      // nahi hona chahiye.
+      ..._buildExtraSectionWidgets(),
     ];
+  }
+
+  // NEW (2026-09-17): dono feed-branches (curated + fallback trending) me
+  // shared — "load more" spinner + ab tak generate hue extra sections.
+  List<Widget> _buildExtraSectionWidgets() {
+    final widgets = <Widget>[];
+    if (_loadingMoreSections) {
+      widgets.add(
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 16),
+          child: Center(
+            child: SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2.4, color: kGreen),
+            ),
+          ),
+        ),
+      );
+    }
+    for (final extra in _extraSections) {
+      widgets.add(SectionHeader(title: extra.title));
+      widgets.add(
+        Column(
+          children: List.generate(extra.songs.length, (i) {
+            final r = extra.songs[i];
+            final song = r.toSong();
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: SongCard(
+                song: song,
+                isLiked: _likedIds.contains(song.id),
+                isCached: _cachedIds.contains(song.id),
+                onTap: () => _playFromExtra(extra, i),
+                onPlay: () => _playFromExtra(extra, i),
+                onDownload: () => _download(r),
+                onLike: () => _toggleLike(song),
+              ),
+            );
+          }),
+        ),
+      );
+    }
+    return widgets;
   }
 
   @override
@@ -577,6 +683,17 @@ class _HomeTabContentState extends State<_HomeTabContent> {
                           final mix = _dailyMixes[i];
                           return _DailyMixCard(mix: mix);
                         },
+                      ),
+                    ),
+                  ] else if (!_loading && _dailyMixDebug != null) ...[
+                    // TEMPORARY — sirf tab dikhta hai jab Daily Mix
+                    // genuinely fail hui ho (naya user "abhi history nahi
+                    // hai" case me ye poora block hi nahi dikhta).
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Text(
+                        'Daily Mix nahi ban paayi: $_dailyMixDebug',
+                        style: AppText.bodyS(color: kTextDim),
                       ),
                     ),
                   ],

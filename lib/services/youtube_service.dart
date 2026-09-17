@@ -64,6 +64,7 @@ import 'package:dart_ytmusic_api/types.dart';
 import 'package:flutter/services.dart' show MethodChannel, PlatformException;
 
 import '../db/download_db.dart';
+import '../db/cache_db.dart';
 import '../models/song.dart';
 import 'innertube_client.dart';
 import 'potoken_service.dart';
@@ -1645,6 +1646,16 @@ class YoutubeService {
     String title, {
     String? author,
     void Function(int received, int total)? onProgress,
+    // NEW (2026-09-17 — "4MB ke gaane ko download hone mein 1 minute"):
+    // asli waqt zyada-tar download ke bytes-transfer mein nahi, RESOLVE
+    // step (source dhoondhna) mein lagta hai — jo pehle bilkul silent tha
+    // (progress hamesha "0%" dikhta rehta tha, jaise atka hua ho). Ye
+    // naya optional callback resolve ke har phase ka status string deta
+    // hai (`_resolveAudioStream` ke andar already maujood mechanism hai,
+    // bas ab yahan tak wire kiya) — UI ab "resolve ho raha hai..." jaisa
+    // kuch dikha sakti hai, real duration nahi badalti lekin ab "atka hua"
+    // nahi lagta.
+    void Function(String status)? onStatus,
   }) async {
     // FIX (user request): ye check yahan (root level) bhi hona chahiye —
     // sirf UI screens pe nahi — taaki koi bhi caller miss kare to bhi
@@ -1662,6 +1673,48 @@ class YoutubeService {
       return null;
     }
 
+    // NEW (2026-09-17 — "download bahut slow hai" + "auto-download cache
+    // se dubara download kar deta hai" dono fix ek saath): agar ye gaana
+    // pehle se (streaming se) local cache me hai, poora network
+    // resolve+download dobara karne ke bajaye seedha us cached file ko
+    // Music folder me COPY kar do — koi extraction, koi network round-trip
+    // nahi, bas ek local disk copy (turant hota hai, ek second se bhi
+    // kam). Ye khaaskar "auto-download on play" ke liye exactly sahi hai —
+    // jab gaana play hota hai wo turant cache me aa jaata hai, aur agar
+    // uska auto-download turant baad me trigger hota hai to ab wo cache
+    // ko hi "upgrade" kar deta hai, dobara download nahi karta.
+    final cachedRow = await CacheDB.instance.getRow(videoId);
+    if (cachedRow != null) {
+      try {
+        onStatus?.call('Pehle se cache mein hai — copy ho raha hai...');
+        final cachedFile = File(cachedRow['file_path'] as String);
+        final musicDir = await StorageService.getMusicDir();
+        final safeName = await StorageService.sanitizeFileName(title);
+        final srcExt = p.extension(cachedFile.path);
+        final ext = srcExt.isNotEmpty ? srcExt.substring(1) : 'm4a';
+        final destPath = p.join(musicDir.path, '$safeName.$ext');
+        final total = await cachedFile.length();
+        onProgress?.call(total, total); // local copy itni fast hai ki 0%->100% ek hi step
+        await cachedFile.copy(destPath);
+        await DownloadDB.instance.add(
+          Song(
+            id: videoId,
+            title: (cachedRow['title'] as String?) ?? title,
+            artist: (cachedRow['artist'] as String?) ?? author ?? '',
+            thumb: (cachedRow['thumb'] as String?) ?? '',
+            duration: (cachedRow['duration'] as num?)?.toInt() ?? 0,
+            filePath: destPath,
+          ),
+        );
+        print('YT DOWNLOAD (cache se copy, koi network call nahi): $videoId -> $destPath');
+        return destPath;
+      } catch (e) {
+        // Copy fail ho (disk full, corrupt cache file, etc.) — koi baat
+        // nahi, neeche wala normal network-download path try karega.
+        print('YT DOWNLOAD cache-copy fail ($e), network se try kar rahe: $videoId');
+      }
+    }
+
     // Storage permission maango (Android 13+ pe scoped, purane pe legacy)
     await Permission.storage.request();
     // Android 13+ pe storage permission zaroori nahi hoti (scoped storage) —
@@ -1672,16 +1725,19 @@ class YoutubeService {
     // jaise settings screen me pehle se do alag dialogs the (Audio
     // Quality vs Download Quality), bas ab dono asal me kaam karte hain.
     final dq = await _downloadQuality();
+    onStatus?.call('Gaana dhoondha ja raha hai...');
     final stream = await _resolveAudioStream(
       videoId,
       title: title,
       author: author,
       quality: dq,
+      onProgress: onStatus,
     );
     if (stream == null) {
       print('YT DOWNLOAD ERROR: audio stream resolve nahi hua for $videoId');
       return null;
     }
+    onStatus?.call('Mil gaya — download shuru ho raha hai...');
 
     try {
       final musicDir = await StorageService.getMusicDir();

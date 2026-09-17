@@ -21,7 +21,111 @@
 >    sleep-timer icon ab actual state (on/off) reflect karte hain. Inhe wapas
 >    static grey icon mat banao — user ne specifically iski request ki thi.
 
-## Batch 25 (2026-09-16) — Local-first playback, next-2 preload, 3GB cache, uninstall-persistent downloads
+## Batch 28 (2026-09-17) — "4MB ke gaane ko 1 min lagta hai, atka hua lagta hai" + laggy animation
+
+**Ask (screenshot ke saath, download queue section circled):** download
+abhi bhi slow feel hota hai chhote files ke liye bhi, aur us section ki
+animation "lag" karti hai jab bhi chalti hai.
+
+**Root cause:** ek 4MB file ka asli network-transfer time chhota hota hai
+(seconds) — 1 minute mostly **resolve step** (source URL dhoondhna —
+NewPipe → explode → Piped fallback chain) mein ja raha tha. `download()`
+is poore resolve ke dauraan `onProgress` ko KABHI call nahi karta tha,
+isliye UI hamesha static "0%" dikhata rehta tha — download slow nahi,
+**silent** tha, jo "atka hua" jaisa feel hota tha.
+
+**Fix:**
+- `youtube_service.dart download()` — naya `onStatus(String)` param,
+  `_resolveAudioStream()` ke already-maujood status-string mechanism ko
+  yahan tak wire kiya (pehle ye kahin connect hi nahi tha). Cache-copy
+  path aur network-resolve path, dono apna status bhejte hain ("Gaana
+  dhoondha ja raha hai...", "Mil gaya — download shuru ho raha hai...",
+  etc.)
+- `download_queue_service.dart` — `statusOf(id)` naya getter; jab tak
+  progress 0% hai, `downloads_screen.dart` ab title ke saath ye status
+  dikhata hai (`"Sitaare — Gaana dhoondha ja raha hai..."`), static "0%"
+  ki jagah.
+- **Animation lag fix:** 5 parallel workers pehle apna-apna
+  `notifyListeners()` bilkul turant (har % change pe) call karte the — kai
+  workers ek saath fire karte to UI bahut zyada baar rebuild hoti, jo
+  chhote-RAM devices pe stutter jaisa lagta tha. Ab progress/status
+  updates max ~120ms me ek baar hi rebuild trigger karte hain
+  (`_notifyThrottled()`); start/finish jaise events turant hi rehte hain.
+- **Resolve pipeline internals (NewPipe/explode/Piped) ko bilkul nahi
+  chheda** — NOTES.md warning ke mutabik. Ye sirf ek observability
+  (status callback) + rebuild-throttle fix hai, resolve ka asli waqt
+  same hi rahega, bas ab "chal raha hai" dikhega "atka hua" nahi.
+
+
+
+**Ask:** "download bahut slow hai (1 gaana = 1 min)", "auto-download-on-play
+jab gaana cache me pura aa chuka ho to usi cache ko download me daale,
+dubara download na kare", "parallel me 5 gaane download ho sakein", "storage
+wala error bhi theek karo".
+
+**Root cause + Fix (sab jude hue hain):**
+- `youtube_service.dart download()` pehle HAR download ke liye poora
+  network resolve (NewPipe/explode/Piped) + fresh HTTP download karta tha —
+  CHAHE wahi gaana abhi-abhi play hone ki wajah se already local CacheDB me
+  maujood ho. Ye hi sabse bada slowness ka reason tha, aur "auto-download
+  on play" wale case me to LITERALLY redundant tha (gaana already cache me
+  hai, phir bhi dobara poora download ho raha tha).
+  **Fix:** `download()` ab sabse pehle `CacheDB.instance.getRow(id)` check
+  karta hai — agar mil jaaye, seedha us cached file ko naye path pe COPY
+  kar deta hai (local disk copy, ~instant) aur `DownloadDB` me register kar
+  deta hai — koi resolve, koi network call nahi. Naya `CacheDB.getRow()`
+  method add kiya (poora record — title/artist/thumb/duration — file-path
+  ke saath). Cache-copy fail ho (corrupt file, disk full) to normal
+  network-download path pe hi fallback hota hai — kabhi silently fail nahi
+  hota.
+- `download_queue_service.dart` — `maxConcurrent` 3 → **5** (cache-reuse
+  fix ke baad per-song average network load kam ho gaya hai, isliye 5
+  parallel safe hai).
+- `storage_service.dart` `getMusicDir()` — pehle HAR single download call
+  pe public Music/ folder try karta tha (permission request + real
+  write-probe, dono OS IPC calls) — bulk playlist download (jaise 98
+  gaane) me agar permission pehle hi denied thi, ye same fail hone wala
+  kaam 98 baar repeat karta tha (har baar wahi "Permission denied" log +
+  extra latency). Ab result ek app-session ke liye cache hota hai
+  (`_cachedMusicDir`) — sirf pehli baar hi real probe hota hai. **Honest
+  note:** agar `MANAGE_EXTERNAL_STORAGE` ("All files access") user ne
+  Settings me manually allow nahi kiya, to app-specific folder fallback
+  (jo pehle se hi safe/working hai, bas file manager ke Music folder me
+  nahi dikhta) hamesha use hoga — ye code se force nahi karaya ja sakta,
+  user ko khud Settings > Apps > SurSathi > "All files access" se allow
+  karna hoga agar public Music folder chahiye.
+
+
+
+**Ask (screenshots ke saath):** "shayad ye home se aata nahi hai, na Daily
+Mix dikh raha, na neeche aur playlist generate ho rahi — pehle jaisa hai."
+
+**Root causes (dono real, alag-alag):**
+1. **Daily Mix silently khaali reh sakti thi** — `daily_mix_service.dart`
+   ka radio-pull (`getRadioQueue`) agar fail ho (network/extraction), purana
+   code `catch (_) {}` se chup-chaap swallow kar leta tha, koi trace nahi
+   milta tha ki kya hua. Fix: `DailyMixService.lastDebugInfo` naya field —
+   batata hai "history hi nahi hai" vs "history hai par radio-pull fail
+   hua (kis artist pe, kis wajah se)". `home_screen.dart` isse **sirf
+   genuine failure ke case me** ek chhoti dim line dikhata hai (naya user
+   jiski history hi nahi hai, uske liye section pehle jaisa chup hi rehta
+   hai — koi noise nahi).
+2. **"Infinite scroll" asal me FINITE tha** — `getHomeSections()` khud ek
+   hi call me poora feed exhaust kar leta hai (koi real "next page" milta
+   hi nahi, upar wala HONESTY NOTE dekho) — matlab `_homeSections` khatam
+   hote hi scroll literally "dead end" ho jaata tha, koi naya content kabhi
+   nahi aata tha, chahe user kitna bhi scroll kare. Isi wajah se lag raha
+   tha "kuch generate nahi ho raha, pehle jaisa hai."
+   **Fix:** curated `_homeSections` khatam hone ke baad, feed ab
+   `_kCategories` (12 categories) ko ek-ek karke asli `search()` se fetch
+   karke naye "... — aur gaane" sections banata rehta hai, aur 12 category
+   khatam hone par wapas cycle kar deta hai — matlab scroll ab sach me
+   kabhi khatam nahi hota (fallback "Trending Now" case me bhi same lagta
+   hai). Ye extra category-search `search()` use karta hai (already stable,
+   sab jagah use hota hai) — **resolve/CDN-header pipeline ko chhua nahi
+   gaya**.
+
+
 
 **Ask:** download duplicate-check pakka ho, downloads app uninstall karne
 par bhi rahein, cache default 3GB ho, current gaane ke saath pichla gaana

@@ -84,6 +84,18 @@ class CacheDB {
     return (total as num?)?.toInt() ?? 0;
   }
 
+  // NEW (2026-09-17) — cache entry ka poora record (title/artist/thumb/
+  // duration samet), sirf file-path nahi — download-from-cache fix ke
+  // liye chahiye (dekho youtube_service.dart download()).
+  Future<Map<String, dynamic>?> getRow(String id) async {
+    final db = await _database;
+    final rows = await db.query(_table, where: 'id = ?', whereArgs: [id], limit: 1);
+    if (rows.isEmpty) return null;
+    final path = rows.first['file_path'] as String?;
+    if (path == null || path.isEmpty || !await File(path).exists()) return null;
+    return rows.first;
+  }
+
   // NEW: cached file ka path do agar file abhi bhi disk pe maujood hai —
   // local-first playback (network resolve se bhi pehle check hota hai).
   Future<String?> getFilePath(String id) async {

@@ -10,10 +10,11 @@
 // download beech me rok saken.
 //
 // Fix:
-//   1. SPEED — ab ek waqt me sirf 1 nahi, `maxConcurrent` (=3) gaane
-//      parallel download hote hain (chhota, safe worker-pool — poori
-//      playlist ek saath nahi, taaki wahi purana crash/lag pattern wapas
-//      na aaye, lekin 3x tak zyada throughput milta hai).
+//   1. SPEED — ab ek waqt me sirf 1 nahi, `maxConcurrent` (=5, dekho neeche
+//      — cache-reuse fix ke baad safe) gaane parallel download hote hain
+//      (chhota, safe worker-pool — poori playlist ek saath nahi, taaki
+//      wahi purana crash/lag pattern wapas na aaye, lekin zyada throughput
+//      milta hai).
 //   2. LAG (bulk playlist add) — pehle poori playlist ke liye ek loop mein
 //      `enqueue()` baar-baar call hota tha (har baar apna `notifyListeners()`
 //      — 98 gaano ke liye 98 back-to-back UI rebuild ek hi frame ke andar,
@@ -39,18 +40,47 @@ class DownloadQueueService extends ChangeNotifier {
   DownloadQueueService._internal();
   static final DownloadQueueService instance = DownloadQueueService._internal();
 
-  static const int maxConcurrent = 3;
+  // BUMPED (2026-09-17, user request): 3 → 5. Cache-reuse fix (dekho
+  // youtube_service.dart download()) ne per-song network load kaafi kam
+  // kar diya hai (jo gaana pehle se cached hai uske liye ye ab sirf local
+  // disk copy hai, koi extra network hit nahi) — isliye 5 parallel
+  // network-download bhi ab safe hain.
+  static const int maxConcurrent = 5;
 
   final List<Song> _queue = [];
   // Abhi active (in-flight) downloads — songId -> Song
   final Map<String, Song> _active = {};
   final Map<String, double> _progress = {};
+  // NEW (2026-09-17 — "1 minute lag jaata hai, atka hua lagta hai"): resolve
+  // phase ka status text (dekho youtube_service.dart download() ka naya
+  // onStatus param) — progress ke 0% pe atke rehne ke dauraan bhi UI ko
+  // pata rehta hai "abhi kya ho raha hai".
+  final Map<String, String> _statusText = {};
   int _runningWorkers = 0;
   bool _paused = false;
+
+  // NEW (2026-09-17 — "animation mein lag hota hai"): 5 parallel workers
+  // ek saath apna apna notifyListeners() call karte the (progress % badalne
+  // par) — ek saath kai listeners aane se UI rebuild bahut baar-baar hoti
+  // thi, jo chhote/kam-RAM devices pe stutter jaisa lagta tha. Ab
+  // notifyListeners() zyada se zyada har ~120ms me ek baar hi fire hota hai
+  // (progress ke liye) — start/finish/status jaise "important" events ab
+  // bhi turant fire hote hain, sirf tez-tez aane wale % updates throttle
+  // hote hain.
+  DateTime _lastProgressNotify = DateTime.fromMillisecondsSinceEpoch(0);
+  void _notifyThrottled() {
+    final now = DateTime.now();
+    if (now.difference(_lastProgressNotify) < const Duration(milliseconds: 120)) {
+      return;
+    }
+    _lastProgressNotify = now;
+    notifyListeners();
+  }
 
   List<Song> get queue => List.unmodifiable(_queue);
   List<Song> get activeSongs => List.unmodifiable(_active.values);
   double progressOf(String id) => _progress[id] ?? 0;
+  String? statusOf(String id) => _statusText[id];
   bool get isPaused => _paused;
   bool get isIdle => _active.isEmpty && _queue.isEmpty;
 
@@ -140,6 +170,7 @@ class DownloadQueueService extends ChangeNotifier {
         final song = _queue.removeAt(0);
         _active[song.id] = song;
         _progress[song.id] = 0;
+        _statusText.remove(song.id);
         notifyListeners();
         unawaited(_pushNotification());
 
@@ -157,11 +188,19 @@ class DownloadQueueService extends ChangeNotifier {
               final pct = (p * 100).round();
               if (pct == lastNotifiedPct) return;
               lastNotifiedPct = pct;
-              // BUG FIX (v40, ab bhi lagu): sirf % badalne par hi notify —
-              // har chunk pe nahi, warna 3 parallel downloads ke saath UI
-              // rebuild aur bhi zyada baar fire hoke ulta lag kar deta.
-              notifyListeners();
+              // BUG FIX (v40, ab bhi lagu; v48 — time-throttle bhi add):
+              // sirf % badalne par hi notify, aur ab max har ~120ms — warna
+              // parallel downloads ke saath UI rebuild bahut zyada baar
+              // fire hoke ulta lag/stutter kar deta.
+              _notifyThrottled();
               if (pct % 10 == 0) unawaited(_pushNotification());
+            },
+            // NEW (2026-09-17): resolve-phase status text — progress abhi
+            // 0% hi hai to bhi UI ko pata chalta rehta hai kya chal raha
+            // hai ("atka hua" jaisa nahi lagta).
+            onStatus: (status) {
+              _statusText[song.id] = status;
+              _notifyThrottled();
             },
           );
           success = path != null;
@@ -172,6 +211,7 @@ class DownloadQueueService extends ChangeNotifier {
         _notifyFinished(song, success);
         _active.remove(song.id);
         _progress.remove(song.id);
+        _statusText.remove(song.id);
         notifyListeners();
       }
     } finally {

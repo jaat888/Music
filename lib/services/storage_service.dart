@@ -10,6 +10,20 @@ import 'package:permission_handler/permission_handler.dart';
 class StorageService {
   StorageService._();
 
+  // NEW (2026-09-17 — "storage error" baar-baar log hona + download slow
+  // hona dono ka ek hissa): pehle `getMusicDir()` HAR SINGLE download call
+  // pe public Music/ folder try karta tha — permission request (OS ko ek
+  // IPC call) + ek real write-probe, dono baar-baar. Bulk playlist
+  // download (jaise 98 gaane) me agar permission already denied ho chuki
+  // hai, ye wahi fail hone wala kaam 98 baar repeat karta tha — har baar
+  // wahi "Permission denied" log bhi aata tha, aur ye overhead (2 extra
+  // async OS calls per song) download ko dheema bhi karta tha. Ab result
+  // (public dir mila ya fallback pe gaye) ek app-session ke liye cache ho
+  // jaata hai — sirf PEHLI baar hi real probe hota hai, uske baad seedha
+  // wahi result reuse hota hai. (App restart hone par dobara try hota hai
+  // — agar us beech user ne Settings me jaake permission de di ho.)
+  static Directory? _cachedMusicDir;
+
   // Permanent downloads yahan jaate hain.
   //
   // FIX (see NOTES.md — "download nahi hota" root cause): pehle ye hamesha
@@ -35,6 +49,8 @@ class StorageService {
   // lekin Downloads screen (in-app) hamesha sahi dikhayegi kyunki wo
   // `DownloadDB` se aata hai, disk path se nahi).
   static Future<Directory> getMusicDir() async {
+    if (_cachedMusicDir != null) return _cachedMusicDir!;
+
     // FIX (user request — "uninstall pe bhi download rahe"): Android 11+
     // (API 30+) pe scoped storage ke karan public Music/ folder me likhna
     // WRITE_EXTERNAL_STORAGE se allow nahi hota — MANAGE_EXTERNAL_STORAGE
@@ -60,11 +76,14 @@ class StorageService {
       final probe = File(p.join(publicDir.path, '.sursathi_write_test'));
       await probe.writeAsBytes(const [0]);
       await probe.delete();
+      _cachedMusicDir = publicDir;
       return publicDir;
     } catch (e) {
       print(
         'StorageService.getMusicDir: public Music folder likhi nahi ja '
-        'saki ($e) — app-specific folder pe fallback kar rahe hain',
+        'saki ($e) — app-specific folder pe fallback kar rahe hain '
+        '(is session ke liye ye result yaad rakha jayega, dobara probe '
+        'nahi hoga)',
       );
     }
 
@@ -75,6 +94,7 @@ class StorageService {
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
+    _cachedMusicDir = dir;
     return dir;
   }
 

@@ -290,7 +290,15 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    'Download ho raha hai: ${song.title}',
+                    // NEW (2026-09-17 — "1 min lag jaata hai, atka hua
+                    // lagta hai"): jab tak actual bytes download nahi
+                    // shuru hote (resolve chal raha hota hai), ab yahan
+                    // real status dikhta hai — pehle hamesha "Download ho
+                    // raha hai: X" hi dikhta rehta tha, chahe kuch bhi ho
+                    // raha ho, isliye stuck jaisa lagta tha.
+                    q.progressOf(song.id) <= 0 && q.statusOf(song.id) != null
+                        ? '${song.title} — ${q.statusOf(song.id)}'
+                        : 'Download ho raha hai: ${song.title}',
                     style: AppText.bodyM(color: kText),
                     overflow: TextOverflow.ellipsis,
                   ),

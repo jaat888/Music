@@ -67,6 +67,14 @@ class DailyMixService {
   List<DailyMix>? _memoryCache;
   String? _memoryCacheDate;
 
+  // NEW (2026-09-17, diagnostic — Daily Mix section "kabhi kabhi dikhti hi
+  // nahi" report ke baad): koi bhi behaviour change nahi, sirf ye record
+  // karta hai ki khaali list kis wajah se aayi — home_screen.dart isse
+  // (sirf jab list khaali ho) ek chhota temporary reason dikha sakta hai,
+  // taaki bina logcat ke bhi pata chale "history hi nahi hai" vs "history
+  // hai par radio-pull fail ho raha".
+  String? lastDebugInfo;
+
   String get _today {
     final now = DateTime.now();
     return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
@@ -116,7 +124,13 @@ class DailyMixService {
   Future<List<DailyMix>> _generate() async {
     final topArtists =
         await PlayHistoryDB.instance.getTopArtists(limit: mixCount);
-    if (topArtists.isEmpty) return [];
+    if (topArtists.isEmpty) {
+      lastDebugInfo =
+          'Abhi tak play-history khaali hai (koi gaana pura play nahi hua ya'
+          ' PlayHistoryDB abhi tak likh nahi paayi) — Daily Mix banane ke'
+          ' liye kam se kam 1 gaana play hona zaroori hai.';
+      return [];
+    }
 
     // Har top-artist ka apna sabse-zyada-chala-hua gaana chahiye "seed" ke
     // liye — ek hi query se sab artists ke top-song nikaal lete hain
@@ -125,6 +139,7 @@ class DailyMixService {
     final mostPlayed = await PlayHistoryDB.instance.getMostPlayed(limit: 200);
 
     final mixes = <DailyMix>[];
+    final failedArtists = <String>[];
     for (final entry in topArtists) {
       final artist = entry.key;
       final seedSong = mostPlayed
@@ -132,7 +147,10 @@ class DailyMixService {
           .where((s) => s.artist == artist)
           .cast<Song?>()
           .firstWhere((s) => s != null, orElse: () => null);
-      if (seedSong == null) continue;
+      if (seedSong == null) {
+        failedArtists.add('$artist (koi seed song nahi mila)');
+        continue;
+      }
 
       try {
         final songs = await YoutubeService.instance.getRadioQueue(
@@ -141,11 +159,21 @@ class DailyMixService {
           artist,
           count: songsPerMix,
         );
-        if (songs.isEmpty) continue;
+        if (songs.isEmpty) {
+          failedArtists.add('$artist (radio-pull ne 0 gaane diye)');
+          continue;
+        }
         mixes.add(DailyMix(title: '$artist Mix', seedArtist: artist, songs: songs));
-      } catch (_) {
-        // Ek artist ka radio-pull fail ho to baaki mixes pe koi asar nahi.
+      } catch (e) {
+        failedArtists.add('$artist (radio-pull fail: $e)');
       }
+    }
+    if (mixes.isEmpty && failedArtists.isNotEmpty) {
+      lastDebugInfo =
+          'Top artists mile (${topArtists.map((e) => e.key).join(", ")}) par'
+          ' inke liye radio-pull fail ho gaya: ${failedArtists.join(" | ")}';
+    } else {
+      lastDebugInfo = null;
     }
     return mixes;
   }
