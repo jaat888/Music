@@ -250,7 +250,7 @@ class _CreatePlaylistScreenState extends State<CreatePlaylistScreen> {
                             right: 6,
                             child: Container(
                               padding: const EdgeInsets.all(6),
-                              decoration: const BoxDecoration(
+                              decoration:  BoxDecoration(
                                 color: kBg,
                                 shape: BoxShape.circle,
                               ),

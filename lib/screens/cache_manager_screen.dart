@@ -14,11 +14,12 @@ import '../services/cache_service.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
 
-// Slider ke discrete steps — index 4 (-1) matlab Unlimited
+// Slider ke discrete steps — index 5 (-1) matlab Unlimited
 const List<int> _kLimitOptions = [
   500 * 1024 * 1024,
   1024 * 1024 * 1024,
   2 * 1024 * 1024 * 1024,
+  3 * 1024 * 1024 * 1024, // NEW default (pehle 2GB tha)
   5 * 1024 * 1024 * 1024,
   -1,
 ];
@@ -290,6 +291,7 @@ class _CacheManagerScreenState extends State<CacheManagerScreen> {
               Text('500MB', style: AppText.bodyS()),
               Text('1GB', style: AppText.bodyS()),
               Text('2GB', style: AppText.bodyS()),
+              Text('3GB', style: AppText.bodyS()),
               Text('5GB', style: AppText.bodyS()),
               Text('∞', style: AppText.bodyS()),
             ],
@@ -332,7 +334,7 @@ class _CacheManagerScreenState extends State<CacheManagerScreen> {
             Expanded(
               child: OutlinedButton(
                 style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: kTextDim),
+                  side: BorderSide(color: kTextDim),
                   padding: const EdgeInsets.symmetric(vertical: 12),
                 ),
                 onPressed: _entries.isEmpty ? null : _confirmClearUnprotected,
@@ -350,7 +352,7 @@ class _CacheManagerScreenState extends State<CacheManagerScreen> {
             child: Center(
               child: Column(
                 children: [
-                  const Icon(Icons.storage_rounded, color: kTextDim, size: 48),
+                  Icon(Icons.storage_rounded, color: kTextDim, size: 48),
                   const SizedBox(height: 10),
                   Text('Cache khaali hai', style: AppText.bodyM(color: kTextDim)),
                 ],
@@ -415,7 +417,7 @@ class _CacheManagerScreenState extends State<CacheManagerScreen> {
                                 width: 52,
                                 height: 52,
                                 color: kSurface,
-                                child: const Icon(Icons.music_note, color: kTextDim),
+                                child: Icon(Icons.music_note, color: kTextDim),
                               ),
                             ),
                           ),

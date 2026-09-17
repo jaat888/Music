@@ -16,7 +16,7 @@ class CacheService extends ChangeNotifier {
   CacheService._internal();
   static final CacheService instance = CacheService._internal();
 
-  static const int defaultLimitBytes = 2 * 1024 * 1024 * 1024; // 2GB
+  static const int defaultLimitBytes = 3 * 1024 * 1024 * 1024; // 3GB (user ki request pe 2GB se badhaya)
   static const String _keyLimit = 'cache_limit_bytes';
   static const String _keyWifiOnly = 'cache_wifi_only';
 

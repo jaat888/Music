@@ -153,5 +153,21 @@ class AppDatabase {
         PRIMARY KEY (playlist_id, song_id)
       )
     ''');
+
+    // --- PlayHistoryDB (Part 3, Library smarts) ---
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS play_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        song_id TEXT,
+        title TEXT,
+        artist TEXT,
+        thumb TEXT,
+        duration INTEGER,
+        played_at INTEGER
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_play_history_song_id ON play_history(song_id)',
+    );
   }
 }

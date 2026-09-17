@@ -105,6 +105,20 @@ class _MiniPlayerState extends State<MiniPlayer> {
             // Fast upar-swipe pe bhi full player khol do
             if ((details.primaryVelocity ?? 0) < -200) widget.onTap();
           },
+          // PART 5 (2026-09-17): mini-player swipe gestures — left swipe
+          // se "next", right swipe se "previous" (Spotify/YT Music jaisa
+          // pattern). `primaryVelocity` fling ki direction/speed deta hai —
+          // Flutter convention: positive = right ki taraf, negative = left
+          // ki taraf. 250px/s se dheeme swipes ignore karte hain taaki
+          // normal tap/scroll accidentally skip na kar de.
+          onHorizontalDragEnd: (details) {
+            final v = details.primaryVelocity ?? 0;
+            if (v < -250) {
+              audioHandler.skipToNext();
+            } else if (v > 250) {
+              audioHandler.skipToPrevious();
+            }
+          },
           child: Container(
             height: 70,
             width: double.infinity,

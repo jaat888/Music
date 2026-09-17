@@ -89,6 +89,16 @@ dependencies:
   share_plus: ^10.1.4
   url_launcher: ^6.2.2
 
+  # ---------- Backup/restore (Part 4) — JSON export/import file picker ----------
+  # NEW (2026-09-17, Part 4): koi purana file-select mechanism app me nahi
+  # tha (share_plus sirf OUTGOING share karta hai, file choose karke
+  # WAAPAS Dart me read karne ke liye nahi). Import backup ke liye user ko
+  # apne storage se ek .json file chunni hoti hai — file_picker isi kaam
+  # ke liye add kiya. UNTESTED (sandbox me build/run nahi ho saka, dekho
+  # NOTES.md) — standard/well-maintained package hai, par pehli real CI
+  # build ka log dekhna zaroori hai.
+  file_picker: ^8.1.3
+
   # ---------- Misc utils ----------
   intl: ^0.18.1
   uuid: ^4.2.2

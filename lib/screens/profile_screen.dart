@@ -3,9 +3,9 @@
 // downloads/cache/stats/settings/about), logout.
 
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../db/download_db.dart';
+import '../db/play_history_db.dart';
 import '../db/liked_db.dart';
 import '../db/playlist_db.dart';
 import '../theme/colors.dart';
@@ -43,11 +43,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final liked = await LikedDB.instance.getAll();
     final playlists = await PlaylistDB.instance.getAllPlaylists();
     final downloads = await DownloadDB.instance.getAll();
-    // NOTE: koi real listening-time tracker abhi nahi hai — 'listened_seconds'
-    // wahi placeholder SharedPreferences key hai jo StatsScreen (Batch 12)
-    // bhi use karti hai (NOTES.md dekho).
-    final prefs = await SharedPreferences.getInstance();
-    final seconds = prefs.getInt('listened_seconds') ?? 0;
+    // Part 6: pehle 'listened_seconds' SharedPreferences placeholder tha
+    // (StatsScreen jaisa hi dummy) — ab dono jagah PlayHistoryDB (asli
+    // play_history table) se same real number aata hai.
+    final seconds = await PlayHistoryDB.instance.totalListenedSeconds();
 
     if (!mounted) return;
     setState(() {
@@ -100,7 +99,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.settings, color: kText),
+            icon: Icon(Icons.settings, color: kText),
             onPressed: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const SettingsScreen()),
@@ -327,7 +326,7 @@ class _SectionTile extends StatelessWidget {
                     padding: const EdgeInsets.only(right: 6),
                     child: Text(trailing!, style: AppText.bodyS()),
                   ),
-                const Icon(Icons.chevron_right, color: kTextDim),
+                Icon(Icons.chevron_right, color: kTextDim),
               ],
             ),
           ),

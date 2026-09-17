@@ -21,9 +21,13 @@ import '../services/youtube_service.dart';
 import '../widgets/mini_player.dart';
 import 'create_playlist_screen.dart';
 import 'downloads_screen.dart';
+import 'duplicate_songs_screen.dart';
 import 'full_player_screen.dart';
+import 'mood_playlist_screen.dart';
 import 'liked_songs_screen.dart';
 import 'playlist_detail_screen.dart';
+import 'recently_played_screen.dart';
+import 'smart_playlist_screen.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -200,6 +204,90 @@ class _LibraryScreenState extends State<LibraryScreen> {
               margin: const EdgeInsets.only(bottom: 10),
             ),
           ),
+        const SizedBox(height: 20),
+        // Part 3 (Library smarts) — Recently Played, smart auto-playlists
+        // (Most/Never Played, Downloaded Only), duplicate-song detector.
+        // Ye sab existing data (play_history + liked/cache/download) se
+        // compute hote hain, koi naya manual playlist banane ki zaroorat
+        // nahi.
+        Text('Smart', style: AppText.displayS(color: kText)),
+        const SizedBox(height: 8),
+        _LibraryCard(
+          icon: Icons.history,
+          iconColor: kBlue,
+          title: 'Recently Played',
+          subtitle: 'Jo abhi-abhi suna',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const RecentlyPlayedScreen()),
+          ),
+          margin: const EdgeInsets.only(bottom: 10),
+        ),
+        _LibraryCard(
+          icon: Icons.local_fire_department,
+          iconColor: kGreen,
+          title: 'Most Played',
+          subtitle: 'Sabse zyada bajaye gaye',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => const SmartPlaylistScreen(mode: SmartPlaylistMode.mostPlayed),
+            ),
+          ),
+          margin: const EdgeInsets.only(bottom: 10),
+        ),
+        _LibraryCard(
+          icon: Icons.visibility_off_outlined,
+          iconColor: kPurple,
+          title: 'Never Played',
+          subtitle: 'Kabhi try nahi kiye',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => const SmartPlaylistScreen(mode: SmartPlaylistMode.neverPlayed),
+            ),
+          ),
+          margin: const EdgeInsets.only(bottom: 10),
+        ),
+        _LibraryCard(
+          icon: Icons.offline_pin_outlined,
+          iconColor: kBlue,
+          title: 'Downloaded Only',
+          subtitle: 'Offline-ready songs',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => const SmartPlaylistScreen(mode: SmartPlaylistMode.downloadedOnly),
+            ),
+          ),
+          margin: const EdgeInsets.only(bottom: 10),
+        ),
+        _LibraryCard(
+          icon: Icons.filter_none,
+          iconColor: kRed,
+          title: 'Find Duplicates',
+          subtitle: 'Ek hi gaana kai baar to nahi',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const DuplicateSongsScreen()),
+          ),
+          margin: const EdgeInsets.only(bottom: 10),
+        ),
+        // Part 6 (Engagement) — mood-based auto playlist ("chill"/"workout"
+        // tap se). Yahin "Smart" section me, kyunki ye bhi existing library
+        // data (liked+cache+download) se hi banti hai, sirf zaroorat pade to
+        // online search se supplement hoti hai.
+        _LibraryCard(
+          icon: Icons.mood,
+          iconColor: kPurple,
+          title: 'Moods',
+          subtitle: 'Chill, Workout, Party, Sad, Focus',
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const MoodPlaylistScreen()),
+          ),
+          margin: const EdgeInsets.only(bottom: 10),
+        ),
         const SizedBox(height: 90),
       ],
     );
@@ -267,7 +355,7 @@ class _LibraryCard extends StatelessWidget {
                   ),
                 ),
                 trailing ??
-                    const Icon(Icons.arrow_forward_ios, color: kTextDim, size: 16),
+                    Icon(Icons.arrow_forward_ios, color: kTextDim, size: 16),
               ],
             ),
           ),

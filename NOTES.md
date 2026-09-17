@@ -21,7 +21,46 @@
 >    sleep-timer icon ab actual state (on/off) reflect karte hain. Inhe wapas
 >    static grey icon mat banao — user ne specifically iski request ki thi.
 
-## Batch 24 (2026-09-16) — Icon states (download/radio/sleep timer) + playlist download indicator
+## Batch 25 (2026-09-16) — Local-first playback, next-2 preload, 3GB cache, uninstall-persistent downloads
+
+**Ask:** download duplicate-check pakka ho, downloads app uninstall karne
+par bhi rahein, cache default 3GB ho, current gaane ke saath pichla gaana
+bhi cache me rahe aur agle 2 upcoming gaane bhi preload ho jayein.
+
+**Fixes:**
+- `background_service.dart` `_resolveAndPlay()` — ab pehle DownloadDB phir
+  CacheDB me local file check karta hai; mile to seedha `player.setFilePath()`
+  se bajata hai (koi NewPipe/explode/Piped resolve hi nahi — offline bhi
+  chalega, aur "pehle se hai to phir se download/resolve mat karo" wala
+  duplicate-safety yahin se guaranteed hoti hai).
+- Cache-hit se play hone par `CacheDB.update(lastPlayed: now)` — isse
+  replay hua/pichla gaana LRU eviction me "fresh" maana jaata hai aur jaldi
+  nahi hatata (pehle `last_played` kabhi update hi nahi hota tha, ye ek
+  real bug tha).
+- `_prefetchNext()` ab sirf agle gaane ka URL cache nahi karta — agle
+  **2** upcoming gaane disk pe bhi cache ho jaate hain (`_prefetchOne`),
+  aur agar wo pehle se download/cached hai to kuch nahi karta (no
+  duplicate work).
+- `download_db.dart` / `cache_db.dart` — naya `getFilePath(id)` method
+  (file abhi disk pe hai ya nahi, verify karke).
+- `playlist_detail_screen.dart` single-song `_download()` me duplicate
+  check add kiya (pehle sirf "Download All" check karta tha, single
+  download nahi). `youtube_service.dart download()` me bhi root-level
+  duplicate check add kiya (defense-in-depth, koi bhi caller miss kare
+  to bhi safe).
+- `cache_service.dart` default limit 2GB → **3GB**; `cache_manager_screen.dart`
+  slider me 3GB option add kiya.
+- **Uninstall-persistence:** `AndroidManifest.xml` me
+  `MANAGE_EXTERNAL_STORAGE` permission add kiya + `storage_service.dart`
+  ke `getMusicDir()` me request kiya. Isse pehle Android 11+ (scoped
+  storage) pe public `Music/SurSathi` folder me likhna fail ho jaata tha
+  aur app app-specific `Android/data/<package>/` folder pe fallback karta
+  tha — jo **uninstall pe khud delete ho jaata hai**. Ab permission grant
+  hone par asli public Music folder use hoga (uninstall-safe); deny kare
+  to purana safe fallback abhi bhi kaam karega (bas uninstall pe delete
+  ho jayega, jaisa pehle tha).
+
+
 
 **Ask:** "download icon pe dikhe ki gaana pehle se download hai", "radio mode
 on hai to uska bhi pata chale", "sleep timer on hai to uska bhi", aur ye
@@ -1522,3 +1561,35 @@ nahi hai). Agla real-device log dekhna — agar phir bhi fail ho:
 - Agar bgutils-js load ho gaya (`window.BG`/`window.BgUtils` mila) lekin
   aage koi step fail ho, wo error text bhi seedha dikhega — us hisaab se
   next iteration.
+
+## Part 5 (2026-09-17) — Theme toggle, mini-player swipe, Recently Added
+
+- **Theme toggle (dark/light), ab REAL:** `colors.dart` ke `kBg/kBgElev/
+  kSurface/kText/kTextDim` pehle hardcoded `const Color` the (poore app me
+  sirf dark values) — ab `AppColorTheme.isLight` flag ke hisaab se dark/light
+  palette dene wale getters hain. `theme_service.dart` me sync `mode`
+  getter + `init()` add kiya. `main.dart` (`SurSathiApp`) ab `Consumer<
+  ThemeService>` se wrap hai — mode + system brightness se `isLight` decide
+  karta hai, `AppColorTheme.isLight` set karta hai, aur `MaterialApp` ko
+  `ValueKey(isLight)` deta hai (toggle pe poora app fresh rebuild hota hai —
+  Home pe reset ho jaata hai, trade-off simple/reliable rehne ke liye).
+  `app_theme.dart` me naya `AppTheme.light()`. 78+ jagah `const` hataya gaya
+  (kBg/kText waghera ab dynamic hain, const-eval nahi ho sakte) — script se
+  verified, koi jagah miss nahi hui.
+- **Mini-player swipe gestures:** `mini_player.dart` me swipe-up (full
+  player khol) pehle se tha; naya `onHorizontalDragEnd` add kiya — left
+  swipe = skip next, right swipe = previous (250px/s threshold, accidental
+  taps se bachne ke liye).
+- **"Recently added" per playlist:** `playlist_db.dart` me naya
+  `getRecentlyAddedSongIds()` (added_at DESC). `playlist_detail_screen.dart`
+  AppBar me naya ghadi-icon toggle — ON hone par list added_at order me
+  dikhti hai (drag-reorder disable ho jaata hai is mode me, "Play All" bhi
+  isi order me chalta hai). `_playFrom()` ka signature `int index` se
+  `Song` kiya gaya (BUG FIX bhi: pehle index-based tha, "Recently Added"
+  order alag hone par galat gaana play hota — ab displayed list ke against
+  hi resolve hota hai).
+
+**Abhi bhi baaki (device pe verify karna hai):** poora batch is sandbox me
+compile/run nahi ho saka (na Flutter SDK na network) — sabse zyada risk
+wala hissa theme const-stripping hai (bahut saari files touch hui), real
+build zaroor lena.

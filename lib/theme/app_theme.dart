@@ -1,5 +1,13 @@
 // lib/theme/app_theme.dart
-// ThemeData yahan se banta hai. AppTheme.dark() ko MaterialApp me lagana.
+// ThemeData yahan se banta hai. AppTheme.dark()/AppTheme.light() ko
+// MaterialApp me lagana (dekho main.dart — AppColorTheme.isLight flag ke
+// hisaab se sahi wala use hota hai).
+//
+// PART 5 (2026-09-17): naya AppTheme.light() add kiya (pehle sirf dark()
+// tha). kBg/kText/kSurface waghera ab colors.dart me dynamic getters hain
+// (AppColorTheme.isLight ke hisaab se), isliye same builder dono themes ke
+// liye kaam karta hai — bas caller (main.dart) ko theme banane se PEHLE
+// `AppColorTheme.isLight` sahi set karna zaroori hai.
 
 import 'package:flutter/material.dart';
 import 'colors.dart';
@@ -8,24 +16,39 @@ import 'typography.dart';
 class AppTheme {
   AppTheme._();
 
-  static ThemeData dark() {
+  static ThemeData dark() => _build(Brightness.dark);
+  static ThemeData light() => _build(Brightness.light);
+
+  static ThemeData _build(Brightness brightness) {
     final base = ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
+      brightness: brightness,
       fontFamily: 'Inter',
     );
 
-    final colorScheme = const ColorScheme.dark(
-      primary: kGreen,
-      secondary: kBlue,
-      tertiary: kPurple,
-      surface: kSurface,
-      error: kRed,
-      onPrimary: Colors.white,
-      onSecondary: Colors.white,
-      onSurface: kText,
-      onError: Colors.white,
-    );
+    final colorScheme = brightness == Brightness.dark
+        ? ColorScheme.dark(
+            primary: kGreen,
+            secondary: kBlue,
+            tertiary: kPurple,
+            surface: kSurface,
+            error: kRed,
+            onPrimary: Colors.white,
+            onSecondary: Colors.white,
+            onSurface: kText,
+            onError: Colors.white,
+          )
+        : ColorScheme.light(
+            primary: kGreen,
+            secondary: kBlue,
+            tertiary: kPurple,
+            surface: kSurface,
+            error: kRed,
+            onPrimary: Colors.white,
+            onSecondary: Colors.white,
+            onSurface: kText,
+            onError: Colors.white,
+          );
 
     return base.copyWith(
       colorScheme: colorScheme,
@@ -39,7 +62,7 @@ class AppTheme {
         centerTitle: false,
         surfaceTintColor: Colors.transparent,
         titleTextStyle: AppText.displayS(),
-        iconTheme: const IconThemeData(color: kText),
+        iconTheme: IconThemeData(color: kText),
         systemOverlayStyle: null, // main.dart me SystemChrome se set hoga
       ),
 
@@ -97,7 +120,7 @@ class AppTheme {
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
           foregroundColor: kText,
-          side: const BorderSide(color: kTextDim, width: 1),
+          side: BorderSide(color: kTextDim, width: 1),
           textStyle: AppText.button(),
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
           shape: RoundedRectangleBorder(
@@ -121,7 +144,7 @@ class AppTheme {
       ),
 
       // ---------- BottomSheet ----------
-      bottomSheetTheme: const BottomSheetThemeData(
+      bottomSheetTheme:  BottomSheetThemeData(
         backgroundColor: kBgElev,
         surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(
@@ -140,7 +163,7 @@ class AppTheme {
       ),
 
       // ---------- Progress indicator ----------
-      progressIndicatorTheme: const ProgressIndicatorThemeData(
+      progressIndicatorTheme:  ProgressIndicatorThemeData(
         color: kGreen,
         linearTrackColor: kSurface,
         circularTrackColor: kSurface,

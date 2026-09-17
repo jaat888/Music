@@ -134,7 +134,7 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
                     Row(
                       children: [
                         IconButton(
-                          icon: const Icon(Icons.arrow_back, color: kText),
+                          icon: Icon(Icons.arrow_back, color: kText),
                           onPressed: () => Navigator.of(context).maybePop(),
                         ),
                       ],
@@ -154,7 +154,7 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
                                     width: 72,
                                     height: 72,
                                     color: kSurface,
-                                    child: const Icon(Icons.queue_music,
+                                    child:  Icon(Icons.queue_music,
                                         color: kTextDim),
                                   ),
                                 )
@@ -162,7 +162,7 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
                                   width: 72,
                                   height: 72,
                                   color: kSurface,
-                                  child: const Icon(Icons.queue_music,
+                                  child:  Icon(Icons.queue_music,
                                       color: kTextDim),
                                 ),
                         ),

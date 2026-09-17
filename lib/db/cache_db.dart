@@ -2,6 +2,8 @@
 // Cached audio files ka tracking — jab cache full ho to purani files
 // (jo protected nahi hain) hataane ke kaam aata hai.
 
+import 'dart:io';
+
 import 'package:sqflite/sqflite.dart';
 
 import '../models/song.dart';
@@ -80,6 +82,18 @@ class CacheDB {
     );
     final total = result.first['total'];
     return (total as num?)?.toInt() ?? 0;
+  }
+
+  // NEW: cached file ka path do agar file abhi bhi disk pe maujood hai —
+  // local-first playback (network resolve se bhi pehle check hota hai).
+  Future<String?> getFilePath(String id) async {
+    final db = await _database;
+    final rows = await db.query(_table, where: 'id = ?', whereArgs: [id], limit: 1);
+    if (rows.isEmpty) return null;
+    final path = rows.first['file_path'] as String?;
+    if (path == null || path.isEmpty) return null;
+    if (!await File(path).exists()) return null;
+    return path;
   }
 
   // Sabse purani unprotected entry — cache eviction ke liye

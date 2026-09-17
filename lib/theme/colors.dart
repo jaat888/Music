@@ -1,21 +1,74 @@
 // lib/theme/colors.dart
 // Saare app colors yahan se aate hai. Kahin bhi hardcode mat karna, isi file se import karna.
-
+//
+// PART 5 (2026-09-17) — Theme toggle (dark/light) ab REAL hai. Pehle
+// kBg/kBgElev/kSurface/kText/kTextDim top-level `const Color` the — matlab
+// poore app me hardcoded DARK values the, ThemeService.setThemeMode('light')
+// select karne ka koi visual effect hi nahi tha (dekho NOTES.md #26 pattern
+// — bahut saari settings sirf SharedPreferences-only thi). Ab ye 5 tokens
+// getters hain jo `AppColorTheme.isLight` flag ke hisaab se dark/light
+// palette choose karte hain. `main.dart` ka `SurSathiApp` is flag ko
+// `ThemeService.mode` (+ system brightness) se sync rakhta hai aur toggle
+// hone par `MaterialApp` ko naye `key` se poora rebuild karta hai (Navigator
+// stack fresh ho jaata hai, Home pe aa jaayega) — taaki poore app me sab
+// jagah naya theme turant, correctly apply ho, bina har screen ko
+// individually `Theme.of(context)`-based refactor kiye. Accent colors
+// (kGreen/kBlue/kPurple) aur status color (kRed) brand colors hain, dono
+// themes me same rehte hain — const hi hain.
 import 'package:flutter/material.dart';
 
-// ---------- Base colors ----------
-const Color kBg = Color(0xFF0A1428); // sabse peeche wala background
-const Color kBgElev = Color(0xFF142850); // thoda upar uthaya hua surface (cards, sheets)
-const Color kSurface = Color(0xFF1E3A5F); // inputs, chips, list tiles
+class _Palette {
+  final Color bg, bgElev, surface, text, textDim;
+  const _Palette({
+    required this.bg,
+    required this.bgElev,
+    required this.surface,
+    required this.text,
+    required this.textDim,
+  });
+}
 
-// ---------- Accent colors ----------
+const _darkPalette = _Palette(
+  bg: Color(0xFF0A1428),
+  bgElev: Color(0xFF142850),
+  surface: Color(0xFF1E3A5F),
+  text: Colors.white,
+  textDim: Color(0xFFA0B0C8),
+);
+
+const _lightPalette = _Palette(
+  bg: Color(0xFFF6F7FB),
+  bgElev: Color(0xFFFFFFFF),
+  surface: Color(0xFFE7EAF2),
+  text: Color(0xFF10131A),
+  textDim: Color(0xFF5B6472),
+);
+
+/// Global flag jo abhi kaunsa palette active hai batata hai. `main.dart`
+/// har build me isko `ThemeService.mode` (+ system brightness agar mode
+/// "system" hai) ke hisaab se sync karta hai, MaterialApp ko rebuild karne
+/// se pehle — isliye kBg/kText waghera hamesha up-to-date value dete hain.
+class AppColorTheme {
+  AppColorTheme._();
+  static bool isLight = false;
+}
+
+// ---------- Base colors (theme-reactive) ----------
+Color get kBg => AppColorTheme.isLight ? _lightPalette.bg : _darkPalette.bg;
+Color get kBgElev =>
+    AppColorTheme.isLight ? _lightPalette.bgElev : _darkPalette.bgElev;
+Color get kSurface =>
+    AppColorTheme.isLight ? _lightPalette.surface : _darkPalette.surface;
+
+// ---------- Text colors (theme-reactive) ----------
+Color get kText => AppColorTheme.isLight ? _lightPalette.text : _darkPalette.text;
+Color get kTextDim =>
+    AppColorTheme.isLight ? _lightPalette.textDim : _darkPalette.textDim;
+
+// ---------- Accent colors (brand — dono theme me same) ----------
 const Color kGreen = Color(0xFF1DB954); // play button, success, liked
 const Color kBlue = Color(0xFF1E90FF); // links, secondary accent
 const Color kPurple = Color(0xFF7C6CF0); // gradients, highlights
-
-// ---------- Text colors ----------
-const Color kText = Colors.white; // primary text
-const Color kTextDim = Color(0xFFA0B0C8); // subtitle / secondary text
 
 // ---------- Status ----------
 const Color kRed = Color(0xFFFF6B81); // errors, delete, heart-filled ke against use nahi (heart green hai)
@@ -38,12 +91,13 @@ class AppGradients {
     colors: [kBlue, kPurple],
   );
 
-  // Background ke upar subtle depth ke liye
-  static const LinearGradient bgFade = LinearGradient(
-    begin: Alignment.topCenter,
-    end: Alignment.bottomCenter,
-    colors: [kBgElev, kBg],
-  );
+  // Background ke upar subtle depth ke liye — kBgElev/kBg ab dynamic hain,
+  // isliye ye ab getter hai (pehle `const` tha).
+  static LinearGradient get bgFade => LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [kBgElev, kBg],
+      );
 
   // Card overlay (image ke upar text readable karne ke liye)
   static LinearGradient darkOverlay({double opacity = 0.85}) => LinearGradient(

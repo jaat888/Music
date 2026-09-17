@@ -61,7 +61,7 @@ class QueueScreen extends StatelessWidget {
           width: 50,
           height: 50,
           color: kSurface,
-          child: const Icon(Icons.music_note, color: kTextDim),
+          child: Icon(Icons.music_note, color: kTextDim),
         ),
       ),
     );
@@ -220,7 +220,7 @@ class QueueScreen extends StatelessWidget {
                                 },
                                 leading: ReorderableDragStartListener(
                                   index: i,
-                                  child: const Icon(
+                                  child:  Icon(
                                     Icons.drag_handle,
                                     color: kTextDim,
                                   ),
@@ -254,7 +254,7 @@ class QueueScreen extends StatelessWidget {
                                   ],
                                 ),
                                 trailing: IconButton(
-                                  icon: const Icon(Icons.close,
+                                  icon:  Icon(Icons.close,
                                       color: kTextDim, size: 20),
                                   onPressed: () => context
                                       .read<QueueService>()

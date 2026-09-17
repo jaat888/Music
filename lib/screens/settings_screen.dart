@@ -2,20 +2,20 @@
 // Master settings screen — appearance/playback/downloads/cache/notifications/
 // privacy/background/audio/advanced/about, sab SharedPreferences me save.
 
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/background_service.dart';
 import '../services/cache_service.dart';
+import '../services/sleep_timer_service.dart';
 import '../services/storage_service.dart';
 import '../services/theme_service.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
 import 'about_screen.dart';
 import 'background_settings_screen.dart';
+import 'backup_restore_screen.dart';
 import 'cache_manager_screen.dart';
 import 'equalizer_screen.dart';
 import 'help_screen.dart';
@@ -85,20 +85,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // Privacy
   bool _privateSession = false;
 
-  // Sleep timer — is screen ka apna local timer (FullPlayerScreen ka bhi
-  // apna alag local timer hai, dono independent hain — see NOTES.md)
-  Timer? _sleepTimer;
-
   @override
   void initState() {
     super.initState();
     _load();
-  }
-
-  @override
-  void dispose() {
-    _sleepTimer?.cancel();
-    super.dispose();
   }
 
   Future<void> _load() async {
@@ -222,11 +212,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _showSleepTimerDialog() async {
+    // NEW (Part 2): -1 = "Song khatam hone tak" (current gaana khatam hote
+    // hi pause, agla gaana shuru hi nahi hota). Ye sleep timer ab
+    // `SleepTimerService` (global, screen-independent — dekho us file ka
+    // comment) me store hota hai, isliye FullPlayerScreen se set kiya ho
+    // to bhi yahan sahi state dikhta/kaam karta hai, aur is settings
+    // screen ko band karne se ye cancel nahi hota.
     final options = <int, String>{
       15: '15 min',
       30: '30 min',
       60: '60 min',
       90: '90 min',
+      -1: 'Song khatam hone tak',
       0: 'Off',
     };
     final picked = await _showOptionsDialog<int>(
@@ -235,12 +232,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
       current: 0,
     );
     if (picked == null) return;
-    _sleepTimer?.cancel();
     if (picked == 0) {
+      SleepTimerService.instance.cancel();
       _snack('Sleep timer off kar diya');
       return;
     }
-    _sleepTimer = Timer(Duration(minutes: picked), () => audioHandler.pause());
+    if (picked == -1) {
+      SleepTimerService.instance.startEndOfTrack();
+      _snack('Current gaana khatam hote hi music pause ho jayega');
+      return;
+    }
+    SleepTimerService.instance.startDuration(Duration(minutes: picked));
     _snack('$picked min baad music pause ho jayega');
   }
 
@@ -477,8 +479,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     icon: Icons.graphic_eq,
                     title: 'Normalize Volume',
                     value: _normalizeVolume,
-                    onChanged: (v) =>
-                        _setBool(_kNormalizeVolume, v, () => _normalizeVolume = v),
+                    onChanged: (v) {
+                      _setBool(_kNormalizeVolume, v, () => _normalizeVolume = v);
+                      // PART 1: pehle sirf SharedPreferences me save hota
+                      // tha, koi service isse padhti hi nahi thi — ab
+                      // turant live bhi apply karo (loudness enhancer
+                      // on/off) taaki chalte gaane pe bhi turant asar dikhe.
+                      audioHandler.setNormalizeVolume(v);
+                    },
                   ),
 
                   _buildSectionHeader('DOWNLOADS'),
@@ -626,21 +634,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _buildSectionHeader('ADVANCED'),
                   _buildNavTile(
                     icon: Icons.backup,
-                    title: 'Backup',
-                    onTap: () => _snack('Backup created'),
-                  ),
-                  _buildNavTile(
-                    icon: Icons.restore,
-                    title: 'Restore',
-                    onTap: () async {
-                      final confirm = await _confirmDialog(
-                        title: 'Restore karein?',
-                        message: 'Pichla backup restore ho jayega.',
-                        confirmLabel: 'Restore',
-                        confirmColor: kGreen,
-                      );
-                      if (confirm) _snack('Restore complete');
-                    },
+                    title: 'Backup & Restore',
+                    subtitle: 'Playlists + liked songs ko JSON me export/import karo',
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const BackupRestoreScreen()),
+                    ),
                   ),
                   _buildNavTile(
                     icon: Icons.restart_alt,
@@ -743,8 +742,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ? Text(subtitle, style: AppText.bodyS().copyWith(fontSize: 12))
             : null,
         trailing: onTap != null && enabled
-            ? const Icon(Icons.chevron_right, color: kTextDim, size: 20)
-            : (!enabled ? const Icon(Icons.lock, color: kTextDim, size: 16) : null),
+            ? Icon(Icons.chevron_right, color: kTextDim, size: 20)
+            : (!enabled ? Icon(Icons.lock, color: kTextDim, size: 16) : null),
         onTap: enabled ? onTap : null,
       ),
     );
@@ -756,7 +755,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         padding: const EdgeInsets.symmetric(vertical: 10),
         child: Row(
           children: [
-            const Icon(Icons.color_lens, color: kTextDim),
+            Icon(Icons.color_lens, color: kTextDim),
             const SizedBox(width: 16),
             Expanded(
               child: Text('Accent Color', style: AppText.bodyL(color: kText)),

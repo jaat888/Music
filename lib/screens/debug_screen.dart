@@ -780,7 +780,7 @@ class _DebugScreenState extends State<DebugScreen> {
                 width: 48,
                 height: 48,
                 color: kSurface,
-                child: const Icon(Icons.music_note, color: kTextDim),
+                child: Icon(Icons.music_note, color: kTextDim),
               ),
             ),
           ),

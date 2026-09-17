@@ -5,6 +5,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class StorageService {
   StorageService._();
@@ -34,6 +35,19 @@ class StorageService {
   // lekin Downloads screen (in-app) hamesha sahi dikhayegi kyunki wo
   // `DownloadDB` se aata hai, disk path se nahi).
   static Future<Directory> getMusicDir() async {
+    // FIX (user request — "uninstall pe bhi download rahe"): Android 11+
+    // (API 30+) pe scoped storage ke karan public Music/ folder me likhna
+    // WRITE_EXTERNAL_STORAGE se allow nahi hota — MANAGE_EXTERNAL_STORAGE
+    // (All files access) chahiye hota hai. Ye request denied ho bhi jaaye
+    // (user "Allow" na kare) to neeche wala try/probe already app-specific
+    // folder pe gracefully fallback kar leta hai — koi crash nahi.
+    try {
+      await Permission.manageExternalStorage.request();
+    } catch (_) {
+      // Purane Android (jahan ye permission exist hi nahi karti) pe
+      // silently ignore — legacy WRITE_EXTERNAL_STORAGE already kaafi hai.
+    }
+
     try {
       const publicMusicPath = '/storage/emulated/0/Music/SurSathi';
       final publicDir = Directory(publicMusicPath);

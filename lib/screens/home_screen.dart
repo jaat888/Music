@@ -400,7 +400,7 @@ class _HomeTabContentState extends State<_HomeTabContent> {
                       const Spacer(),
                       // Debug screen — YouTube search/stream troubleshooting
                       IconButton(
-                        icon: const Icon(Icons.bug_report, color: kTextDim),
+                        icon: Icon(Icons.bug_report, color: kTextDim),
                         onPressed: () {
                           Navigator.push(
                             context,
@@ -411,7 +411,7 @@ class _HomeTabContentState extends State<_HomeTabContent> {
                         },
                       ),
                       IconButton(
-                        icon: const Icon(Icons.settings, color: kTextDim),
+                        icon: Icon(Icons.settings, color: kTextDim),
                         onPressed: () {
                           // Settings screen Batch 13 me banegi
                           ScaffoldMessenger.of(context).showSnackBar(
@@ -434,7 +434,7 @@ class _HomeTabContentState extends State<_HomeTabContent> {
                       ),
                       child: Row(
                         children: [
-                          const Icon(Icons.search, color: kTextDim, size: 20),
+                          Icon(Icons.search, color: kTextDim, size: 20),
                           const SizedBox(width: 8),
                           Text(
                             'Gaana, artist, album...',
@@ -504,14 +504,14 @@ class _LivePlaylistCard extends StatelessWidget {
                         width: 130,
                         height: 130,
                         color: kSurface,
-                        child: const Icon(Icons.queue_music, color: kTextDim),
+                        child: Icon(Icons.queue_music, color: kTextDim),
                       ),
                     )
                   : Container(
                       width: 130,
                       height: 130,
                       color: kSurface,
-                      child: const Icon(Icons.queue_music, color: kTextDim),
+                      child: Icon(Icons.queue_music, color: kTextDim),
                     ),
             ),
             const SizedBox(height: 6),

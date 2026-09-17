@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Internet chahiye YouTube stream ke liye -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -20,6 +21,16 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <!-- FIX (user request): downloads ko app uninstall hone ke baad bhi
+         zinda rakhne ke liye — Android 11+ (scoped storage) me public
+         Music/ folder me likhne ke liye WRITE_EXTERNAL_STORAGE kaafi nahi
+         hai, ye chahiye. Bina is permission ke pehle app-specific
+         Android/data/<package>/ folder pe fallback hota tha, jo uninstall
+         pe khud-ba-khud delete ho jaata hai — yehi asli wajah thi. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
 
     <!-- Boot ke baad bhi agar koi scheduled kaam ho (sleep timer resume, etc.) -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />

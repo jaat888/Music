@@ -1,29 +1,44 @@
 // lib/screens/stats_screen.dart
-// Listening stats — dummy/placeholder data (koi real tracking engine nahi
-// hai abhi, jaisa spec ne khud bola: "actual tracking baad me").
+// Part 6 (Stats/Streak gamification) — pehle ye poori screen dummy/
+// placeholder data pe thi (SharedPreferences counters + id.hashCode-based
+// fake per-song play-count, koi asli tracking nahi). Ab sab kuch
+// PlayHistoryDB (Part 3 me bani asli play_history table) se real hai:
+// total plays, listened seconds (duration-sum approximation), streak,
+// top artists, last-7-days chart — sab actual play records se compute
+// hote hain. Range chips (Week/Month/Year/All) ab asli played_at cutoff
+// se filter karte hain, koi multiplier-hack nahi.
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
-import '../db/cache_db.dart';
-import '../db/liked_db.dart';
+import '../db/play_history_db.dart';
 import '../models/song.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
 import '../widgets/section_header.dart';
 
 const List<String> _kRanges = ['Week', 'Month', 'Year', 'All'];
-const List<String> _kDayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
-// Range chip sirf demo ke liye totals ko scale karta hai — koi real
-// time-window filtering nahi hai (per-play timestamp store hi nahi hote).
-const Map<String, double> _kRangeMultiplier = {
-  'Week': 0.25,
-  'Month': 1,
-  'Year': 11,
-  'All': 30,
-};
+class _Badge {
+  final String emoji;
+  final String label;
+  final bool Function(int totalPlays, int streak) unlockedWhen;
+  const _Badge(this.emoji, this.label, this.unlockedWhen);
+}
+
+// Simple gamification milestones — total plays aur streak dono existing
+// (Part 3) play_history data se aate hain, koi naya tracking system nahi
+// chahiye.
+const List<_Badge> _kBadges = [
+  _Badge('🔥', '7-Day Streak', _streak7),
+  _Badge('⚡', '30-Day Streak', _streak30),
+  _Badge('💯', '100 Songs', _plays100),
+  _Badge('🎧', '500 Songs', _plays500),
+];
+bool _streak7(int p, int s) => s >= 7;
+bool _streak30(int p, int s) => s >= 30;
+bool _plays100(int p, int s) => p >= 100;
+bool _plays500(int p, int s) => p >= 500;
 
 class StatsScreen extends StatefulWidget {
   const StatsScreen({super.key});
@@ -36,13 +51,12 @@ class _StatsScreenState extends State<StatsScreen> {
   bool _loading = true;
   String _range = 'Month';
 
-  int _playedBase = 0;
-  int _listenedSecondsBase = 0;
+  int _totalPlayed = 0;
+  int _listenedSeconds = 0;
   int _streak = 0;
-  String _topArtist = '-';
-  List<Song> _topSongs = [];
+  List<MapEntry<Song, int>> _topSongs = [];
   List<MapEntry<String, int>> _topArtists = [];
-  List<double> _weekBars = List.filled(7, 0);
+  List<MapEntry<DateTime, int>> _last7Days = [];
 
   @override
   void initState() {
@@ -50,77 +64,49 @@ class _StatsScreenState extends State<StatsScreen> {
     _load();
   }
 
+  int? get _sinceMillis {
+    final now = DateTime.now();
+    switch (_range) {
+      case 'Week':
+        return now.subtract(const Duration(days: 7)).millisecondsSinceEpoch;
+      case 'Month':
+        return now.subtract(const Duration(days: 30)).millisecondsSinceEpoch;
+      case 'Year':
+        return now.subtract(const Duration(days: 365)).millisecondsSinceEpoch;
+      default: // All
+        return null;
+    }
+  }
+
   Future<void> _load() async {
     setState(() => _loading = true);
-    final prefs = await SharedPreferences.getInstance();
-    final played = prefs.getInt('played_songs') ?? 0;
-    final seconds = prefs.getInt('listened_seconds') ?? 0;
-    final streak = prefs.getInt('streak') ?? 0;
-    final topArtistsPref = prefs.getStringList('top_artists') ?? [];
-    final weekRaw = prefs.getStringList('daily_listened_seconds');
+    final since = _sinceMillis;
+    final db = PlayHistoryDB.instance;
 
-    // Real songs jo app me already maujood hain (liked + cached) inko pool
-    // banate hain — per-song play-count track karne wala koi engine nahi
-    // hai abhi, isliye rank dikhane ke liye ek stable dummy count use kiya
-    // gaya hai (NOTES.md dekho).
-    final liked = await LikedDB.instance.getAll();
-    final cached = await CacheDB.instance.getAll();
-    final pool = <String, Song>{};
-    for (final s in liked) {
-      pool[s.id] = s;
-    }
-    for (final c in cached) {
-      final id = c['id'] as String;
-      pool.putIfAbsent(
-        id,
-        () => Song(
-          id: id,
-          title: c['title'] as String? ?? 'Unknown',
-          artist: c['artist'] as String? ?? 'Unknown Artist',
-          thumb: c['thumb'] as String? ?? '',
-          duration: (c['duration'] as num?)?.toInt() ?? 0,
-        ),
-      );
-    }
-
-    final allSongs = pool.values.toList()
-      ..sort((a, b) => _dummyCount(b.id).compareTo(_dummyCount(a.id)));
-    final topSongs = allSongs.take(5).toList();
-
-    final artistCounts = <String, int>{};
-    for (final s in allSongs) {
-      artistCounts[s.artist] = (artistCounts[s.artist] ?? 0) + _dummyCount(s.id);
-    }
-    final topArtistsList = artistCounts.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-
-    final weekBars = (weekRaw != null && weekRaw.length == 7)
-        ? weekRaw.map((e) => double.tryParse(e) ?? 0).toList()
-        : List<double>.filled(7, 0);
+    final results = await Future.wait([
+      db.totalPlays(sinceMillis: since),
+      db.totalListenedSeconds(sinceMillis: since),
+      db.currentStreakDays(),
+      db.getMostPlayed(limit: 5),
+      db.getTopArtists(limit: 5, sinceMillis: since),
+      db.last7DaysCounts(),
+    ]);
 
     if (!mounted) return;
     setState(() {
-      _playedBase = played;
-      _listenedSecondsBase = seconds;
-      _streak = streak;
-      _topArtist = topArtistsPref.isNotEmpty
-          ? topArtistsPref.first
-          : (topArtistsList.isNotEmpty ? topArtistsList.first.key : '-');
-      _topSongs = topSongs;
-      _topArtists = topArtistsList.take(5).toList();
-      _weekBars = weekBars;
+      _totalPlayed = results[0] as int;
+      _listenedSeconds = results[1] as int;
+      _streak = results[2] as int;
+      _topSongs = results[3] as List<MapEntry<Song, int>>;
+      _topArtists = results[4] as List<MapEntry<String, int>>;
+      _last7Days = results[5] as List<MapEntry<DateTime, int>>;
       _loading = false;
     });
   }
 
-  // Song id se stable dummy play-count (1-50) — sirf UI demo ke liye
-  int _dummyCount(String id) => (id.hashCode.abs() % 50) + 1;
+  int get _hoursListened => (_listenedSeconds / 3600).round();
 
-  double get _multiplier => _kRangeMultiplier[_range] ?? 1;
-
-  int get _totalPlayed => (_playedBase * _multiplier).round();
-
-  int get _hoursListened => ((_listenedSecondsBase * _multiplier) / 3600).round();
+  String get _topArtist => _topArtists.isNotEmpty ? _topArtists.first.key : '-';
 
   @override
   Widget build(BuildContext context) {
@@ -144,17 +130,20 @@ class _StatsScreenState extends State<StatsScreen> {
                   const SizedBox(height: 16),
                   _buildStatsGrid(),
                   const SizedBox(height: 8),
+                  SectionHeader(title: 'Badges'),
+                  _buildBadges(),
+                  const SizedBox(height: 8),
                   SectionHeader(title: 'Top Songs'),
                   if (_topSongs.isEmpty)
-                    _emptyRow('Abhi koi song nahi — liked/cached songs yahan dikhengi')
+                    _emptyRow('Abhi koi play record nahi — kuch gaane suno')
                   else
                     ...List.generate(_topSongs.length, (i) {
-                      final s = _topSongs[i];
+                      final entry = _topSongs[i];
                       return _RankedTile(
                         rank: i + 1,
-                        thumb: s.thumb,
-                        title: s.title,
-                        subtitle: '${_dummyCount(s.id)} plays',
+                        thumb: entry.key.thumb,
+                        title: entry.key.title,
+                        subtitle: '${entry.value} plays',
                       );
                     }),
                   const SizedBox(height: 8),
@@ -194,7 +183,10 @@ class _StatsScreenState extends State<StatsScreen> {
           child: ChoiceChip(
             label: Text(r),
             selected: selected,
-            onSelected: (_) => setState(() => _range = r),
+            onSelected: (_) {
+              setState(() => _range = r);
+              _load();
+            },
             backgroundColor: kSurface,
             selectedColor: kGreen,
             labelStyle: AppText.bodyS(color: selected ? kBg : kText).copyWith(
@@ -223,7 +215,52 @@ class _StatsScreenState extends State<StatsScreen> {
     );
   }
 
+  Widget _buildBadges() {
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: _kBadges.map((b) {
+        // Streak-based badges "All time" streak pe hi based hain (range
+        // chip in per-badge unlock ko affect nahi karta), plays-based
+        // badges range-filtered total pe — jaisa har jagah StatsScreen
+        // ke andar consistent rehta hai.
+        final unlocked = b.unlockedWhen(_totalPlayed, _streak);
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: unlocked ? kGreen.withOpacity(0.15) : kBgElev,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: unlocked ? kGreen : kSurface,
+              width: 1,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Opacity(
+                opacity: unlocked ? 1 : 0.3,
+                child: Text(b.emoji, style: const TextStyle(fontSize: 18)),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                b.label,
+                style: AppText.bodyS(color: unlocked ? kText : kTextDim).copyWith(
+                  fontWeight: unlocked ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+
   Widget _buildWeekChart() {
+    final values = _last7Days.map((e) => e.value.toDouble()).toList();
+    final labels = _last7Days
+        .map((e) => const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][e.key.weekday - 1])
+        .toList();
     return Container(
       height: 160,
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
@@ -236,13 +273,13 @@ class _StatsScreenState extends State<StatsScreen> {
           Expanded(
             child: CustomPaint(
               size: Size.infinite,
-              painter: _WeekBarPainter(values: _weekBars),
+              painter: _WeekBarPainter(values: values),
             ),
           ),
           const SizedBox(height: 6),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: _kDayLabels
+            children: labels
                 .map((d) => Text(d, style: AppText.bodyS().copyWith(fontSize: 10)))
                 .toList(),
           ),
@@ -294,14 +331,14 @@ class _RankedTile extends StatelessWidget {
                         width: 40,
                         height: 40,
                         color: kSurface,
-                        child: const Icon(Icons.music_note, color: kTextDim, size: 18),
+                        child: Icon(Icons.music_note, color: kTextDim, size: 18),
                       ),
                     )
                   : Container(
                       width: 40,
                       height: 40,
                       color: kSurface,
-                      child: const Icon(Icons.music_note, color: kTextDim, size: 18),
+                      child: Icon(Icons.music_note, color: kTextDim, size: 18),
                     ),
             ),
             const SizedBox(width: 10),
@@ -355,8 +392,6 @@ class _StatCard extends StatelessWidget {
   }
 }
 
-// Number "count-up" hoke render hota hai — spec ne bola tha "dummy count-up
-// animation for demo"
 class _CountUpCard extends StatelessWidget {
   final String label;
   final int value;

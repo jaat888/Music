@@ -132,7 +132,7 @@ class _LikedSongsScreenState extends State<LikedSongsScreen> {
           // NOTE: Spec ne sirf "more_vert" bola tha bina options detail kiye —
           // yahan sabse relevant ek action (Clear all) rakh diya gaya hai.
           IconButton(
-            icon: const Icon(Icons.more_vert, color: kText),
+            icon: Icon(Icons.more_vert, color: kText),
             onPressed: _songs.isEmpty ? null : _confirmClearAll,
           ),
         ],
@@ -200,7 +200,7 @@ class _LikedSongsScreenState extends State<LikedSongsScreen> {
                   padding: const EdgeInsets.symmetric(vertical: 12),
                 ),
                 onPressed: _songs.isEmpty ? null : () => _playAll(),
-                icon: const Icon(Icons.play_arrow, color: kBg),
+                icon: Icon(Icons.play_arrow, color: kBg),
                 label: Text('Play All', style: AppText.button(color: kBg)),
               ),
             ),
@@ -208,11 +208,11 @@ class _LikedSongsScreenState extends State<LikedSongsScreen> {
             Expanded(
               child: OutlinedButton.icon(
                 style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: kTextDim),
+                  side: BorderSide(color: kTextDim),
                   padding: const EdgeInsets.symmetric(vertical: 12),
                 ),
                 onPressed: _songs.isEmpty ? null : () => _playAll(shuffle: true),
-                icon: const Icon(Icons.shuffle, color: kText),
+                icon: Icon(Icons.shuffle, color: kText),
                 label: Text('Shuffle', style: AppText.button(color: kText)),
               ),
             ),
@@ -225,7 +225,7 @@ class _LikedSongsScreenState extends State<LikedSongsScreen> {
             child: Center(
               child: Column(
                 children: [
-                  const Icon(Icons.favorite_border, color: kTextDim, size: 48),
+                  Icon(Icons.favorite_border, color: kTextDim, size: 48),
                   const SizedBox(height: 10),
                   Text('Koi liked song nahi', style: AppText.bodyM(color: kTextDim)),
                   const SizedBox(height: 4),

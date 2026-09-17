@@ -497,14 +497,14 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
                 ),
                 if (_controller.text.isNotEmpty)
                   IconButton(
-                    icon: const Icon(Icons.close, color: kTextDim),
+                    icon: Icon(Icons.close, color: kTextDim),
                     onPressed: () {
                       _controller.clear();
                       _onChanged('');
                     },
                   )
                 else
-                  const Padding(
+                   Padding(
                     padding: EdgeInsets.only(right: 8),
                     child: Icon(Icons.search, color: kTextDim),
                   ),
@@ -755,7 +755,7 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
                           width: 52,
                           height: 52,
                           color: kSurface,
-                          child: const Icon(Icons.person, color: kTextDim),
+                          child: Icon(Icons.person, color: kTextDim),
                         ),
                       ),
                     ),
@@ -768,7 +768,7 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
                         style: AppText.bodyM(color: kText).copyWith(fontWeight: FontWeight.bold),
                       ),
                     ),
-                    const Icon(Icons.chevron_right, color: kTextDim),
+                    Icon(Icons.chevron_right, color: kTextDim),
                   ],
                 ),
               ),
@@ -835,7 +835,7 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
                           width: 56,
                           height: 56,
                           color: kSurface,
-                          child: const Icon(Icons.queue_music, color: kTextDim),
+                          child: Icon(Icons.queue_music, color: kTextDim),
                         ),
                       ),
                     ),
@@ -861,7 +861,7 @@ class _SearchScreenState extends State<SearchScreen> with SingleTickerProviderSt
                         ],
                       ),
                     ),
-                    const Icon(Icons.chevron_right, color: kTextDim),
+                    Icon(Icons.chevron_right, color: kTextDim),
                   ],
                 ),
               ),

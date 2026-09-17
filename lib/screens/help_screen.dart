@@ -129,11 +129,11 @@ class _HelpScreenState extends State<HelpScreen> {
                   decoration: InputDecoration(
                     hintText: 'Apna sawaal khoje...',
                     hintStyle: AppText.bodyM(),
-                    prefixIcon: const Icon(Icons.search, color: kTextDim),
+                    prefixIcon: Icon(Icons.search, color: kTextDim),
                     suffixIcon: _query.isEmpty
                         ? null
                         : IconButton(
-                            icon: const Icon(Icons.close, color: kTextDim),
+                            icon: Icon(Icons.close, color: kTextDim),
                             onPressed: () {
                               _searchController.clear();
                               setState(() => _query = '');
@@ -151,7 +151,7 @@ class _HelpScreenState extends State<HelpScreen> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.search_off, color: kTextDim, size: 48),
+                          Icon(Icons.search_off, color: kTextDim, size: 48),
                           const SizedBox(height: 10),
                           Text('Kuch nahi mila', style: AppText.bodyM(color: kTextDim)),
                         ],

@@ -39,6 +39,27 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   Set<String> _cachedIds = {};
   Set<String> _downloadedIds = {};
 
+  // PART 5 (2026-09-17) — "Recently added" sort toggle. `_recentlyAddedIds`
+  // DB se ordered ids (added_at DESC) hain; `_displaySongs` getter isi
+  // order me `_songs` (jinka poora Song data already loaded/resolved hai)
+  // ko rearrange karta hai — koi extra DB fetch/resolve nahi. Jab ye ON
+  // hai, drag-to-reorder disable ho jaata hai (recently-added order ek
+  // computed view hai, manual reorder ka concept yahan nahi banta).
+  bool _sortRecentlyAdded = false;
+  List<String> _recentlyAddedIds = [];
+
+  List<Song> get _displaySongs {
+    if (!_sortRecentlyAdded) return _songs;
+    final byId = {for (final s in _songs) s.id: s};
+    final ordered = _recentlyAddedIds.map((id) => byId[id]).whereType<Song>().toList();
+    // Safety: agar koi song `_recentlyAddedIds` me na ho (edge case — bahut
+    // purana data jiska `added_at` kisi wajah se missing ho), use bhi list
+    // ke aakhir me dikha do, gayab na ho.
+    final seen = ordered.map((s) => s.id).toSet();
+    ordered.addAll(_songs.where((s) => !seen.contains(s.id)));
+    return ordered;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -58,6 +79,9 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
       final songs = playlist == null
           ? <Song>[]
           : await PlaylistDB.instance.getPlaylistSongs(playlist.id);
+      final recentlyAddedIds = playlist == null
+          ? <String>[]
+          : await PlaylistDB.instance.getRecentlyAddedSongIds(playlist.id);
       final liked = await LikedDB.instance.getAll();
       final cached = await CacheDB.instance.getAll();
       final downloaded = await DownloadDB.instance.getAll();
@@ -65,6 +89,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
       setState(() {
         _playlist = playlist;
         _songs = songs;
+        _recentlyAddedIds = recentlyAddedIds;
         _likedIds = liked.map((s) => s.id).toSet();
         _cachedIds = cached.map((e) => e['id'] as String).toSet();
         _downloadedIds = downloaded.map((s) => s.id).toSet();
@@ -81,7 +106,10 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
 
   Future<void> _playAll({bool shuffle = false}) async {
     if (_songs.isEmpty) return;
-    var list = List<Song>.of(_songs);
+    // "Recently Added" sort ON ho to usi order me play karo (jo screen pe
+    // dikh raha hai) — consistent feel, "Play All" wahi bajaye jo user dekh
+    // raha hai.
+    var list = List<Song>.of(_displaySongs);
     if (shuffle) {
       list.shuffle();
       context.read<QueueService>().setShuffle(true);
@@ -90,9 +118,16 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
     await audioHandler.playWithRetry(list.first);
   }
 
-  Future<void> _playFrom(int index) async {
-    context.read<QueueService>().setQueue(_songs, startIndex: index);
-    await audioHandler.playWithRetry(_songs[index]);
+  // BUG FIX (Part 5): pehle `int index` leta tha jo hamesha `_songs`
+  // (position-order) ke against resolve hota tha — "Recently Added" sort ON
+  // hone par UI `_displaySongs` (ALAG order) dikhata, isliye tap karne par
+  // galat gaana baj jaata (index mismatch). Ab poora `Song` object leta hai
+  // aur currently-DISPLAYED list ke against hi apna index nikalta hai.
+  Future<void> _playFrom(Song song) async {
+    final list = _displaySongs;
+    final startIndex = list.indexOf(song);
+    context.read<QueueService>().setQueue(list, startIndex: startIndex < 0 ? 0 : startIndex);
+    await audioHandler.playWithRetry(song);
   }
 
   Future<void> _toggleLike(Song song) async {
@@ -108,6 +143,16 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   }
 
   Future<void> _download(Song song) async {
+    // FIX (user request): single-song download pehle duplicate check nahi
+    // karta tha (sirf "Download All" karta tha) — ab yahan bhi check hai.
+    if (_downloadedIds.contains(song.id) ||
+        await DownloadDB.instance.exists(song.id)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Ye gaana pehle se downloaded hai')),
+      );
+      return;
+    }
     final path = await YoutubeService.instance.download(song.id, song.title, author: song.artist);
     if (!mounted) return;
     if (path != null) setState(() => _downloadedIds.add(song.id));
@@ -412,7 +457,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: const Icon(Icons.edit, color: kTextDim),
+              leading: Icon(Icons.edit, color: kTextDim),
               title: Text('Rename', style: AppText.bodyL()),
               onTap: () {
                 Navigator.pop(ctx);
@@ -420,7 +465,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
               },
             ),
             ListTile(
-              leading: const Icon(Icons.image, color: kTextDim),
+              leading: Icon(Icons.image, color: kTextDim),
               title: Text('Change cover', style: AppText.bodyL()),
               onTap: () {
                 Navigator.pop(ctx);
@@ -428,7 +473,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
               },
             ),
             ListTile(
-              leading: const Icon(Icons.share, color: kTextDim),
+              leading: Icon(Icons.share, color: kTextDim),
               title: Text('Share', style: AppText.bodyL()),
               onTap: () {
                 Navigator.pop(ctx);
@@ -462,14 +507,31 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
           style: AppText.displayM(color: kGreen).copyWith(fontSize: 20),
         ),
         actions: [
+          // PART 5 (2026-09-17) — "Recently added" sort toggle. ON hone par
+          // list added_at DESC (sabse naya pehle) dikhati hai, ghadi-icon
+          // green ho jaata hai jab active ho (baaki icon-state patterns
+          // jaisa — dekho radio/sleep-timer chips full_player_screen.dart
+          // me).
+          IconButton(
+            icon: Icon(
+              Icons.schedule_rounded,
+              color: _sortRecentlyAdded ? kGreen : kText,
+            ),
+            tooltip: _sortRecentlyAdded
+                ? 'Recently Added se sorted — tap karke custom order pe wapas jao'
+                : 'Recently Added se sort karo',
+            onPressed: (playlist == null || _songs.isEmpty)
+                ? null
+                : () => setState(() => _sortRecentlyAdded = !_sortRecentlyAdded),
+          ),
           // NEW — poori playlist ek tap me download.
           IconButton(
-            icon: const Icon(Icons.download_for_offline_outlined, color: kText),
+            icon: Icon(Icons.download_for_offline_outlined, color: kText),
             tooltip: 'Playlist download karo',
             onPressed: (playlist == null || _songs.isEmpty) ? null : _downloadAll,
           ),
           IconButton(
-            icon: const Icon(Icons.more_vert, color: kText),
+            icon: Icon(Icons.more_vert, color: kText),
             onPressed: playlist == null ? null : _showMenu,
           ),
         ],
@@ -534,7 +596,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                         padding: const EdgeInsets.symmetric(vertical: 12),
                       ),
                       onPressed: _songs.isEmpty ? null : () => _playAll(),
-                      icon: const Icon(Icons.play_arrow, color: kBg),
+                      icon: Icon(Icons.play_arrow, color: kBg),
                       label: Text('Play All', style: AppText.button(color: kBg)),
                     ),
                   ),
@@ -542,11 +604,11 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                   Expanded(
                     child: OutlinedButton.icon(
                       style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: kTextDim),
+                        side: BorderSide(color: kTextDim),
                         padding: const EdgeInsets.symmetric(vertical: 12),
                       ),
                       onPressed: _songs.isEmpty ? null : () => _playAll(shuffle: true),
-                      icon: const Icon(Icons.shuffle, color: kText),
+                      icon: Icon(Icons.shuffle, color: kText),
                       label: Text('Shuffle', style: AppText.button(color: kText)),
                     ),
                   ),
@@ -561,7 +623,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.music_off, color: kTextDim, size: 48),
+                      Icon(Icons.music_off, color: kTextDim, size: 48),
                       const SizedBox(height: 10),
                       Text('Koi gaana nahi', style: AppText.bodyM(color: kTextDim)),
                       const SizedBox(height: 14),
@@ -576,64 +638,112 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                     ],
                   ),
                 )
-              : ReorderableListView.builder(
-                  buildDefaultDragHandles: false,
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 90),
-                  itemCount: _songs.length,
-                  onReorder: _onReorder,
-                  itemBuilder: (context, i) {
-                    final song = _songs[i];
-                    return Dismissible(
-                      key: ValueKey(song.id),
-                      direction: DismissDirection.endToStart,
-                      background: Container(
-                        alignment: Alignment.centerRight,
-                        padding: const EdgeInsets.only(right: 20),
-                        margin: const EdgeInsets.only(bottom: 6),
-                        decoration: BoxDecoration(
-                          color: kRed,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: const Icon(Icons.delete, color: Colors.white),
-                      ),
-                      onDismissed: (_) => _removeSong(song),
-                      child: Padding(
-                        padding: const EdgeInsets.only(bottom: 6),
-                        child: GestureDetector(
-                          onLongPress: () {
-                            HapticFeedback.mediumImpact();
-                            _confirmRemove(song);
-                          },
-                          child: Row(
-                            children: [
-                              ReorderableDragStartListener(
-                                index: i,
-                                child: const Padding(
-                                  padding: EdgeInsets.only(right: 4),
-                                  child: Icon(Icons.drag_handle, color: kTextDim),
-                                ),
-                              ),
-                              Expanded(
-                                child: SongCard(
-                                  song: song,
-                                  isLiked: _likedIds.contains(song.id),
-                                  isCached: _cachedIds.contains(song.id),
-                                  isDownloaded: _downloadedIds.contains(song.id),
-                                  onTap: () => _playFrom(i),
-                                  onPlay: () => _playFrom(i),
-                                  onDownload: () => _download(song),
-                                  onLike: () => _toggleLike(song),
-                                ),
-                              ),
-                            ],
-                          ),
+              : Column(
+                  children: [
+                    // PART 5: "Recently Added" active ho to ek chhota label —
+                    // taaki confusion na ho ki list kis order me hai (aur
+                    // isiliye drag-handle bhi hide hai, kyunki is order me
+                    // manual reorder ka koi matlab nahi banta).
+                    if (_sortRecentlyAdded)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                        child: Row(
+                          children: [
+                            Icon(Icons.schedule_rounded, color: kGreen, size: 16),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Recently Added — sabse naya sabse upar',
+                              style: AppText.bodyS(color: kGreen),
+                            ),
+                          ],
                         ),
                       ),
-                    );
-                  },
+                    Expanded(
+                      child: _sortRecentlyAdded
+                          ? _buildSongList(reorderable: false)
+                          : _buildSongList(reorderable: true),
+                    ),
+                  ],
                 ),
         ),
       ],
+    );
+  }
+
+  // PART 5: list-building ab ek shared helper me hai taaki custom-order
+  // (ReorderableListView, drag+delete) aur Recently-Added order (plain
+  // ListView, sirf delete — reorder yahan disable hai) dono ek hi UI/logic
+  // (Dismissible/SongCard) reuse karein, koi duplicate code na ho.
+  Widget _buildSongList({required bool reorderable}) {
+    final songs = _displaySongs;
+
+    Widget buildTile(Song song, int i) {
+      return Dismissible(
+        key: ValueKey(song.id),
+        direction: DismissDirection.endToStart,
+        background: Container(
+          alignment: Alignment.centerRight,
+          padding: const EdgeInsets.only(right: 20),
+          margin: const EdgeInsets.only(bottom: 6),
+          decoration: BoxDecoration(
+            color: kRed,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: const Icon(Icons.delete, color: Colors.white),
+        ),
+        onDismissed: (_) => _removeSong(song),
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: GestureDetector(
+            onLongPress: () {
+              HapticFeedback.mediumImpact();
+              _confirmRemove(song);
+            },
+            child: Row(
+              children: [
+                if (reorderable)
+                  ReorderableDragStartListener(
+                    index: i,
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: Icon(Icons.drag_handle, color: kTextDim),
+                    ),
+                  )
+                else
+                  const SizedBox(width: 0),
+                Expanded(
+                  child: SongCard(
+                    song: song,
+                    isLiked: _likedIds.contains(song.id),
+                    isCached: _cachedIds.contains(song.id),
+                    isDownloaded: _downloadedIds.contains(song.id),
+                    onTap: () => _playFrom(song),
+                    onPlay: () => _playFrom(song),
+                    onDownload: () => _download(song),
+                    onLike: () => _toggleLike(song),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (reorderable) {
+      return ReorderableListView.builder(
+        buildDefaultDragHandles: false,
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 90),
+        itemCount: songs.length,
+        onReorder: _onReorder,
+        itemBuilder: (context, i) => buildTile(songs[i], i),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 90),
+      itemCount: songs.length,
+      itemBuilder: (context, i) => buildTile(songs[i], i),
     );
   }
 }

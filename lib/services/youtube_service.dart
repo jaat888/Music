@@ -48,9 +48,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import 'package:youtube_explode_dart/solvers.dart';
 import 'package:dart_ytmusic_api/yt_music.dart';
@@ -181,6 +183,77 @@ class _AudioStream {
 class YoutubeService {
   YoutubeService._internal();
   static final YoutubeService instance = YoutubeService._internal();
+
+  // ---------------- PART 1: Audio quality (data saver) ----------------
+  // Ye keys settings_screen.dart ke `_kAudioQuality`/`_kDownloadQuality` ke
+  // EXACT same strings hain (values: 'Low' / 'Med' / 'High') — settings
+  // screen sirf UI/SharedPreferences me save karta tha, koi service kabhi
+  // read nahi karti thi (dekho us file ka top comment). Ab yahan se
+  // playback (streaming) aur download dono apni-apni setting padhte hain,
+  // taaki "Data Saver" toggle asal me kam bitrate/data use kare.
+  static const String _kAudioQualityPref = 'setting_audio_quality';
+  static const String _kDownloadQualityPref = 'setting_download_quality';
+  static const String _kDownloadsWifiOnlyPref = 'setting_downloads_wifi_only';
+
+  Future<String> _streamingQuality() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getString(_kAudioQualityPref) ?? 'High').toLowerCase();
+  }
+
+  Future<String> _downloadQuality() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getString(_kDownloadQualityPref) ?? 'High').toLowerCase();
+  }
+
+  // 'low' | 'med' | 'high' list ko diye gaye quality preference ke hisaab
+  // se REORDER karta hai (drop nahi karta — agar preferred tier fail ho
+  // jaaye to loop baaki candidates pe fallback kar sake, jaisa pehle sabhi
+  // jagah hota tha). `sortedDesc` best-bitrate-pehle order me hona chahiye.
+  List<T> _orderByQuality<T>(List<T> sortedDesc, String quality) {
+    if (sortedDesc.length <= 1) return sortedDesc;
+    switch (quality) {
+      case 'low':
+        // Sabse kam bitrate wala pehle try karo (data saver), fir baaki
+        // sabse best-se-kharab order me fallback ke liye.
+        final list = List<T>.of(sortedDesc);
+        final lowest = list.removeLast();
+        return [lowest, ...list];
+      case 'med':
+      case 'medium':
+        final list = List<T>.of(sortedDesc);
+        final mid = list.removeAt(list.length ~/ 2);
+        return [mid, ...list];
+      case 'high':
+      default:
+        return sortedDesc; // purana behavior — best bitrate pehle
+    }
+  }
+
+  // ---------------- PART 1: WiFi-only downloads ----------------
+  // FIX (feature request, pehle koi service ye check hi nahi karta tha —
+  // settings_screen.dart me sirf toggle tha, kahin use nahi hota tha).
+  // `download()` shuru karne se pehle isse check karo — mobile data pe
+  // (aur wifi-only ON ho) to download shuru hi mat karo, taaki user ka
+  // data plan bina bataye kharch na ho.
+  Future<bool> isDownloadAllowedByNetworkPolicy() async {
+    final prefs = await SharedPreferences.getInstance();
+    final wifiOnly = prefs.getBool(_kDownloadsWifiOnlyPref) ?? true;
+    if (!wifiOnly) return true; // koi restriction hi nahi
+
+    try {
+      final results = await Connectivity().checkConnectivity();
+      // connectivity_plus 6.x ek List<ConnectivityResult> deta hai (ek se
+      // zyaada interface active ho sakte hain, jaise VPN+wifi) — wifi ya
+      // ethernet me se koi bhi ho to allow karo.
+      return results.contains(ConnectivityResult.wifi) ||
+          results.contains(ConnectivityResult.ethernet);
+    } catch (e) {
+      // Connectivity check khud fail ho jaaye (rare) — download ko block
+      // karke user ko andhere me na rakho, aage badhne do (best-effort).
+      print('YT: connectivity check fail, wifi-only policy skip: $e');
+      return true;
+    }
+  }
 
   // FIX: googlevideo CDN URLs kabhi-kabhi bina in headers ke 403 dete hain
   // (client jo URL generate karta hai usi jaisa UA/Referer/Origin expect
@@ -1123,12 +1196,13 @@ class YoutubeService {
   Future<_AudioStream?> _audioViaNewPipe(
     String videoId, {
     void Function(String status)? onProgress,
+    String quality = 'high',
   }) async {
     try {
       onProgress?.call('Resolving via native NewPipeExtractor...');
       final raw = await _nativeNewPipe.invokeMethod<Map<dynamic, dynamic>>(
         'getAudioStream',
-        {'videoId': videoId},
+        {'videoId': videoId, 'quality': quality},
       ).timeout(const Duration(seconds: 8));
 
       final streamUrl = raw?['url'] as String?;
@@ -1182,6 +1256,7 @@ class YoutubeService {
   Future<_AudioStream?> _audioViaExplode(
     String videoId, {
     void Function(String status)? onProgress,
+    String quality = 'high',
   }) async {
     try {
       onProgress?.call('Resolving via YouTube...');
@@ -1235,9 +1310,13 @@ class YoutubeService {
 
       String fmt(Object container) => container.toString().toLowerCase();
 
-      // Audio-only candidates — sabse high bitrate wale pehle try karo.
-      final audioStreams = List.of(manifest.audioOnly)
+      // Audio-only candidates — best-bitrate-pehle sort karo, fir PART 1
+      // quality preference (low/med/high) ke hisaab se reorder karo (data
+      // saver ON ho to sabse kam bitrate wala pehle try hota hai; agar wo
+      // fail ho jaaye, poori list pe fallback hota hai jaisa pehle hota tha).
+      final sortedByBitrateDesc = List.of(manifest.audioOnly)
         ..sort((a, b) => b.bitrate.bitsPerSecond.compareTo(a.bitrate.bitsPerSecond));
+      final audioStreams = _orderByQuality(sortedByBitrateDesc, quality);
       for (final s in audioStreams) {
         onProgress?.call('Checking audio stream (${s.bitrate})...');
         // "REAL FIX" (2026-09-17): pehle yahan koi PoToken attach nahi
@@ -1309,6 +1388,7 @@ class YoutubeService {
   Future<_AudioStream?> _audioViaPipedBackup(
     String videoId, {
     void Function(String status)? onProgress,
+    String quality = 'high',
   }) async {
     onProgress?.call('YouTube direct failed, trying Piped backup...');
     for (final base in _pipedInstances) {
@@ -1330,9 +1410,12 @@ class YoutubeService {
           continue;
         }
 
-        final sorted = List<Map<String, dynamic>>.from(audioStreams)
+        final sortedByBitrateDesc = List<Map<String, dynamic>>.from(audioStreams)
           ..sort((a, b) =>
               ((b['bitrate'] as num?) ?? 0).compareTo((a['bitrate'] as num?) ?? 0));
+        // PART 1: yahan bhi wahi quality reorder — data saver ON ho to
+        // Piped backup layer bhi kam bitrate wala pehle try karta hai.
+        final sorted = _orderByQuality(sortedByBitrateDesc, quality);
         final best = sorted.first;
         final url = best['url'] as String?;
         if (url == null || url.isEmpty) {
@@ -1446,7 +1529,12 @@ class YoutubeService {
     void Function(String status)? onProgress,
     String? title,
     String? author,
+    // PART 1: null = streaming setting (`setting_audio_quality`) padho;
+    // download() apni alag `setting_download_quality` explicitly pass
+    // karta hai. 'low' | 'med' | 'high'.
+    String? quality,
   }) async {
+    final q = (quality ?? await _streamingQuality()).toLowerCase();
     if (!await _quickConnectivityCheck()) {
       onProgress?.call('Internet down lagta hai (basic connectivity fail) — '
           'source-layers try hi nahi kar rahe, pehle network check karo.');
@@ -1482,14 +1570,14 @@ class YoutubeService {
     // bypass-rate ka fayda mile. `_audioViaExplode()` (pure Dart) ab
     // fallback hai — agar native NewPipeExtractor kisi wajah se fail ho.
     final viaNewPipe =
-        await _audioViaNewPipe(resolvedId, onProgress: onProgress);
+        await _audioViaNewPipe(resolvedId, onProgress: onProgress, quality: q);
     if (viaNewPipe != null) return viaNewPipe;
 
     final viaExplode =
-        await _audioViaExplode(resolvedId, onProgress: onProgress);
+        await _audioViaExplode(resolvedId, onProgress: onProgress, quality: q);
     if (viaExplode != null) return viaExplode;
 
-    return _audioViaPipedBackup(resolvedId, onProgress: onProgress);
+    return _audioViaPipedBackup(resolvedId, onProgress: onProgress, quality: q);
   }
 
   Future<String?> getAudioUrl(
@@ -1503,6 +1591,8 @@ class YoutubeService {
       onProgress: onProgress,
       title: title,
       author: author,
+      // quality: null -> _resolveAudioStream khud 'setting_audio_quality'
+      // (streaming) padh lega.
     );
     // BUG FIX (2026-09-17): ab tak SIRF failure/retry pe hi log line
     // aati thi — agar poora resolve chup-chaap fail ho jaata (koi
@@ -1532,14 +1622,45 @@ class YoutubeService {
 
   // ---------------- Download (permanent, Music/SurSathi/) ----------------
 
+  // PART 1: caller (Downloads UI) "wifi-only ON hai aur abhi mobile data
+  // pe hain" wala case pehle se bata sake, isliye ye alag se bhi expose
+  // hai — `download()` khud bhi (neeche) yahi check karta hai taaki koi
+  // bhi caller ise miss kare to bhi policy bypass na ho.
+  Future<bool> canDownloadNow() => isDownloadAllowedByNetworkPolicy();
+
   Future<String?> download(String videoId, String title, {String? author}) async {
+    // FIX (user request): ye check yahan (root level) bhi hona chahiye —
+    // sirf UI screens pe nahi — taaki koi bhi caller miss kare to bhi
+    // duplicate download/file overwrite kabhi na ho.
+    final existingPath = await DownloadDB.instance.getFilePath(videoId);
+    if (existingPath != null) return existingPath;
+
+    // PART 1 (WiFi-only downloads toggle): settings me ON hai aur abhi
+    // mobile data pe hain to yahin ruk jao — download shuru hi mat karo.
+    // Pehle ye setting sirf SharedPreferences me save hoti thi, koi bhi
+    // service ise kabhi check nahi karta tha.
+    if (!await isDownloadAllowedByNetworkPolicy()) {
+      print('YT DOWNLOAD BLOCKED: wifi-only ON hai aur WiFi/ethernet pe '
+          'nahi hain ($videoId).');
+      return null;
+    }
+
     // Storage permission maango (Android 13+ pe scoped, purane pe legacy)
     await Permission.storage.request();
     // Android 13+ pe storage permission zaroori nahi hoti (scoped storage) —
     // isliye request fail ho to bhi aage try karte hain
 
-    final stream =
-        await _resolveAudioStream(videoId, title: title, author: author);
+    // PART 1: download apni ALAG quality setting use karta hai
+    // ('setting_download_quality') — streaming quality se independent,
+    // jaise settings screen me pehle se do alag dialogs the (Audio
+    // Quality vs Download Quality), bas ab dono asal me kaam karte hain.
+    final dq = await _downloadQuality();
+    final stream = await _resolveAudioStream(
+      videoId,
+      title: title,
+      author: author,
+      quality: dq,
+    );
     if (stream == null) {
       print('YT DOWNLOAD ERROR: audio stream resolve nahi hua for $videoId');
       return null;

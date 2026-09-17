@@ -2,6 +2,8 @@
 // Permanently downloaded (offline) songs ka storage — cache se alag,
 // ye user ke explicit download karne pe hi delete hoti hai.
 
+import 'dart:io';
+
 import 'package:sqflite/sqflite.dart';
 
 import '../models/song.dart';
@@ -58,5 +60,22 @@ class DownloadDB {
       limit: 1,
     );
     return rows.isNotEmpty;
+  }
+
+  // NEW: downloaded file ka path seedha do (agar file abhi bhi disk pe
+  // maujood hai) — offline/local-first playback ke liye use hota hai.
+  Future<String?> getFilePath(String id) async {
+    final db = await _database;
+    final rows = await db.query(
+      _table,
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    final path = rows.first['file_path'] as String?;
+    if (path == null || path.isEmpty) return null;
+    if (!await File(path).exists()) return null; // DB me hai par file gayab
+    return path;
   }
 }

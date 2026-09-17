@@ -157,6 +157,24 @@ class PlaylistDB {
     return rows.isNotEmpty;
   }
 
+  // PART 5 (2026-09-17) — "Recently added" per playlist. Sirf ordered
+  // song-id list deta hai (added_at DESC) — poora Song object dobara
+  // resolve/fetch nahi karta, kyunki caller (playlist_detail_screen.dart)
+  // ke paas already `getPlaylistSongs()` se poora Song data (fallback-
+  // resolved) load hota hai — yahan sirf ORDER chahiye, taaki usi
+  // already-loaded list ko is naye order me rearrange kiya ja sake.
+  Future<List<String>> getRecentlyAddedSongIds(String playlistId) async {
+    final db = await _database;
+    final rows = await db.query(
+      _songsTable,
+      columns: ['song_id'],
+      where: 'playlist_id = ?',
+      whereArgs: [playlistId],
+      orderBy: 'added_at DESC',
+    );
+    return rows.map((row) => row['song_id'] as String).toList();
+  }
+
   // Songs ka naya order save karo (drag-drop reorder ke baad)
   Future<void> reorderSongs(String playlistId, List<String> orderedSongIds) async {
     final db = await _database;

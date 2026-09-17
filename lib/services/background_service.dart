@@ -4,15 +4,21 @@
 // controls, aur lock screen controls sab kaam karein.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:audio_service/audio_service.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../db/cache_db.dart';
+import '../db/download_db.dart';
+import '../db/play_history_db.dart';
 import '../models/song.dart';
 import 'cache_service.dart';
+import 'equalizer_presets.dart';
 import 'like_service.dart';
 import 'queue_service.dart';
 import 'youtube_service.dart';
@@ -74,12 +80,53 @@ Future<void> initAudioHandler() async {
       // stop() na kare (queue khatam / explicit stop).
       androidStopForegroundOnPause: false,
       preloadArtwork: true,
+      // BUG FIX (notification art kabhi-kabhi khaali/blank): song.thumb
+      // YouTube ka high-res thumbnail hai (kaafi bada ho sakta hai).
+      // preloadArtwork: true isse download to karta hai, lekin bina
+      // downscale hint ke bada image kai OEMs/Android versions par
+      // Binder transaction limit se seedha silently fail ho jaata hai —
+      // art bilkul nahi dikhta, koi error/crash bhi nahi (isliye pakadna
+      // mushkil tha). Chhota fixed size dene se ye reliably render hota hai.
+      artDownscaleWidth: 256,
+      artDownscaleHeight: 256,
     ),
   );
 }
 
 class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
-  final AudioPlayer player = AudioPlayer();
+  // PART 1 (Normalize Volume): Android-only loudness enhancer, AudioPlayer
+  // ke saath ek AudioPipeline ke through attach hota hai. Ye "true" cross-
+  // track loudness matching (ReplayGain-jaisa per-song analysis) NAHI hai
+  // — just_audio/ExoPlayer me wo built-in nahi hai, aur us level ka kaam
+  // (LUFS analysis per song) bahut zyada scope hai. Ye ek fixed target-gain
+  // boost hai (quiet-mastered gaano ko thoda upar uthata hai) — settings
+  // me "Normalize Volume" ON/OFF isi ko enable/disable karta hai. iOS pe
+  // ye package hi kuch nahi karta (Android-specific effect), par is app
+  // me sirf android/ folder hai isliye abhi wo concern nahi hai.
+  final AndroidLoudnessEnhancer _loudnessEnhancer = AndroidLoudnessEnhancer();
+
+  // PART 2 (Equalizer): same `AudioPipeline` me ek aur Android-native
+  // effect — `AndroidEqualizer` (ExoPlayer ka built-in EQ, Bass Boost/
+  // Vocal jaisi presets ko yahi asli DSP apply karta hai). Pehle
+  // equalizer_screen.dart sirf ek UI mockup tha (SharedPreferences me
+  // save hota tha, koi audio effect kabhi attach hi nahi hua tha) — ab
+  // wahi preset/band values seedha isi effect pe jaate hain.
+  final AndroidEqualizer _equalizer = AndroidEqualizer();
+
+  late final AudioPlayer player = AudioPlayer(
+    audioPipeline: AudioPipeline(
+      androidAudioEffects: [_loudnessEnhancer, _equalizer],
+    ),
+  );
+
+  static const String _kNormalizeVolumePref = 'setting_normalize_volume';
+  static const String _kPlaybackSpeedPref = 'setting_playback_speed';
+  static const String _kEqualizerSettingsPref = 'equalizer_settings';
+  // Enhancer "on" hone par kitna extra gain — dB me nahi, just_audio ka
+  // `setTargetGain` 0.0-1.0 range leta hai (0 = no boost). 0.5 ek maddham
+  // (safe, distortion-free) boost hai — bahut zyada karne pe loud gaano
+  // clip/distort kar sakte hain.
+  static const double _normalizeTargetGain = 0.5;
 
   // BUG FIX (2026-09-16, v5): "latest request wins" token. User jab jaldi-
   // jaldi gaane badalta hai (ya bahut saare songs test karta hai), har tap
@@ -107,25 +154,48 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // chaap resolve karke yahan cache ho jaata hai — skipToNext() aate hi
   // seedha ye URL use hota hai (instant), koi naya network call nahi.
   final Map<String, String> _urlCache = {};
-  String? _prefetchingId;
+  final Set<String> _prefetchingIds = {};
 
+  // FIX (user request): sirf agle gaane ka URL cache karna kaafi nahi tha —
+  // ab agle 2 upcoming gaane bhi (jab tak current bajta rehta hai) chup-
+  // chaap disk pe download/cache ho jaate hain, taaki wo bhi turant aur
+  // offline bhi bajein. Pehle se download/cached gaana dobara nahi
+  // chhua jaata (koi duplicate network call/write nahi).
   void _prefetchNext() {
     final upcoming = QueueService.instance.upcoming;
-    if (upcoming.isEmpty) return;
-    final next = upcoming.first;
-    if (_urlCache.containsKey(next.id) || _prefetchingId == next.id) return;
-    _prefetchingId = next.id;
-    YoutubeService.instance
-        .getAudioUrl(next.id, title: next.title, author: next.artist)
-        .then((url) {
-      if (url != null) _urlCache[next.id] = url;
-    }).catchError((_) {}).whenComplete(() {
-      if (_prefetchingId == next.id) _prefetchingId = null;
-      // Cache chhota rakho — sirf zaroorat jitna
-      if (_urlCache.length > 5) {
-        _urlCache.remove(_urlCache.keys.first);
+    for (final next in upcoming.take(2)) {
+      _prefetchOne(next);
+    }
+  }
+
+  void _prefetchOne(Song next) {
+    if (_urlCache.containsKey(next.id) || _prefetchingIds.contains(next.id)) {
+      return;
+    }
+    _prefetchingIds.add(next.id);
+    () async {
+      try {
+        // Pehle se download ya cache me hai to kuch karne ki zaroorat
+        // nahi — koi duplicate network/disk call nahi.
+        final already = await DownloadDB.instance.getFilePath(next.id) ??
+            await CacheDB.instance.getFilePath(next.id);
+        if (already != null) return;
+
+        final url = await YoutubeService.instance
+            .getAudioUrl(next.id, title: next.title, author: next.artist);
+        if (url == null) return;
+        _urlCache[next.id] = url; // turant-skip ke liye fallback
+        await _autoCacheInBackground(next, url); // disk pe bhi utaar do
+      } catch (_) {
+        // Prefetch fail hone se playback pe koi asar nahi — normal
+        // resolve chain skip/play time pe apne aap fallback ban jaati hai.
+      } finally {
+        _prefetchingIds.remove(next.id);
+        if (_urlCache.length > 5) {
+          _urlCache.remove(_urlCache.keys.first);
+        }
       }
-    });
+    }();
   }
 
   // BUG FIX: pehle koi user-facing feedback nahi tha jab saare YouTube
@@ -153,6 +223,19 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // ~30s tak (fresh resolve + retries), tabhi jaake final error aata hai.
   int _streamErrorRetries = 0;
   static const int _maxStreamErrorRetries = 3;
+
+  // PART 2 (Sleep timer — "Song khatam hone tak"): jab true ho, current
+  // gaana khatam hote hi (ProcessingState.completed) agle gaane pe
+  // skipToNext() karne ke bajaye bas pause() ho jaata hai. Ye flag khud
+  // handler ke andar hi rehta hai (audioHandler global hai — kisi bhi
+  // screen ke navigate/dispose hone se iska koi lena dena nahi), isliye
+  // SleepTimerService (jo isko set/reset karta hai) ko is baare me
+  // pehle se kuch janna zaroori nahi.
+  bool sleepAtEndOfTrack = false;
+  // SleepTimerService is callback ko set karta hai taaki jab yahan
+  // end-of-track sleep fire ho, uska apna state/icon bhi turant "off"
+  // reflect ho jaaye.
+  void Function()? onSleepAtEndOfTrackFired;
 
   SurSathiAudioHandler() {
     // just_audio ke playback events ko audio_service ke playbackState me map karo
@@ -183,12 +266,152 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       },
     );
 
-    // Player khud khatam ho jaye (song end) to agla song bajao
+    // Player khud khatam ho jaye (song end) to agla song bajao — SIRF agar
+    // "song khatam hone tak" sleep timer active nahi hai. Agar active hai,
+    // to agle gaane pe skip karne ke bajaye yahin pause kar do (ye poore
+    // "sleep timer" feature ka poora point hai — warna skipToNext() ke
+    // baad naya gaana turant bajna shuru ho jaata, sleep kabhi hota hi
+    // nahi).
     player.processingStateStream.listen((state) {
       if (state == ProcessingState.completed) {
-        skipToNext();
+        if (sleepAtEndOfTrack) {
+          sleepAtEndOfTrack = false;
+          pause();
+          onSleepAtEndOfTrackFired?.call();
+        } else {
+          skipToNext();
+        }
       }
     });
+
+    // PART 1: pehli baar handler ban rahi hai — pichhli baar save kiya
+    // hua playback speed aur normalize-volume state wapas apply karo
+    // (varna har app restart pe speed 1.0x aur normalize OFF pe reset ho
+    // jaata, chahe user ne pehle kuch aur set kiya ho).
+    _restoreSavedAudioSettings();
+  }
+
+  Future<void> _restoreSavedAudioSettings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedSpeed = prefs.getDouble(_kPlaybackSpeedPref) ?? 1.0;
+      final savedNormalize = prefs.getBool(_kNormalizeVolumePref) ?? false;
+      await player.setSpeed(savedSpeed);
+      await _loudnessEnhancer.setEnabled(savedNormalize);
+      if (savedNormalize) {
+        await _loudnessEnhancer.setTargetGain(_normalizeTargetGain);
+      }
+    } catch (e) {
+      // Effect/pipeline kisi purane OEM pe available na ho to bhi normal
+      // playback (bina speed/normalize restore ke) chalna chahiye — crash
+      // nahi hona chahiye.
+      print('BG: saved speed/normalize restore fail hua (non-fatal): $e');
+    }
+
+    // PART 2 (Equalizer): equalizer_screen.dart isi 'equalizer_settings'
+    // key me save karta hai — app restart pe wapas apply karo, warna har
+    // baar EQ "Flat"/off pe reset ho jaata chahe user ne Bass/Vocal preset
+    // choose kiya ho.
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kEqualizerSettingsPref);
+      if (raw != null) {
+        final data = jsonDecode(raw) as Map<String, dynamic>;
+        final enabled = data['enabled'] as bool? ?? true;
+        await _equalizer.setEnabled(enabled);
+        final rawBands = (data['bands'] as List?)?.cast<num>();
+        if (rawBands != null && rawBands.length == kEqualizerBandFreqs.length) {
+          await setEqualizerBands(rawBands.map((e) => e.toDouble()).toList());
+        }
+      }
+    } catch (e) {
+      print('BG: saved equalizer restore fail hua (non-fatal): $e');
+    }
+  }
+
+  // ---------------- PART 2: Equalizer ----------------
+  Future<void> setEqualizerEnabled(bool enabled) async {
+    try {
+      await _equalizer.setEnabled(enabled);
+    } catch (e) {
+      print('BG: equalizer enable/disable fail (non-fatal): $e');
+    }
+  }
+
+  // `uiGains`: 10 values (-12..+12 dB), `kEqualizerBandFreqs` ke same order
+  // me. Real Android device ka EQ apna hi fixed band-count/frequencies
+  // expose karta hai (aam taur pe 5-6 bands, hardware/driver ke hisaab se
+  // alag hota hai) — isliye seedha index-se-index map nahi ho sakta. Har
+  // real band ke liye uski `centerFrequency` ke aas-paas wale 2 UI points
+  // se (log-frequency scale pe, jaisa insaan pitch sunta hai) gain
+  // interpolate karke nikalte hain, phir us band ki apni allowed
+  // [lowerGainDb, upperGainDb] range me clamp karte hain.
+  Future<void> setEqualizerBands(List<double> uiGains) async {
+    if (uiGains.length != kEqualizerBandFreqs.length) return;
+    try {
+      final params = await _equalizer.parameters;
+      for (final band in params.bands) {
+        final target = _interpolatedGainDb(uiGains, band.centerFrequency);
+        final clamped = target.clamp(band.lowerGainDb, band.upperGainDb);
+        await band.setGain(clamped);
+      }
+    } catch (e) {
+      // Kisi OEM/emulator pe AndroidEqualizer available na ho to bhi
+      // normal playback chalte rehna chahiye — sirf EQ apply nahi hoga.
+      print('BG: equalizer band gains apply fail (non-fatal): $e');
+    }
+  }
+
+  double _interpolatedGainDb(List<double> uiGains, double targetFreqHz) {
+    final freqs = kEqualizerBandFreqs;
+    if (targetFreqHz <= freqs.first) return uiGains.first;
+    if (targetFreqHz >= freqs.last) return uiGains.last;
+    for (var i = 0; i < freqs.length - 1; i++) {
+      final f0 = freqs[i].toDouble();
+      final f1 = freqs[i + 1].toDouble();
+      if (targetFreqHz >= f0 && targetFreqHz <= f1) {
+        final logF0 = math.log(f0);
+        final logF1 = math.log(f1);
+        final logT = math.log(targetFreqHz);
+        final t = (logF1 == logF0) ? 0.0 : (logT - logF0) / (logF1 - logF0);
+        return uiGains[i] + (uiGains[i + 1] - uiGains[i]) * t;
+      }
+    }
+    return 0;
+  }
+
+  // ---------------- PART 1: Playback speed (0.5x–2x) ----------------
+  @override
+  Future<void> setSpeed(double speed) async {
+    final clamped = speed.clamp(0.5, 2.0);
+    await player.setSpeed(clamped);
+    playbackState.add(playbackState.value.copyWith(speed: clamped));
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble(_kPlaybackSpeedPref, clamped);
+    } catch (_) {
+      // Persist fail ho to bhi is session ke liye speed already apply ho
+      // chuki hai — sirf agli app-open pe wapas 1.0x pe reset hoga.
+    }
+  }
+
+  double get currentSpeed => player.speed;
+
+  // ---------------- PART 1: Normalize Volume ----------------
+  // Settings screen ka "Normalize Volume" switch isko call karta hai.
+  Future<void> setNormalizeVolume(bool enabled) async {
+    try {
+      await _loudnessEnhancer.setEnabled(enabled);
+      if (enabled) {
+        await _loudnessEnhancer.setTargetGain(_normalizeTargetGain);
+      }
+    } catch (e) {
+      print('BG: normalize volume toggle fail (non-fatal): $e');
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kNormalizeVolumePref, enabled);
+    } catch (_) {}
   }
 
   // Actual CDN stream-drop handler — ab yahan bhi retry hota hai (pehle
@@ -431,6 +654,10 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       );
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       await player.play();
+      // Part 3 (Library smarts): asli play-history record — "Recently
+      // Played"/"Most Played" ke liye. Fire-and-forget, playback ko kabhi
+      // block/fail nahi karega.
+      unawaited(PlayHistoryDB.instance.recordPlay(song));
       // Playback successfully shuru ho gaya — stream-drop retry counter
       // reset karo taaki agli baar drop hone pe wapas poore 3 attempts milein.
       _streamErrorRetries = 0;
@@ -582,6 +809,37 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       await _playSong(song, cached, token, useHeaders: false);
       return;
     }
+
+    // FIX (user request): download ya cache me pehle se maujood gaana
+    // seedha DISK se bajao — koi network resolve hi nahi, offline bhi
+    // chalega, aur "duplicate download" jaisa koi sawaal hi nahi uthta
+    // kyunki hum yahan kabhi dobara download nahi maangte.
+    final localPath = await DownloadDB.instance.getFilePath(song.id) ??
+        await CacheDB.instance.getFilePath(song.id);
+    if (localPath != null) {
+      if (token != _playToken) return;
+      try {
+        await player.setFilePath(localPath);
+        if (token != _playToken) return;
+        await player.play();
+        // Part 3 (Library smarts): local-first (cache/download) play bhi
+        // history me record hona chahiye, warna offline-heavy users ke
+        // liye "Most/Never Played" hamesha khali/galat rahega.
+        unawaited(PlayHistoryDB.instance.recordPlay(song));
+        // LRU freshen karo taaki abhi-abhi replay hua gaana jaldi evict
+        // na ho (pichla/replay hua gaana cache me tika rahe).
+        await CacheDB.instance.update(
+          song.id,
+          lastPlayed: DateTime.now().millisecondsSinceEpoch,
+        );
+        _prefetchNext();
+        return;
+      } catch (e) {
+        // Local file corrupt/missing nikla — normal network resolve pe
+        // fallback karo (neeche wala loop).
+      }
+    }
+
     for (var attempt = 1; attempt <= 3; attempt++) {
       // BUG FIX (2026-09-16, v5): agar is dauraan user ne koi aur gaana
       // tap kar diya (_playToken aage badh gaya), to ye purana attempt
@@ -643,6 +901,8 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       await player.setFilePath(filePath);
       if (token != _playToken) return; // dauraan koi naya tap aa gaya
       await player.play();
+      // Part 3 (Library smarts): playFromFile bhi ek "real" play hai.
+      unawaited(PlayHistoryDB.instance.recordPlay(song));
     } catch (e) {
       if (token != _playToken) return;
       playbackState.add(

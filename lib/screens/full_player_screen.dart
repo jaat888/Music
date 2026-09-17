@@ -1,8 +1,6 @@
 // lib/screens/full_player_screen.dart
 // Full-screen player — vinyl, seek bar, controls, aur quick-access chips.
 
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:audio_service/audio_service.dart';
@@ -15,6 +13,7 @@ import '../db/download_db.dart';
 import '../services/background_service.dart';
 import '../services/queue_service.dart';
 import '../services/like_service.dart';
+import '../services/sleep_timer_service.dart';
 import '../services/youtube_service.dart';
 import '../widgets/rotating_vinyl.dart';
 import '../widgets/progress_slider.dart';
@@ -32,7 +31,10 @@ class FullPlayerScreen extends StatefulWidget {
 }
 
 class _FullPlayerScreenState extends State<FullPlayerScreen> {
-  Timer? _sleepTimer;
+  // BUG FIX (Part 2): pehle yahan apna alag screen-local `Timer? _sleepTimer`
+  // tha jo is screen ke dispose() hote hi cancel ho jaata tha (sleep timer
+  // laga ke player screen band karo → silently off). Ab global
+  // `SleepTimerService.instance` use hota hai — dekho us file ka comment.
 
   // NEW (2026-09-16, v15): mini player me download/radio buttons pehle se
   // the (dekho mini_player.dart), lekin full player screen me nahi —
@@ -43,7 +45,6 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
 
   @override
   void dispose() {
-    _sleepTimer?.cancel();
     super.dispose();
   }
 
@@ -54,6 +55,20 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
     if (already) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Ye gaana pehle se downloaded hai')),
+      );
+      return;
+    }
+    // PART 1 (WiFi-only downloads): download() ab khud bhi ye check karta
+    // hai (root-level safety net), lekin yahan pehle hi bata dena behtar
+    // UX hai — "Download fail ho gaya" generic message se zyada clear.
+    if (!await YoutubeService.instance.canDownloadNow()) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'WiFi-only downloads ON hai — WiFi se connect karke try karein',
+          ),
+        ),
       );
       return;
     }
@@ -150,22 +165,25 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
   }
 
   void _startSleepTimer(Duration d) {
-    _sleepTimer?.cancel();
-    _sleepTimer = Timer(d, () {
-      audioHandler.pause();
-      // FIX: timer khud fire hone ke baad bhi icon "on" hi dikhta rehta
-      // tha (state kabhi reset nahi hoti thi) — ab fire hote hi off dikhao.
-      if (mounted) setState(() => _sleepTimer = null);
-    });
-    setState(() {}); // icon ko turant "on" dikhao
+    SleepTimerService.instance.startDuration(d);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('${d.inMinutes} min baad music pause ho jayega')),
     );
   }
 
+  // NEW (Part 2): "Song khatam hone tak" — agla gaana shuru hue bina,
+  // current gaana khatam hote hi playback pause ho jaata hai.
+  void _startEndOfTrackSleep() {
+    SleepTimerService.instance.startEndOfTrack();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Current gaana khatam hote hi music pause ho jayega'),
+      ),
+    );
+  }
+
   void _cancelSleepTimer() {
-    _sleepTimer?.cancel();
-    setState(() => _sleepTimer = null);
+    SleepTimerService.instance.cancel();
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Sleep timer off kar diya')),
     );
@@ -189,12 +207,53 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                 },
               ),
             ListTile(
+              title: Text('Song khatam hone tak', style: AppText.bodyL()),
+              onTap: () {
+                Navigator.pop(ctx);
+                _startEndOfTrackSleep();
+              },
+            ),
+            ListTile(
               title: Text('Off', style: AppText.bodyL(color: kTextDim)),
               onTap: () {
                 Navigator.pop(ctx);
                 _cancelSleepTimer();
               },
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showSpeedDialog() {
+    const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+    final current = audioHandler.currentSpeed;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kBgElev,
+        title: Text('Playback Speed', style: AppText.displayS()),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final s in speeds)
+              ListTile(
+                title: Text(
+                  '${s}x${s == 1.0 ? ' (Normal)' : ''}',
+                  style: AppText.bodyL(
+                    color: (current - s).abs() < 0.01 ? kGreen : null,
+                  ),
+                ),
+                trailing: (current - s).abs() < 0.01
+                    ? const Icon(Icons.check, color: kGreen)
+                    : null,
+                onTap: () {
+                  Navigator.pop(ctx);
+                  audioHandler.setSpeed(s);
+                  setState(() {}); // chip label turant refresh ho
+                },
+              ),
           ],
         ),
       ),
@@ -213,7 +272,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: const Icon(Icons.queue_music, color: kTextDim),
+              leading: Icon(Icons.queue_music, color: kTextDim),
               title: Text('Queue dekho', style: AppText.bodyL()),
               onTap: () {
                 Navigator.pop(ctx);
@@ -224,7 +283,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
               },
             ),
             ListTile(
-              leading: const Icon(Icons.lyrics_outlined, color: kTextDim),
+              leading: Icon(Icons.lyrics_outlined, color: kTextDim),
               title: Text('Lyrics dekho', style: AppText.bodyL()),
               onTap: () {
                 Navigator.pop(ctx);
@@ -257,12 +316,16 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
     // Sirf rebuild-trigger ke liye watch — heart chip ka isLiked FutureBuilder
     // se turant refresh ho jaaye jab bhi kahin se like/unlike ho.
     context.watch<LikeService>();
+    // NEW (Part 2): sleep timer ab global service me hai — is screen ke
+    // khule/band hone se bekhabar, dusri screen (settings) se set kiya ho
+    // to bhi yahan sahi state dikhega.
+    final sleepTimerActive = context.watch<SleepTimerService>().isActive;
 
     return Scaffold(
       body: Container(
         width: double.infinity,
         height: double.infinity,
-        decoration: const BoxDecoration(
+        decoration:  BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
@@ -292,7 +355,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                       child: Row(
                         children: [
                           IconButton(
-                            icon: const Icon(
+                            icon:  Icon(
                               Icons.keyboard_arrow_down,
                               color: kText,
                               size: 30,
@@ -301,7 +364,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                           ),
                           const Spacer(),
                           IconButton(
-                            icon: const Icon(Icons.more_vert, color: kText),
+                            icon: Icon(Icons.more_vert, color: kText),
                             onPressed: song == null
                                 ? null
                                 : () => _showMoreOptions(song),
@@ -427,7 +490,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                               _toggleShuffle(queueService),
                                         ),
                                         IconButton(
-                                          icon: const Icon(
+                                          icon:  Icon(
                                             Icons.skip_previous,
                                             color: kText,
                                             size: 44,
@@ -459,7 +522,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                                 height: 70,
                                                 child: IconButton(
                                                   tooltip: 'Retry',
-                                                  icon: const Icon(
+                                                  icon:  Icon(
                                                     Icons.refresh_rounded,
                                                     color: kText,
                                                   ),
@@ -504,7 +567,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                         ),
                                         const SizedBox(width: 8),
                                         IconButton(
-                                          icon: const Icon(
+                                          icon:  Icon(
                                             Icons.skip_next,
                                             color: kText,
                                             size: 44,
@@ -592,7 +655,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                                     dlSnap.data ?? false;
                                                 return IconButton(
                                                   icon: _downloading
-                                                      ? const SizedBox(
+                                                      ?  SizedBox(
                                                           width: 18,
                                                           height: 18,
                                                           child:
@@ -626,7 +689,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           _chip(
                                             child: IconButton(
                                               icon: _startingRadio
-                                                  ? const SizedBox(
+                                                  ?  SizedBox(
                                                       width: 18,
                                                       height: 18,
                                                       child:
@@ -664,7 +727,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           const SizedBox(width: 10),
                                           _chip(
                                             child: IconButton(
-                                              icon: const Icon(
+                                              icon:  Icon(
                                                 Icons.queue_music,
                                                 color: kTextDim,
                                               ),
@@ -687,10 +750,10 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                                 // grey outline hi rehta
                                                 // tha, on/off pata hi
                                                 // nahi chalta tha.
-                                                _sleepTimer != null
+                                                sleepTimerActive
                                                     ? Icons.timer
                                                     : Icons.timer_outlined,
-                                                color: _sleepTimer != null
+                                                color: sleepTimerActive
                                                     ? kGreen
                                                     : kTextDim,
                                               ),
@@ -700,7 +763,30 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           const SizedBox(width: 10),
                                           _chip(
                                             child: IconButton(
-                                              icon: const Icon(
+                                              icon: Icon(
+                                                Icons.speed,
+                                                // PART 1: 1.0x (normal) pe
+                                                // grey, kisi aur speed pe
+                                                // green — jaise sleep-timer
+                                                // chip "on" state dikhata
+                                                // hai.
+                                                color: (audioHandler
+                                                                .currentSpeed -
+                                                            1.0)
+                                                        .abs() <
+                                                    0.01
+                                                    ? kTextDim
+                                                    : kGreen,
+                                              ),
+                                              tooltip:
+                                                  '${audioHandler.currentSpeed}x speed',
+                                              onPressed: _showSpeedDialog,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 10),
+                                          _chip(
+                                            child: IconButton(
+                                              icon:  Icon(
                                                 Icons.lyrics_outlined,
                                                 color: kTextDim,
                                               ),

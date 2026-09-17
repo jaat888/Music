@@ -43,6 +43,20 @@ class ThemeService extends ChangeNotifier {
 
   // ---------------- Theme mode ----------------
 
+  // PART 5 (2026-09-17): naya SYNC cached field. Pehle sirf async
+  // `getThemeMode()` tha (SharedPreferences se) — `main.dart` ka
+  // `MaterialApp` `build()` ke andar `theme:`/`themeMode:` synchronously
+  // decide karna padta hai, koi async gap allowed nahi, isliye pehle
+  // actual toggle ka koi tareeka hi nahi tha use karne ka. Ab `init()`
+  // (main() me startup pe ek baar await hota hai) is field ko persisted
+  // value se bhar deta hai, aur `mode` getter turant (sync) wahi deta hai.
+  ThemeMode _mode = ThemeMode.dark;
+  ThemeMode get mode => _mode;
+
+  Future<void> init() async {
+    _mode = await getThemeMode();
+  }
+
   Future<ThemeMode> getThemeMode() async {
     final prefs = await _prefsInstance;
     final value = prefs.getString(_keyThemeMode) ?? 'dark';
@@ -57,6 +71,7 @@ class ThemeService extends ChangeNotifier {
   }
 
   Future<void> setThemeMode(ThemeMode mode) async {
+    _mode = mode; // turant sync update — MaterialApp agle build me turant naya theme use kare
     final prefs = await _prefsInstance;
     await prefs.setString(_keyThemeMode, mode.name);
     notifyListeners();

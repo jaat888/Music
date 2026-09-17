@@ -15,6 +15,7 @@ import 'services/like_service.dart';
 import 'services/potoken_service.dart';
 import 'services/queue_service.dart';
 import 'services/search_history.dart';
+import 'services/sleep_timer_service.dart';
 import 'services/theme_service.dart';
 import 'theme/app_theme.dart';
 import 'theme/colors.dart';
@@ -79,12 +80,21 @@ void main() {
             SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
           );
         };
+        // PART 2 (Sleep timer): "song khatam hone tak" mode fire hone par
+        // audioHandler khud pause() kar chuka hota hai — ye sirf
+        // SleepTimerService ka state/icon wapas "off" karta hai.
+        audioHandler.onSleepAtEndOfTrackFired =
+            SleepTimerService.instance.notifyEndOfTrackFired;
       } catch (e) {
         _startupError = 'Audio init failed: $e';
         AppLogger.instance.logError('Audio init failed', e, StackTrace.current);
       }
 
       await LikeService.instance.init();
+      // PART 5 (Theme toggle): persisted theme mode ko sync cache me load
+      // karo startup pe hi — MaterialApp.build() synchronously (bina async
+      // gap ke) sahi theme choose kar sake (dekho theme_service.dart).
+      await ThemeService.instance.init();
     } catch (e, st) {
       _startupError = 'Startup failed: $e';
       AppLogger.instance.logError('Startup failed', e, st);
@@ -116,28 +126,58 @@ class SurSathiApp extends StatelessWidget {
         ChangeNotifierProvider.value(value: ThemeService.instance),
         ChangeNotifierProvider.value(value: QueueService.instance),
         ChangeNotifierProvider.value(value: SearchHistory.instance),
+        ChangeNotifierProvider.value(value: SleepTimerService.instance),
       ],
-      child: MaterialApp(
-        title: 'SurSathi',
-        navigatorKey: navigatorKey,
-        scaffoldMessengerKey: scaffoldMessengerKey,
-        debugShowCheckedModeBanner: false,
-        theme: AppTheme.dark(),
-        home: _startupError != null
-            ? _ErrorScreen(error: _startupError!)
-            : const _Boot(),
-        // NEW (2026-09-17): PoToken (BotGuard) mint karne wala hidden
-        // WebView — har screen ke upar Stack me 1x1 offstage mount rehta
-        // hai poori app-lifetime, taaki youtube_service.dart jab bhi
-        // PoTokenService.instance.getSessionPoToken() maange, WebView ka
-        // JS engine already chal raha ho (Android WebView bina actual
-        // View ke reliably JS nahi chalata). Dekho potoken_service.dart.
-        builder: (context, child) => Stack(
-          children: [
-            if (child != null) child,
-            const _PoTokenHost(),
-          ],
-        ),
+      // PART 5 (2026-09-17) — Theme toggle (dark/light), ab real hai.
+      // Consumer isliye taaki jab bhi `ThemeService.setThemeMode()` kahin
+      // se (Settings screen) call ho, ye poora subtree turant rebuild ho.
+      child: Consumer<ThemeService>(
+        builder: (context, themeService, _) {
+          // "System" mode ke liye device ka current brightness — MediaQuery
+          // is level pe available nahi hai (MaterialApp abhi bana hi nahi),
+          // isliye seedha platformDispatcher se (sync, context-independent).
+          final systemBrightness =
+              WidgetsBinding.instance.platformDispatcher.platformBrightness;
+          final isLight = themeService.mode == ThemeMode.light ||
+              (themeService.mode == ThemeMode.system &&
+                  systemBrightness == Brightness.light);
+          // colors.dart ke saare kBg/kText/kSurface/... getters isi flag ko
+          // padhte hain — poore app me kahin bhi individually
+          // Theme.of(context) refactor kiye bina, sirf is ek flag se
+          // dark/light palette switch ho jaata hai.
+          AppColorTheme.isLight = isLight;
+
+          return MaterialApp(
+            // Naya `key` — theme badalte hi Flutter poore MaterialApp
+            // (Navigator + saari pushed screens samet) ko fresh rebuild
+            // karta hai, taaki jo screens abhi khuli hain unke andar bhi
+            // naya theme turant, correctly dikhe (na ki sirf agli baar
+            // khulne par). Trade-off: toggle karte hi navigation stack
+            // reset ho jaata hai (Home pe wapas) — chhota sa cost, poore
+            // app me instant-correct theming ke liye.
+            key: ValueKey(isLight),
+            title: 'SurSathi',
+            navigatorKey: navigatorKey,
+            scaffoldMessengerKey: scaffoldMessengerKey,
+            debugShowCheckedModeBanner: false,
+            theme: isLight ? AppTheme.light() : AppTheme.dark(),
+            home: _startupError != null
+                ? _ErrorScreen(error: _startupError!)
+                : const _Boot(),
+            // NEW (2026-09-17): PoToken (BotGuard) mint karne wala hidden
+            // WebView — har screen ke upar Stack me 1x1 offstage mount rehta
+            // hai poori app-lifetime, taaki youtube_service.dart jab bhi
+            // PoTokenService.instance.getSessionPoToken() maange, WebView ka
+            // JS engine already chal raha ho (Android WebView bina actual
+            // View ke reliably JS nahi chalata). Dekho potoken_service.dart.
+            builder: (context, child) => Stack(
+              children: [
+                if (child != null) child,
+                const _PoTokenHost(),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -214,7 +254,7 @@ class _BootState extends State<_Boot> {
   @override
   Widget build(BuildContext context) {
     if (_onboarded == null) {
-      return const Scaffold(backgroundColor: kBg, body: SizedBox.shrink());
+      return Scaffold(backgroundColor: kBg, body: SizedBox.shrink());
     }
     return _onboarded! ? const HomeScreen() : const SplashScreen();
   }

@@ -59,8 +59,8 @@ class ProgressSlider extends StatelessWidget {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(_format(position), style: const TextStyle(color: kTextDim, fontSize: 12)),
-              Text(_format(total), style: const TextStyle(color: kTextDim, fontSize: 12)),
+              Text(_format(position), style: TextStyle(color: kTextDim, fontSize: 12)),
+              Text(_format(total), style: TextStyle(color: kTextDim, fontSize: 12)),
             ],
           ),
         ),

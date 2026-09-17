@@ -128,7 +128,7 @@ class _AddToPlaylistSheetState extends State<_AddToPlaylistSheet> {
                 title: Text('Create new playlist', style: AppText.bodyL(color: kText)),
                 onTap: _createNew,
               ),
-              const Divider(color: kSurface, height: 1),
+              Divider(color: kSurface, height: 1),
               Flexible(
                 child: _loading
                     ? const Padding(

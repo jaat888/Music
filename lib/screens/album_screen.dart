@@ -131,10 +131,10 @@ class _AlbumScreenState extends State<AlbumScreen> {
               backgroundColor: kBgElev,
               expandedHeight: 280,
               pinned: true,
-              iconTheme: const IconThemeData(color: kText),
+              iconTheme: IconThemeData(color: kText),
               flexibleSpace: FlexibleSpaceBar(
                 background: Container(
-                  decoration: const BoxDecoration(
+                  decoration:  BoxDecoration(
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
@@ -185,7 +185,7 @@ class _AlbumScreenState extends State<AlbumScreen> {
                           padding: const EdgeInsets.symmetric(vertical: 12),
                         ),
                         onPressed: _songs.isEmpty ? null : () => _playAll(),
-                        icon: const Icon(Icons.play_arrow, color: kBg),
+                        icon: Icon(Icons.play_arrow, color: kBg),
                         label: Text('Play All', style: AppText.button(color: kBg)),
                       ),
                     ),
@@ -193,11 +193,11 @@ class _AlbumScreenState extends State<AlbumScreen> {
                     Expanded(
                       child: OutlinedButton.icon(
                         style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: kTextDim),
+                          side: BorderSide(color: kTextDim),
                           padding: const EdgeInsets.symmetric(vertical: 12),
                         ),
                         onPressed: _songs.isEmpty ? null : () => _playAll(shuffle: true),
-                        icon: const Icon(Icons.shuffle, color: kText),
+                        icon: Icon(Icons.shuffle, color: kText),
                         label: Text('Shuffle', style: AppText.button(color: kText)),
                       ),
                     ),
@@ -223,7 +223,7 @@ class _AlbumScreenState extends State<AlbumScreen> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Icon(Icons.search_off, color: kTextDim, size: 48),
+                        Icon(Icons.search_off, color: kTextDim, size: 48),
                         const SizedBox(height: 10),
                         Text('Kuch nahi mila', style: AppText.bodyM(color: kTextDim)),
                       ],
@@ -289,12 +289,12 @@ class _AlbumCover extends StatelessWidget {
                 placeholder: (_, __) => Container(color: kSurface),
                 errorWidget: (_, __, ___) => Container(
                   color: kSurface,
-                  child: const Icon(Icons.album, color: kTextDim, size: 56),
+                  child: Icon(Icons.album, color: kTextDim, size: 56),
                 ),
               )
             : Container(
                 color: kSurface,
-                child: const Icon(Icons.album, color: kTextDim, size: 56),
+                child: Icon(Icons.album, color: kTextDim, size: 56),
               ),
       ),
     );

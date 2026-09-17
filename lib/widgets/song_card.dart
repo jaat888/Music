@@ -93,7 +93,7 @@ class SongCard extends StatelessWidget {
                         width: 60,
                         height: 60,
                         color: kSurface,
-                        child: const Icon(Icons.music_note, color: kTextDim),
+                        child: Icon(Icons.music_note, color: kTextDim),
                       ),
                     ),
                   ),
@@ -147,7 +147,7 @@ class SongCard extends StatelessWidget {
               ),
               if (onAddToPlaylist != null)
                 IconButton(
-                  icon: const Icon(Icons.playlist_add, color: kTextDim, size: 22),
+                  icon: Icon(Icons.playlist_add, color: kTextDim, size: 22),
                   onPressed: onAddToPlaylist,
                   splashRadius: 18,
                 )

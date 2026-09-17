@@ -134,10 +134,10 @@ class _ArtistScreenState extends State<ArtistScreen> {
               backgroundColor: kBgElev,
               expandedHeight: 260,
               pinned: true,
-              iconTheme: const IconThemeData(color: kText),
+              iconTheme: IconThemeData(color: kText),
               flexibleSpace: FlexibleSpaceBar(
                 background: Container(
-                  decoration: const BoxDecoration(
+                  decoration:  BoxDecoration(
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
@@ -206,7 +206,7 @@ class _ArtistScreenState extends State<ArtistScreen> {
                           padding: const EdgeInsets.symmetric(vertical: 12),
                         ),
                         onPressed: _songs.isEmpty ? null : _playAll,
-                        icon: const Icon(Icons.play_arrow, color: kBg),
+                        icon: Icon(Icons.play_arrow, color: kBg),
                         label: Text('Play All', style: AppText.button(color: kBg)),
                       ),
                     ),
@@ -232,7 +232,7 @@ class _ArtistScreenState extends State<ArtistScreen> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Icon(Icons.search_off, color: kTextDim, size: 48),
+                        Icon(Icons.search_off, color: kTextDim, size: 48),
                         const SizedBox(height: 10),
                         Text('Kuch nahi mila', style: AppText.bodyM(color: kTextDim)),
                       ],
@@ -297,12 +297,12 @@ class _ArtistAvatar extends StatelessWidget {
                 placeholder: (_, __) => Container(color: kSurface),
                 errorWidget: (_, __, ___) => Container(
                   color: kSurface,
-                  child: const Icon(Icons.person, color: kTextDim, size: 56),
+                  child: Icon(Icons.person, color: kTextDim, size: 56),
                 ),
               )
             : Container(
                 color: kSurface,
-                child: const Icon(Icons.person, color: kTextDim, size: 56),
+                child: Icon(Icons.person, color: kTextDim, size: 56),
               ),
       ),
     );

@@ -58,22 +58,39 @@ object NewPipeAudioChannel {
                     result.error("BAD_ARGS", "videoId missing", null)
                     return
                 }
-                executor.execute { resolveAudioStream(videoId, result) }
+                // PART 1 (audio quality toggle): Dart-side ab "low"/"med"/
+                // "high" bhejta hai (settings_screen.dart ke Audio/Download
+                // Quality dialog se, wahi value jo streaming ya download ke
+                // liye chuni gayi hai). Missing/unknown -> "high" (purana
+                // behavior, sabse zyada bitrate) taaki backward-compatible
+                // rahe agar kisi purani Dart build se bina is arg ke call
+                // aa jaaye.
+                val quality = (call.argument<String>("quality") ?: "high").lowercase()
+                executor.execute { resolveAudioStream(videoId, quality, result) }
             }
             else -> result.notImplemented()
         }
     }
 
-    private fun resolveAudioStream(videoId: String, result: MethodChannel.Result) {
+    private fun resolveAudioStream(videoId: String, quality: String, result: MethodChannel.Result) {
         try {
             ensureInit()
             val url = "https://www.youtube.com/watch?v=$videoId"
             val info: StreamInfo = StreamInfo.getInfo(ServiceList.YouTube, url)
 
             val audioStreams: List<AudioStream> = info.audioStreams ?: emptyList()
-            val best = audioStreams
-                .filter { !it.content.isNullOrEmpty() }
-                .maxByOrNull { it.averageBitrate }
+            val playable = audioStreams.filter { !it.content.isNullOrEmpty() }
+            // PART 1 (data saver): "low" = sabse kam bitrate (kam data use,
+            // kharaab-ish quality) — "med" = beech wala bitrate — "high"
+            // (default, purana behavior) = sabse best bitrate. Agar list
+            // khaali hai to null hi rahega (neeche muxed fallback try hoga,
+            // jaisa pehle hota tha).
+            val sortedByBitrateAsc = playable.sortedBy { it.averageBitrate }
+            val best = when (quality) {
+                "low" -> sortedByBitrateAsc.firstOrNull()
+                "med", "medium" -> sortedByBitrateAsc.getOrNull(sortedByBitrateAsc.size / 2)
+                else -> sortedByBitrateAsc.lastOrNull()
+            }
 
             val map = HashMap<String, Any?>()
             map["title"] = info.name
@@ -94,7 +111,18 @@ object NewPipeAudioChannel {
             // Dart-side pehle karta tha (dekho youtube_service.dart
             // _audioViaNewPipe).
             val videoStreams: List<VideoStream> = info.videoStreams ?: emptyList()
-            val muxed = videoStreams.firstOrNull { !it.content.isNullOrEmpty() }
+            val playableMuxed = videoStreams.filter { !it.content.isNullOrEmpty() }
+            // Muxed streams me audio-only jitni clean bitrate field nahi
+            // milti (NewPipe API version ke hisaab se alag ho sakti hai),
+            // isliye yahan safe rehte hain: "low" quality me list ka AAKHRI
+            // wala try karo (NewPipe generally best-pehle order deta hai,
+            // isliye last = usually sabse chhota/halka), warna (high/med)
+            // pehla wala — jaisa pehle hota tha.
+            val muxed = if (quality == "low") {
+                playableMuxed.lastOrNull() ?: playableMuxed.firstOrNull()
+            } else {
+                playableMuxed.firstOrNull()
+            }
             if (muxed != null) {
                 map["url"] = muxed.content
                 map["format"] = muxed.format?.suffix ?: "mp4"

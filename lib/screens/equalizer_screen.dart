@@ -1,44 +1,23 @@
 // lib/screens/equalizer_screen.dart
 // Equalizer UI — 10 bands + presets + bass boost + 3D surround + reverb.
-// NOTE: just_audio me actual DSP limited hai, isliye filhaal sirf UI +
-// SharedPreferences save hai (functional audio effect optional rakha gaya).
-
+//
+// PART 2 (2026-09-17): pehle ye sirf UI + SharedPreferences save tha, koi
+// bhi service isko actual audio pe apply nahi karti thi (naam/preset
+// select karo ya slider hilao, gaana bilkul waisa hi bajta rehta tha).
+// Ab band frequencies + preset curves `equalizer_presets.dart` se aate
+// hain (background_service.dart bhi wahi file use karta hai), aur har
+// change (enable toggle / preset tap / band slider) turant
+// `audioHandler` ke through asli `AndroidEqualizer` (just_audio ke andar
+// ExoPlayer effect) pe apply hota hai — is baar sach me sunai deta hai.
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/background_service.dart';
+import '../services/equalizer_presets.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
-
-// 10 bands — spec ke 7 (60/150/400/1k/2.4k/6k/12k) + 3 extra (20/16k/20k)
-const List<int> _kBandFreqs = [
-  20,
-  60,
-  150,
-  400,
-  1000,
-  2400,
-  6000,
-  12000,
-  16000,
-  20000,
-];
-
-const Map<String, List<double>> _kPresets = {
-  'Flat': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-  'Rock': [4, 4, 3, -2, -4, -2, 2, 5, 6, 6],
-  'Pop': [-1, -1, 2, 4, 4, 1, -1, -2, -2, 1],
-  'Jazz': [3, 3, 2, 1, 2, -2, -2, 0, 2, 3],
-  'Classical': [4, 4, 3, 2, 0, 0, 0, -2, -2, -3],
-  'Bass': [7, 7, 6, 5, 3, 1, -1, -2, -3, -3],
-  'Treble': [-3, -3, -3, -2, -1, 0, 2, 4, 5, 6],
-  'Vocal': [-2, -2, -3, -2, 1, 4, 5, 4, 2, 0],
-  'Dance': [5, 5, 4, 2, 0, -2, -1, 0, 2, 3],
-  'Hip-Hop': [6, 6, 5, 3, 1, -1, -1, 1, 2, 2],
-  'Acoustic': [3, 3, 3, 2, 1, 0, 1, 2, 2, 3],
-  'Custom': [],
-};
 
 class EqualizerScreen extends StatefulWidget {
   const EqualizerScreen({super.key});
@@ -59,7 +38,7 @@ class _EqualizerScreenState extends State<EqualizerScreen> {
   @override
   void initState() {
     super.initState();
-    _bands = List<double>.from(_kPresets['Flat']!);
+    _bands = List<double>.from(kEqualizerPresets['Flat']!);
     _loadSettings();
   }
 
@@ -75,7 +54,7 @@ class _EqualizerScreenState extends State<EqualizerScreen> {
         _reverb = (data['reverb'] as num?)?.toDouble() ?? 0;
         _surround = data['surround'] as bool? ?? false;
         final rawBands = (data['bands'] as List?)?.cast<num>();
-        if (rawBands != null && rawBands.length == _kBandFreqs.length) {
+        if (rawBands != null && rawBands.length == kEqualizerBandFreqs.length) {
           _bands = rawBands.map((e) => e.toDouble()).toList();
         }
       } catch (_) {
@@ -84,9 +63,18 @@ class _EqualizerScreenState extends State<EqualizerScreen> {
     }
     if (!mounted) return;
     setState(() => _loading = false);
+    // NOTE: yahan dobara apply() nahi karte — background_service.dart apne
+    // `_restoreSavedAudioSettings()` me app start hote hi ye same
+    // SharedPreferences key khud padh ke apply kar chuka hota hai. Ye
+    // sirf screen ke apne slider/switch state ko us se sync karta hai.
   }
 
-  Future<void> _saveSettings() async {
+  // BUG FIX (Part 2): pehle sirf "Save Custom" button dabane par
+  // SharedPreferences me likha jaata tha — beech me app crash/kill ho
+  // jaaye (ya user bina Save dabaye wapas chala jaaye) to sab kuch reset
+  // ho jaata. Ab har change turant persist bhi hoti hai (silently, bina
+  // SnackBar ke) — Save button sirf explicit confirmation ke liye hai.
+  Future<void> _persist() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
       'equalizer_settings',
@@ -99,21 +87,35 @@ class _EqualizerScreenState extends State<EqualizerScreen> {
         'bands': _bands,
       }),
     );
+  }
+
+  Future<void> _saveSettings() async {
+    await _persist();
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Equalizer settings save ho gayi')),
     );
   }
 
+  // NEW (Part 2): band gains ko turant asli AndroidEqualizer pe bhejo —
+  // agar `_enabled` false hai to bhi bhej dena harmless hai (band gains
+  // set rehte hain, effect khud enable()/disable() se on/off hota hai).
+  void _applyLive() {
+    audioHandler.setEqualizerEnabled(_enabled);
+    audioHandler.setEqualizerBands(_bands);
+  }
+
   void _applyPreset(String name) {
     setState(() {
       _preset = name;
-      final values = _kPresets[name];
+      final values = kEqualizerPresets[name];
       if (values != null && values.isNotEmpty) {
         _bands = List<double>.from(values);
       }
       // Custom select karne pe current slider values hi rehte hain
     });
+    _applyLive();
+    _persist();
   }
 
   void _onBandChanged(int index, double value) {
@@ -121,16 +123,33 @@ class _EqualizerScreenState extends State<EqualizerScreen> {
       _bands[index] = value;
       _preset = 'Custom';
     });
+    // NOTE: ye onChanged (drag ke har frame pe) hai — sirf local UI update.
+    // Asli AndroidEqualizer call `onChangeEnd` (_onBandChangeEnd) me hota
+    // hai taaki drag ke dauraan platform channel ko har pixel pe spam na
+    // karna pade.
+  }
+
+  void _onBandChangeEnd(double _) {
+    _applyLive();
+    _persist();
+  }
+
+  void _setEnabled(bool v) {
+    setState(() => _enabled = v);
+    _applyLive();
+    _persist();
   }
 
   void _reset() {
     setState(() {
       _preset = 'Flat';
-      _bands = List<double>.from(_kPresets['Flat']!);
+      _bands = List<double>.from(kEqualizerPresets['Flat']!);
       _bassBoost = 0;
       _reverb = 0;
       _surround = false;
     });
+    _applyLive();
+    _persist();
   }
 
   String _freqLabel(int hz) {
@@ -145,7 +164,7 @@ class _EqualizerScreenState extends State<EqualizerScreen> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const Scaffold(
+      return  Scaffold(
         backgroundColor: kBg,
         body: Center(child: CircularProgressIndicator(color: kGreen)),
       );
@@ -183,7 +202,7 @@ class _EqualizerScreenState extends State<EqualizerScreen> {
                   Switch(
                     value: _enabled,
                     activeColor: kGreen,
-                    onChanged: (v) => setState(() => _enabled = v),
+                    onChanged: _setEnabled,
                   ),
                 ],
               ),
@@ -201,7 +220,7 @@ class _EqualizerScreenState extends State<EqualizerScreen> {
                   opacity: _enabled ? 1 : 0.4,
                   child: ListView(
                     scrollDirection: Axis.horizontal,
-                    children: _kPresets.keys.map((name) {
+                    children: kEqualizerPresets.keys.map((name) {
                       final selected = name == _preset;
                       return Padding(
                         padding: const EdgeInsets.only(right: 8),
@@ -235,7 +254,7 @@ class _EqualizerScreenState extends State<EqualizerScreen> {
                   child: SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
                     child: Row(
-                      children: List.generate(_kBandFreqs.length, (i) {
+                      children: List.generate(kEqualizerBandFreqs.length, (i) {
                         return SizedBox(
                           width: 42,
                           child: Column(
@@ -264,12 +283,13 @@ class _EqualizerScreenState extends State<EqualizerScreen> {
                                       min: -12,
                                       max: 12,
                                       onChanged: (v) => _onBandChanged(i, v),
+                                      onChangeEnd: _onBandChangeEnd,
                                     ),
                                   ),
                                 ),
                               ),
                               Text(
-                                '${_freqLabel(_kBandFreqs[i])}Hz',
+                                '${_freqLabel(kEqualizerBandFreqs[i])}Hz',
                                 style: AppText.bodyS(),
                               ),
                             ],

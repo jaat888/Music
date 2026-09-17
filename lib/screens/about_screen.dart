@@ -234,7 +234,7 @@ class _AboutScreenState extends State<AboutScreen> {
               )
             : null,
         trailing: onTap != null
-            ? const Icon(Icons.chevron_right, color: kTextDim, size: 20)
+            ? Icon(Icons.chevron_right, color: kTextDim, size: 20)
             : null,
         onTap: onTap,
       ),
