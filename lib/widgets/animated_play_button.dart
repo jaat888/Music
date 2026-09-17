@@ -119,10 +119,18 @@ class _AnimatedPlayButtonState extends State<AnimatedPlayButton>
               end: Alignment.bottomRight,
               colors: [kGreen, kBlue],
             ),
+            // BUG FIX (v37 — "buttons ganda lagte hain"): pehle blurRadius
+            // 20 + alpha 0.5 tha — ek bahut bada, harsh "neon halo" jaisa
+            // glow banata tha jo baaki row ke plain white icons (shuffle/
+            // prev/next/repeat) ke saath match nahi karta tha, mismatched/
+            // gaudy lagta tha. Ab ek chhota, soft shadow — button khud
+            // thoda "lifted" dikhta hai, bina screen ka poora hissa halo se
+            // bhar diye.
             boxShadow: [
               BoxShadow(
-                color: kGreen.withValues(alpha: 0.5),
-                blurRadius: 20,
+                color: kGreen.withValues(alpha: 0.35),
+                blurRadius: 12,
+                spreadRadius: -2,
               ),
             ],
           ),

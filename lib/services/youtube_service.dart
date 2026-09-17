@@ -1628,7 +1628,16 @@ class YoutubeService {
   // bhi caller ise miss kare to bhi policy bypass na ho.
   Future<bool> canDownloadNow() => isDownloadAllowedByNetworkPolicy();
 
-  Future<String?> download(String videoId, String title, {String? author}) async {
+  // NEW (v37 — download queue/progress): callers (DownloadQueueService)
+  // ko bytes-received/total pata chale, taaki UI/notification me asli
+  // progress % dikhaya ja sake. Optional — koi bhi purana caller isko
+  // pass na kare to bilkul pehle jaisa hi behave karta hai.
+  Future<String?> download(
+    String videoId,
+    String title, {
+    String? author,
+    void Function(int received, int total)? onProgress,
+  }) async {
     // FIX (user request): ye check yahan (root level) bhi hona chahiye —
     // sirf UI screens pe nahi — taaki koi bhi caller miss kare to bhi
     // duplicate download/file overwrite kabhi na ho.
@@ -1677,7 +1686,23 @@ class YoutubeService {
       final response = await _http.send(request);
       final file = File(filePath);
       final sink = file.openWrite();
-      await response.stream.pipe(sink);
+      // NEW (v37): pehle seedha `response.stream.pipe(sink)` tha — kaam
+      // karta tha, lekin bytes-received ka koi hisaab nahi rakhta tha,
+      // isliye caller ko progress % kabhi nahi mil sakta tha (download
+      // queue/notification hamesha "kuch pata nahi" state me rehte).
+      // Manual listen se wahi kaam hota hai, bas har chunk pe received
+      // total bhi track/report ho jaata hai.
+      final total = response.contentLength ?? 0;
+      var received = 0;
+      await response.stream.listen(
+        (chunk) {
+          sink.add(chunk);
+          received += chunk.length;
+          onProgress?.call(received, total);
+        },
+        onError: (Object e) => throw e,
+        cancelOnError: true,
+      ).asFuture<void>();
       await sink.flush();
       await sink.close();
 

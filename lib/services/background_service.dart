@@ -284,6 +284,23 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       }
     });
 
+    // BUG FIX (v37 — "notification bar mein gaane ko time wale kabhi nahi
+    // dikhte"): mediaItem.duration hamesha search-result se aaye
+    // `song.duration` (YouTube Music API metadata — kaafi baar 0 ya galat)
+    // pe fix ho jaata tha, aur stream/file load hone ke baad ASLI duration
+    // (`player.duration`) se kabhi update nahi hota tha. Notification/lock-
+    // screen ka seekbar aur "0:00 / 3:45" jaisa total-time text isi
+    // mediaItem.duration se aata hai — 0 rehne pe wahan time hamesha
+    // khaali/0:00 hi dikhta tha. Fix: just_audio ka apna durationStream
+    // sunte hain — jaise hi asli duration pata chale (URL/file load hote
+    // hi), current mediaItem ko usi real duration se turant update kar do.
+    player.durationStream.listen((d) {
+      if (d == null) return;
+      final current = mediaItem.value;
+      if (current == null || current.duration == d) return;
+      mediaItem.add(current.copyWith(duration: d));
+    });
+
     // PART 1: pehli baar handler ban rahi hai — pichhli baar save kiya
     // hua playback speed aur normalize-volume state wapas apply karo
     // (varna har app restart pe speed 1.0x aur normalize OFF pe reset ho
@@ -808,19 +825,21 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _resolveAndPlay(Song song, int token) async {
-    // FIX: agar ye song already prefetch ho ke cache me pada hai (skipToNext
-    // ka sabse common case), seedha usi URL se play karo — koi naya
-    // NewPipe/explode/Piped resolve nahi, isliye "next" ab instant hai.
-    final cached = _urlCache.remove(song.id);
-    if (cached != null) {
-      await _playSong(song, cached, token, useHeaders: false);
-      return;
-    }
-
-    // FIX (user request): download ya cache me pehle se maujood gaana
-    // seedha DISK se bajao — koi network resolve hi nahi, offline bhi
-    // chalega, aur "duplicate download" jaisa koi sawaal hi nahi uthta
-    // kyunki hum yahan kabhi dobara download nahi maangte.
+    // BUG FIX (v37 — "next/previous cache se nahi, seedha net se dubara
+    // play karta hai"): pehle yahan SABSE PEHLE `_urlCache` (in-memory,
+    // sirf ek NETWORK stream URL) check hota tha, aur disk (download/
+    // cache) check uske BAAD aata tha. Lekin `_prefetchOne()` (neeche)
+    // upcoming gaano ke liye hamesha `_urlCache` bharta hai (jab tak wo
+    // song pehle se disk pe na ho) — matlab jab bhi "next/previous" ka sabse
+    // common case hota (current gaana bajte hi agla prefetch ho chuka hota
+    // hai), `_urlCache` me hamesha ek entry mil jaati thi, aur disk-cache
+    // check ko kabhi mauka hi nahi milta tha — isliye har "next" seedha
+    // dobara internet se stream karta tha, chahe wahi gaana isi prefetch
+    // ke dauraan disk pe bhi save ho chuka ho (`_autoCacheInBackground`
+    // dono ek saath karta hai). Fix: DISK (download ya cache) ko hamesha
+    // pehle check karo — wahi asli "offline bhi chale, dobara network na
+    // lage" wala intent hai. `_urlCache` (network URL) ab sirf ek fallback
+    // hai jab disk pe abhi tak kuch nahi bana.
     final localPath = await DownloadDB.instance.getFilePath(song.id) ??
         await CacheDB.instance.getFilePath(song.id);
     if (localPath != null) {
@@ -839,12 +858,26 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           song.id,
           lastPlayed: DateTime.now().millisecondsSinceEpoch,
         );
+        // Ab disk se bajaya — ye stale network URL kabhi kaam nahi
+        // aayega (agar galti se abhi bhi pada tha), hata do.
+        _urlCache.remove(song.id);
         _prefetchNext();
         return;
       } catch (e) {
         // Local file corrupt/missing nikla — normal network resolve pe
-        // fallback karo (neeche wala loop).
+        // fallback karo (neeche wala loop/urlCache).
       }
+    }
+
+    // Disk pe kuch nahi mila — agar ye song already prefetch ho ke
+    // network-URL cache me pada hai (skipToNext ka doosra common case,
+    // jab prefetch abhi resolve hi hua ho, disk-write abhi baaki ho),
+    // seedha usi URL se play karo — koi naya NewPipe/explode/Piped
+    // resolve nahi, isliye "next" ab bhi instant hai.
+    final cached = _urlCache.remove(song.id);
+    if (cached != null) {
+      await _playSong(song, cached, token, useHeaders: false);
+      return;
     }
 
     for (var attempt = 1; attempt <= 3; attempt++) {

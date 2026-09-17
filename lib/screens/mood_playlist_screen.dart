@@ -18,6 +18,7 @@ import '../models/song.dart';
 import '../services/background_service.dart';
 import '../services/like_service.dart';
 import '../services/queue_service.dart';
+import '../services/download_queue_service.dart';
 import '../services/youtube_service.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
@@ -135,16 +136,20 @@ class _MoodPlaylistScreenState extends State<MoodPlaylistScreen> {
     }
   }
 
+  // BUG FIX (v37 — download queue/progress visibility): shared
+  // DownloadQueueService use karte hain.
   Future<void> _download(Song song) async {
-    final path = await YoutubeService.instance
-        .download(song.id, song.title, author: song.artist);
+    if (DownloadQueueService.instance.isActive(song.id)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('"${song.title}" already download queue mein hai')),
+      );
+      return;
+    }
+    DownloadQueueService.instance.enqueue(song);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          path != null ? '${song.title} download ho gaya' : 'Download fail ho gaya',
-        ),
-      ),
+      SnackBar(content: Text('"${song.title}" download queue mein daal diya')),
     );
   }
 

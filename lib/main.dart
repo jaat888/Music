@@ -11,6 +11,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'services/app_logger.dart';
 import 'services/background_service.dart';
 import 'services/cache_service.dart';
+import 'services/download_queue_service.dart';
 import 'services/like_service.dart';
 import 'services/potoken_service.dart';
 import 'services/queue_service.dart';
@@ -95,6 +96,24 @@ void main() {
       // karo startup pe hi — MaterialApp.build() synchronously (bina async
       // gap ke) sahi theme choose kar sake (dekho theme_service.dart).
       await ThemeService.instance.init();
+
+      // BUG FIX (v37 — download progress/completion kahin dikhta nahi tha):
+      // global fallback listener — jab bhi koi download poora ho (chahe
+      // kisi bhi screen se enqueue hua ho), ek SnackBar dikha do. Individual
+      // screens apna alag listener add kar sakte hain (list-based hai,
+      // isliye ek-doosre ko overwrite nahi karte — dekho
+      // download_queue_service.dart).
+      DownloadQueueService.instance.addFinishListener((song, success) {
+        scaffoldMessengerKey.currentState?.showSnackBar(
+          SnackBar(
+            content: Text(
+              success
+                  ? '"${song.title}" download ho gaya'
+                  : '"${song.title}" download fail ho gaya',
+            ),
+          ),
+        );
+      });
     } catch (e, st) {
       _startupError = 'Startup failed: $e';
       AppLogger.instance.logError('Startup failed', e, st);
@@ -122,6 +141,7 @@ class SurSathiApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider.value(value: CacheService.instance),
+        ChangeNotifierProvider.value(value: DownloadQueueService.instance),
         ChangeNotifierProvider.value(value: LikeService.instance),
         ChangeNotifierProvider.value(value: ThemeService.instance),
         ChangeNotifierProvider.value(value: QueueService.instance),

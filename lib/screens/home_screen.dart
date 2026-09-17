@@ -10,6 +10,7 @@ import '../theme/typography.dart';
 import '../models/song.dart';
 import '../db/liked_db.dart';
 import '../db/cache_db.dart';
+import '../services/download_queue_service.dart';
 import '../services/youtube_service.dart';
 import '../services/background_service.dart';
 import '../services/like_service.dart';
@@ -231,19 +232,22 @@ class _HomeTabContentState extends State<_HomeTabContent> {
     });
   }
 
+  // BUG FIX (v37 — "kaunsa download ho raha hai, kaunsa queue mein hai
+  // kabhi pata nahi chalta"): shared DownloadQueueService use karte hain
+  // (progress notification + queue-state wahi maintain karta hai).
   Future<void> _download(YtResult result) async {
-    final path = await YoutubeService.instance.download(
-      result.id,
-      result.title,
-      author: result.author,
-    );
+    final song = result.toSong();
+    if (DownloadQueueService.instance.isActive(song.id)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('"${song.title}" already download queue mein hai')),
+      );
+      return;
+    }
+    DownloadQueueService.instance.enqueue(song);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          path != null ? '${result.title} download ho gaya' : 'Download fail ho gaya',
-        ),
-      ),
+      SnackBar(content: Text('"${song.title}" download queue mein daal diya')),
     );
   }
 

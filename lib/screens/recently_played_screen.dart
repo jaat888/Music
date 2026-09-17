@@ -13,6 +13,7 @@ import '../models/song.dart';
 import '../services/background_service.dart';
 import '../services/like_service.dart';
 import '../services/queue_service.dart';
+import '../services/download_queue_service.dart';
 import '../services/youtube_service.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
@@ -70,16 +71,21 @@ class _RecentlyPlayedScreenState extends State<RecentlyPlayedScreen> {
     }
   }
 
+  // BUG FIX (v37 — "kaunsa download ho raha hai, kaunsa queue mein hai
+  // kabhi pata nahi chalta"): shared DownloadQueueService use karte hain
+  // (progress notification + queue-state wahi maintain karta hai).
   Future<void> _download(Song song) async {
-    final path = await YoutubeService.instance
-        .download(song.id, song.title, author: song.artist);
+    if (DownloadQueueService.instance.isActive(song.id)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('"${song.title}" already download queue mein hai')),
+      );
+      return;
+    }
+    DownloadQueueService.instance.enqueue(song);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          path != null ? '${song.title} download ho gaya' : 'Download fail ho gaya',
-        ),
-      ),
+      SnackBar(content: Text('"${song.title}" download queue mein daal diya')),
     );
   }
 

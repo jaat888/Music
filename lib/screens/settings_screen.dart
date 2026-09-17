@@ -91,47 +91,77 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _load();
   }
 
+  // BUG FIX (v37 — "settings mein click nahi hota"): pehle is poore
+  // function mein koi try/catch nahi tha. Agar in mein se KOI bhi ek await
+  // (jaise `CacheService.instance.currentSize()` — cache folder abhi tak
+  // bana hi na ho, ya koi bhi `ThemeService` call) kisi bhi wajah se ek
+  // exception throw kar deta, to poora `_load()` future turant reject ho
+  // jaata aur neeche wala `setState(() { ... _loading = false; })` KABHI
+  // chalta hi nahi tha. Result: `_loading` hamesha `true` hi reh jaata,
+  // screen hamesha sirf CircularProgressIndicator dikhati rehti — na koi
+  // tile render hoti na koi tap kaam karta, screen hamesha ke liye "frozen"
+  // lagti thi (bilkul "click nahi hota" jaisa symptom). Fix: har cheez
+  // try/catch mein, aur `_loading = false` ek `finally` mein — kisi ek
+  // setting ke load fail hone se poori screen kabhi na atke, baaki
+  // defaults ke saath hi normal render/tap-response ho.
   Future<void> _load() async {
     setState(() => _loading = true);
-    final prefs = await SharedPreferences.getInstance();
+    try {
+      final prefs = await SharedPreferences.getInstance();
 
-    final themeMode = await ThemeService.instance.getThemeMode();
-    final accent = await ThemeService.instance.getAccent();
-    final fontScale = await ThemeService.instance.getFontScale();
-    final animationSpeed = await ThemeService.instance.getAnimationSpeed();
-    final dynamicColors = await ThemeService.instance.isDynamicColors();
-    final cacheSize = await CacheService.instance.currentSize();
+      final themeMode = await ThemeService.instance.getThemeMode();
+      final accent = await ThemeService.instance.getAccent();
+      final fontScale = await ThemeService.instance.getFontScale();
+      final animationSpeed = await ThemeService.instance.getAnimationSpeed();
+      final dynamicColors = await ThemeService.instance.isDynamicColors();
+      int cacheSize = 0;
+      try {
+        cacheSize = await CacheService.instance.currentSize();
+      } catch (e) {
+        print('SettingsScreen: cache size load fail hua (non-fatal): $e');
+      }
 
-    if (!mounted) return;
-    setState(() {
-      _themeMode = themeMode;
-      _accent = accent;
-      _fontScale = fontScale;
-      _animationSpeed = animationSpeed;
-      _dynamicColors = dynamicColors;
+      if (!mounted) return;
+      setState(() {
+        _themeMode = themeMode;
+        _accent = accent;
+        _fontScale = fontScale;
+        _animationSpeed = animationSpeed;
+        _dynamicColors = dynamicColors;
 
-      _gapless = prefs.getBool(_kGapless) ?? true;
-      _crossfade = prefs.getInt(_kCrossfade) ?? 0;
-      _audioQuality = prefs.getString(_kAudioQuality) ?? 'High';
-      _autoplay = prefs.getBool(_kAutoplay) ?? true;
-      _normalizeVolume = prefs.getBool(_kNormalizeVolume) ?? false;
+        _gapless = prefs.getBool(_kGapless) ?? true;
+        _crossfade = prefs.getInt(_kCrossfade) ?? 0;
+        _audioQuality = prefs.getString(_kAudioQuality) ?? 'High';
+        _autoplay = prefs.getBool(_kAutoplay) ?? true;
+        _normalizeVolume = prefs.getBool(_kNormalizeVolume) ?? false;
 
-      _downloadsWifiOnly = prefs.getBool(_kDownloadsWifiOnly) ?? true;
-      _downloadsAutoCleanup = prefs.getBool(_kDownloadsAutoCleanup) ?? false;
-      _downloadQuality = prefs.getString(_kDownloadQuality) ?? 'High';
+        _downloadsWifiOnly = prefs.getBool(_kDownloadsWifiOnly) ?? true;
+        _downloadsAutoCleanup = prefs.getBool(_kDownloadsAutoCleanup) ?? false;
+        _downloadQuality = prefs.getString(_kDownloadQuality) ?? 'High';
 
-      _autoCache = prefs.getBool(_kAutoCache) ?? true;
-      _preloadNext = prefs.getBool(_kPreloadNext) ?? true;
-      _cacheSize = cacheSize;
+        _autoCache = prefs.getBool(_kAutoCache) ?? true;
+        _preloadNext = prefs.getBool(_kPreloadNext) ?? true;
+        _cacheSize = cacheSize;
 
-      _notifNowPlaying = prefs.getBool(_kNotifNowPlaying) ?? true;
-      _notifNewReleases = prefs.getBool(_kNotifNewReleases) ?? true;
-      _notifSoundVibration = prefs.getBool(_kNotifSoundVibration) ?? true;
+        _notifNowPlaying = prefs.getBool(_kNotifNowPlaying) ?? true;
+        _notifNewReleases = prefs.getBool(_kNotifNewReleases) ?? true;
+        _notifSoundVibration = prefs.getBool(_kNotifSoundVibration) ?? true;
 
-      _privateSession = prefs.getBool(_kPrivateSession) ?? false;
-
-      _loading = false;
-    });
+        _privateSession = prefs.getBool(_kPrivateSession) ?? false;
+      });
+    } catch (e) {
+      print('SettingsScreen: _load() fail hua: $e');
+      if (mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _snack('Kuch settings load nahi ho payi — defaults dikha rahe hain');
+        });
+      }
+    } finally {
+      // Chahe upar kuch bhi fail ho jaaye, screen kabhi bhi hamesha ke
+      // liye loading spinner pe atki na rahe — hamesha tiles render/tap
+      // hone chahiye.
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   Future<void> _setBool(String key, bool value, VoidCallback update) async {

@@ -86,6 +86,56 @@ class NotificationService {
     await _plugin.cancel(_nowPlayingId);
   }
 
+  // NEW (v37 — "download waale mein kaunsa download ho raha hai, kaunsa
+  // queue mein hai kabhi nahi dikhta"): ek hi persistent progress
+  // notification (fixed id) — jo currently-downloading song ka naam +
+  // % progress dikhaye, aur agar aur gaane queue mein bache hain to
+  // "N aur gaane queue mein" bhi. DownloadQueueService ise har progress
+  // tick pe update karta hai.
+  static const int _downloadProgressId = 1002;
+
+  Future<void> showDownloadProgress({
+    required String songTitle,
+    required int progressPercent, // 0-100
+    required int queuedCount,
+  }) async {
+    if (!_initialized) await init();
+
+    final body = queuedCount > 0
+        ? '$progressPercent% • $queuedCount aur gaane queue mein baaki'
+        : '$progressPercent%';
+
+    final androidDetails = AndroidNotificationDetails(
+      generalChannelId,
+      'SurSathi Updates',
+      channelDescription: 'Downloads aur general app notifications',
+      importance: Importance.low,
+      priority: Priority.low,
+      ongoing: true,
+      onlyAlertOnce: true,
+      playSound: false,
+      showProgress: true,
+      maxProgress: 100,
+      progress: progressPercent.clamp(0, 100).toInt(),
+      // progressPercent 0 hone par bhi (stream ka contentLength na mile
+      // to hota hai) ek indeterminate bar dikhao, "kuch nahi ho raha"
+      // jaisa na lage.
+      indeterminate: progressPercent <= 0,
+    );
+    final details = NotificationDetails(android: androidDetails);
+
+    await _plugin.show(
+      _downloadProgressId,
+      'Download ho raha hai: $songTitle',
+      body,
+      details,
+    );
+  }
+
+  Future<void> cancelDownloadProgress() async {
+    await _plugin.cancel(_downloadProgressId);
+  }
+
   // Simple one-off notification — download complete, error, etc.
   Future<void> showGeneral({
     required String title,

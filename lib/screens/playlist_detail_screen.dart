@@ -15,6 +15,7 @@ import '../db/liked_db.dart';
 import '../db/cache_db.dart';
 import '../db/download_db.dart';
 import '../services/background_service.dart';
+import '../services/download_queue_service.dart';
 import '../services/queue_service.dart';
 import '../services/like_service.dart';
 import '../services/youtube_service.dart';
@@ -64,6 +65,22 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   void initState() {
     super.initState();
     _load();
+    // BUG FIX (v37): ek dedicated listener (single field ki jagah list-
+    // based, dekho download_queue_service.dart) — sirf isi screen ki
+    // _downloadedIds update karta hai, kisi aur (jaise main.dart ka global
+    // SnackBar) listener ko overwrite nahi karta. dispose() mein hataana
+    // zaroori hai warna screen band hone ke baad bhi ye reference rukega.
+    DownloadQueueService.instance.addFinishListener(_onDownloadFinished);
+  }
+
+  void _onDownloadFinished(Song song, bool success) {
+    if (success && mounted) setState(() => _downloadedIds.add(song.id));
+  }
+
+  @override
+  void dispose() {
+    DownloadQueueService.instance.removeFinishListener(_onDownloadFinished);
+    super.dispose();
   }
 
   // BATCH 14B: PlaylistDB.getPlaylistSongs() ab seedha List<Song> deta hai
@@ -153,14 +170,20 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
       );
       return;
     }
-    final path = await YoutubeService.instance.download(song.id, song.title, author: song.artist);
+    // BUG FIX (v37 — download queue/progress visibility): shared
+    // DownloadQueueService use karte hain; jab wo poora ho jaaye to
+    // _downloadedIds update kar do taaki UI turant reflect kare.
+    if (DownloadQueueService.instance.isActive(song.id)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('"${song.title}" already download queue mein hai')),
+      );
+      return;
+    }
+    DownloadQueueService.instance.enqueue(song);
     if (!mounted) return;
-    if (path != null) setState(() => _downloadedIds.add(song.id));
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content:
-            Text(path != null ? '${song.title} download ho gaya' : 'Download fail ho gaya'),
-      ),
+      SnackBar(content: Text('"${song.title}" download queue mein daal diya')),
     );
   }
 

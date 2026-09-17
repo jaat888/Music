@@ -13,6 +13,7 @@ import '../models/song.dart';
 import '../db/download_db.dart';
 import '../db/liked_db.dart';
 import '../services/background_service.dart';
+import '../services/download_queue_service.dart';
 import '../services/like_service.dart';
 import '../services/queue_service.dart';
 import '../widgets/song_card.dart';
@@ -35,6 +36,19 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   void initState() {
     super.initState();
     _load();
+    // BUG FIX (v37 — "downloads mein kaunsa queue mein hai kabhi nahi
+    // dikhta"): jab bhi koi download poora ho, list turant refresh karo.
+    DownloadQueueService.instance.addFinishListener(_onDownloadFinished);
+  }
+
+  void _onDownloadFinished(Song song, bool success) {
+    if (mounted) _load();
+  }
+
+  @override
+  void dispose() {
+    DownloadQueueService.instance.removeFinishListener(_onDownloadFinished);
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -128,10 +142,84 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
       body: SafeArea(
         child: Column(
           children: [
+            // NEW (v37 — "kaunsa download ho raha hai, kaunsa queue mein
+            // hai kabhi nahi dikhta"): DownloadQueueService ek
+            // ChangeNotifier hai — ListenableBuilder se seedha listen
+            // karke, jab bhi progress/queue badle, ye section turant
+            // rebuild ho jaata hai (koi extra Provider setup ki zaroorat
+            // nahi).
+            ListenableBuilder(
+              listenable: DownloadQueueService.instance,
+              builder: (context, _) => _buildQueueSection(),
+            ),
             Expanded(child: _buildBody()),
             _MiniPlayerBar(),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildQueueSection() {
+    final q = DownloadQueueService.instance;
+    final current = q.currentSong;
+    if (current == null && q.queue.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: kBgElev,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: kGreen.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (current != null) ...[
+            Row(
+              children: [
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: kGreen),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Download ho raha hai: ${current.title}',
+                    style: AppText.bodyM(color: kText),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Text(
+                  '${(q.currentProgress * 100).round()}%',
+                  style: AppText.bodyS(color: kGreen),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: q.currentProgress > 0 ? q.currentProgress : null,
+                minHeight: 4,
+                color: kGreen,
+                backgroundColor: kSurface,
+              ),
+            ),
+          ],
+          if (q.queue.isNotEmpty) ...[
+            if (current != null) const SizedBox(height: 10),
+            Text(
+              '${q.queue.length} gaana queue mein baaki: '
+              '${q.queue.take(3).map((s) => s.title).join(", ")}'
+              '${q.queue.length > 3 ? "..." : ""}',
+              style: AppText.bodyS(color: kTextDim),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ],
       ),
     );
   }

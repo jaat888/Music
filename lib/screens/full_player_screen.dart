@@ -476,8 +476,20 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                     ),
                                     const SizedBox(height: 20),
                                     Row(
+                                      // BUG FIX (v37 — "buttons ganda lagte
+                                      // hain"): pehle `center` + sirf play
+                                      // button ke aas-paas chhote manual
+                                      // SizedBox gaps the — shuffle/repeat
+                                      // dono edges ke paas ek saath chipke
+                                      // rehte the aur beech mein bahut zyada
+                                      // khaali jagah ban jaati thi (screenshot
+                                      // wahi dikha raha tha). `spaceEvenly` se
+                                      // saare 5 controls poori row-width mein
+                                      // barabar-barabar spaced dikhte hain —
+                                      // jaisa Spotify/YT Music jaise apps mein
+                                      // hota hai.
                                       mainAxisAlignment:
-                                          MainAxisAlignment.center,
+                                          MainAxisAlignment.spaceEvenly,
                                       children: [
                                         IconButton(
                                           icon: Icon(
@@ -485,20 +497,34 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                             color: queueService.shuffle
                                                 ? kGreen
                                                 : kTextDim,
+                                            // BUG FIX (v37): pehle iska koi
+                                            // explicit size nahi tha (default
+                                            // ~24, lekin skip_previous/next se
+                                            // bahut chhota/dim dikh raha tha,
+                                            // asymmetric lagta tha). Ab
+                                            // shuffle/repeat dono ek jaisa
+                                            // consistent size use karte hain.
+                                            size: 22,
                                           ),
                                           onPressed: () =>
                                               _toggleShuffle(queueService),
                                         ),
                                         IconButton(
-                                          icon:  Icon(
+                                          icon: Icon(
                                             Icons.skip_previous,
                                             color: kText,
-                                            size: 44,
+                                            // BUG FIX (v37): 44 bahut bada tha
+                                            // — play button (70) ke bagal
+                                            // mein bhi bhaari/unbalanced
+                                            // dikhta tha. 34 par prev/next
+                                            // clearly secondary lagte hain,
+                                            // play button hi visually sabse
+                                            // bada/primary rehta hai.
+                                            size: 34,
                                           ),
                                           onPressed: () =>
                                               audioHandler.skipToPrevious(),
                                         ),
-                                        const SizedBox(width: 8),
                                         // NEW (2026-09-16): error state me
                                         // pehle bhi yahi AnimatedPlayButton
                                         // dikhta rehta tha (isPlaying=false
@@ -565,12 +591,11 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                             );
                                           },
                                         ),
-                                        const SizedBox(width: 8),
                                         IconButton(
-                                          icon:  Icon(
+                                          icon: Icon(
                                             Icons.skip_next,
                                             color: kText,
-                                            size: 44,
+                                            size: 34,
                                           ),
                                           onPressed: () =>
                                               audioHandler.skipToNext(),
@@ -583,6 +608,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                                         SurRepeatMode.off
                                                     ? kTextDim
                                                     : kGreen,
+                                            size: 22,
                                           ),
                                           onPressed: () =>
                                               _cycleRepeat(queueService),
