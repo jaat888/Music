@@ -106,6 +106,14 @@ class YtResult {
       );
 }
 
+// NEW (Batch 30): ek page of search results + agla page laane ke liye
+// continuation token (null = is query ke liye aur results nahi bache).
+class YtSearchPage {
+  final List<YtResult> items;
+  final String? continuation;
+  YtSearchPage(this.items, this.continuation);
+}
+
 // Artist search result — naya "Artists" search tab ke liye (dekho search()
 // ke saath searchArtists()).
 class YtArtistResult {
@@ -467,6 +475,37 @@ class YoutubeService {
   // (asli continuation token se). Khaali list wapas aane ka matlab hai
   // YouTube ke paas is query ke liye aur results nahi bache — list yahi
   // khatam maano.
+  // NEW (Batch 30 — home feed genuinely infinite fix): "next page" chahiye
+  // ho EK SE ZYADA queries ke liye EK SAATH (jaisa Home feed ke rotating
+  // "X — aur gaane" categories ko chahiye) — `loadMoreSearchResults()`
+  // (upar) sirf EK active query ka continuation track karta hai (Search
+  // screen ke liye theek hai, jahan ek waqt me sirf ek hi query hoti hai).
+  // Ye naya method STATELESS hai — caller khud apna continuation token
+  // sambhal ke rakhta hai (per-category Map), isliye 12 alag categories
+  // apna-apna alag "next page" state independently maintain kar sakte
+  // hain, bina ek-dusre ka continuation overwrite kiye.
+  Future<YtSearchPage> searchPage(String query, {String? continuation}) async {
+    try {
+      final page =
+          await _innertube.searchSongs(query, continuation: continuation);
+      return YtSearchPage(
+        page.items
+            .map((s) => YtResult(
+                  id: s.id,
+                  title: s.title,
+                  author: s.author,
+                  thumb: s.thumb,
+                  duration: s.duration,
+                ))
+            .toList(),
+        page.continuation,
+      );
+    } catch (e) {
+      print('YT searchPage ERROR ($query): $e');
+      return YtSearchPage(const [], null);
+    }
+  }
+
   Future<List<YtResult>> loadMoreSearchResults(
     String query, {
     YtDateFilter dateFilter = YtDateFilter.relevance,

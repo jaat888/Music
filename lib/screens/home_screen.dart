@@ -160,17 +160,24 @@ class _HomeTabContentState extends State<_HomeTabContent> {
   bool _loadingMoreSections = false;
   final ScrollController _scrollController = ScrollController();
 
-  // NEW (2026-09-17, HONEST fix — "neeche aur playlist generate nahi ho
-  // rahi, pehle jaisa hai"): `getHomeSections()` khud FINITE hai (upar
-  // wala HONESTY NOTE dekho) — ek baar `_homeSections` khatam ho jaaye to
-  // us list se aage kabhi kuch naya nahi milega, scroll "dead end" ho
-  // jaata tha. Ab jab curated sections khatam ho jaate hain, feed khud
-  // `_kCategories` (12 categories) ko ek-ek karke asli
-  // `YoutubeService.search()` se fetch karke naye sections banata rehta
-  // hai — aur 12 khatam hone par wapas pehli category se cycle kar deta
-  // hai, taaki scroll sach me kabhi "khatam" na ho.
+  // NEW (Batch 30 — user ne pichla "stop after 12" fix reject kiya:
+  // "YouTube se AUR playlist fetch karne the, tune pura hi band kar
+  // diya"): pehle categories khatam hone par modulo se REPEAT hote the
+  // (same query, same 12 results baar-baar) — wo asli bug tha. Uska
+  // pehla fix sirf "12 ke baad ruk jao" tha, jo user ko pasand nahi aaya
+  // kyunki feed genuinely infinite nahi raha. ASLI sahi fix: har
+  // category ka apna continuation token (YouTube ka real "next page"
+  // pagination, `youtube_service.dart searchPage()`) alag se yaad
+  // rakho — isliye jab category cycle karke wapas aati hai, wahi purane
+  // 12 gaane nahi, us category ka AGLA page (naye 12 gaane) aata hai.
+  // Sirf tab woh category permanently skip hoti hai jab YouTube khud
+  // keh de "is query ke liye aur results nahi" (continuation == null).
   int _extraCategoryCursor = 0;
   final List<_ExtraSection> _extraSections = [];
+  // category name -> agla continuation token (null = pehla page abhi tak nahi maanga)
+  final Map<String, String?> _categoryContinuation = {};
+  // category jinke liye YouTube ne khud bola "aur results nahi bache"
+  final Set<String> _categoryExhausted = {};
 
   @override
   void initState() {
@@ -196,9 +203,11 @@ class _HomeTabContentState extends State<_HomeTabContent> {
     if (pos.pixels < pos.maxScrollExtent - 400) return;
     if (_visibleSectionCount < _homeSections.length) {
       _revealMoreSections();
-    } else {
-      // Curated feed khatam ho chuka — ab category-search se agla section
-      // generate karo (dekho upar wala NOTE).
+    } else if (_categoryExhausted.length < _kCategories.length) {
+      // Curated feed khatam ho chuka — ab category-search se agla
+      // (genuinely NAYA — continuation-paginated) section generate karo.
+      // Jab tak KAM SE KAM ek category ke paas aur pages bache hain,
+      // scroll kabhi "dead end" nahi hoga.
       _loadMoreExtraCategory();
     }
   }
@@ -219,19 +228,40 @@ class _HomeTabContentState extends State<_HomeTabContent> {
 
   Future<void> _loadMoreExtraCategory() async {
     setState(() => _loadingMoreSections = true);
-    final cat = _kCategories[_extraCategoryCursor % _kCategories.length];
-    _extraCategoryCursor++;
     try {
-      final results = await YoutubeService.instance.search(cat.query, max: 12);
-      if (mounted && results.isNotEmpty) {
-        setState(() {
-          _extraSections.add(_ExtraSection(title: '${cat.emoji} ${cat.name} — aur gaane', songs: results));
-        });
+      // Cycle karte hue agli NON-EXHAUSTED category dhoondo (max ek poora
+      // chakkar — agar sab exhausted hain to bahar nikal jao, upar wala
+      // `_onScroll` guard waise bhi isko yahan tak aane hi nahi dega).
+      for (var tries = 0; tries < _kCategories.length; tries++) {
+        final cat = _kCategories[_extraCategoryCursor % _kCategories.length];
+        _extraCategoryCursor++;
+        if (_categoryExhausted.contains(cat.name)) continue;
+
+        final page = await YoutubeService.instance.searchPage(
+          cat.query,
+          continuation: _categoryContinuation[cat.name],
+        );
+        _categoryContinuation[cat.name] = page.continuation;
+        if (page.continuation == null) _categoryExhausted.add(cat.name);
+
+        if (page.items.isNotEmpty) {
+          if (mounted) {
+            setState(() {
+              _extraSections.add(_ExtraSection(
+                title: '${cat.emoji} ${cat.name} — aur gaane',
+                songs: page.items,
+              ));
+            });
+          }
+          break; // is scroll-trigger ke liye ek section kaafi hai
+        }
+        // Khaali page mila (par exhausted nahi) — agli category try karo
+        // isi loop ke andar, taaki scroll "kuch nahi hua" jaisa na lage.
       }
     } catch (e) {
       // Ek category fail ho to bhi scroll "atka hua" nahi lagega — agli
       // baar scroll karne pe agli category try hogi.
-      print('HOME extra-category ERROR ($cat): $e');
+      print('HOME extra-category ERROR: $e');
     } finally {
       if (mounted) setState(() => _loadingMoreSections = false);
     }
@@ -305,6 +335,8 @@ class _HomeTabContentState extends State<_HomeTabContent> {
         // ke baad purani "aur gaane" sections dobara se cycle honi chahiye.
         _extraSections.clear();
         _extraCategoryCursor = 0;
+        _categoryContinuation.clear();
+        _categoryExhausted.clear();
         // TEMPORARY debug info — agar dono (live feed + fallback) khaali
         // hain par exception nahi aayi, to ye batata hai ki YouTube ne
         // genuinely 0 results diye (rate-limit ya query issue), exception

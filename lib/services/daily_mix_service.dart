@@ -75,13 +75,23 @@ class DailyMixService {
   // hai par radio-pull fail ho raha".
   String? lastDebugInfo;
 
-  String get _today {
+  // CHANGE (Batch 30 — user request: "personalization user jo sunta hai
+  // usse update hona chahiye, har 4 hr mein"): pehle ye poore CALENDAR
+  // DIN (date-string) ke hisaab se cache hota tha — matlab subah pehli
+  // baar bana Mix raat tak bilkul wahi rehta tha, chahe user ne dopahar
+  // tak 50 naye gaane kyun na sun liye ho. Ab har 4-ghante ka apna alag
+  // bucket hai (raat 12-4, 4-8, 8-12, ...) — din mein 6 baar khud-ba-khud
+  // fresh Mix banega, jo us waqt tak ki latest listening history use
+  // karega.
+  String get _periodKey {
     final now = DateTime.now();
-    return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    final bucket = now.hour ~/ 4; // 0-5 (4 ghante ka har block)
+    return '${now.year}-${now.month.toString().padLeft(2, '0')}-'
+        '${now.day.toString().padLeft(2, '0')}-b$bucket';
   }
 
   Future<List<DailyMix>> getTodaysMixes() async {
-    final today = _today;
+    final today = _periodKey;
     if (_memoryCache != null && _memoryCacheDate == today) {
       return _memoryCache!;
     }
@@ -95,9 +105,19 @@ class DailyMixService {
           final mixes = (decoded['mixes'] as List)
               .map((m) => DailyMix.fromJson(m as Map<String, dynamic>))
               .toList();
-          _memoryCache = mixes;
-          _memoryCacheDate = today;
-          return mixes;
+          // BUG FIX: purana build isi (khaali) result ko yahan bhi valid
+          // maan ke return kar deta tha — agar user ke phone pe pehle se
+          // ek khaali `daily_mix_cache_v1` (aaj ki date ke saath) pada hai
+          // is bug ki wajah se, to naya fix bhi kabhi trigger nahi hota
+          // (kyunki yahi read-path pehle hi return kar deta). Ab khaali
+          // stored cache ko IGNORE karke neeche fresh generate karte hain
+          // — isse purana atka hua state bhi khud-ba-khud theek ho jaata
+          // hai, app data clear karne ki zaroorat nahi.
+          if (mixes.isNotEmpty) {
+            _memoryCache = mixes;
+            _memoryCacheDate = today;
+            return mixes;
+          }
         }
       } catch (_) {
         // Corrupt cache — bas fresh generate kar lo.
@@ -105,6 +125,21 @@ class DailyMixService {
     }
 
     final mixes = await _generate();
+    // BUG FIX (user report: "history nahi thi tab khaali aaya, history
+    // banne ke baad bhi khaali hi aa raha"): pehle EMPTY result (jab
+    // abhi tak koi play-history nahi thi) bhi memory AUR disk dono me
+    // poore din ke liye cache ho jaata tha. Matlab: agar app pehli baar
+    // kholi (history = 0 songs) aur Daily Mix khaali aaya, to us DIN ke
+    // baaki hisse me — chahe usi session me user 10 gaane sun le — Daily
+    // Mix hamesha khaali hi dikhta rehta tha, kyunki cache sirf DATE
+    // badalne pe invalidate hota tha, history badalne pe nahi. Fix:
+    // khaali result ko KAHIN bhi cache mat karo (na memory, na disk) —
+    // agli baar getTodaysMixes() call hone par (Home screen dobara khulne
+    // par) fresh history ke saath turant dobara try hoga. Sirf ASLI
+    // (non-empty) result poore din ke liye cache hota hai — wahi mehenga
+    // radio-pull wala kaam hai jise bachana zaroori hai.
+    if (mixes.isEmpty) return mixes;
+
     _memoryCache = mixes;
     _memoryCacheDate = today;
     try {

@@ -683,17 +683,28 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       // Played"/"Most Played" ke liye. Fire-and-forget, playback ko kabhi
       // block/fail nahi karega.
       unawaited(PlayHistoryDB.instance.recordPlay(song));
-      // NEW (v41 — user request): "jo gaana play ho wo automatic download
-      // ho jaaye" — settings me OFF-by-default toggle. Fire-and-forget,
-      // playback ko kabhi block nahi karega, aur DownloadQueueService khud
-      // hi already-downloading/already-downloaded duplicate check karta
-      // hai — isliye yahan seedha enqueue karna safe hai.
-      unawaited(_maybeAutoDownload(song));
       // Playback successfully shuru ho gaya — stream-drop retry counter
       // reset karo taaki agli baar drop hone pe wapas poore 3 attempts milein.
       _streamErrorRetries = 0;
       // Cache background me ho jaaye — playback ruke bina
-      unawaited(_autoCacheInBackground(song, url));
+      final cacheFuture = _autoCacheInBackground(song, url);
+      unawaited(cacheFuture);
+      // BUG FIX (2026-09-17 — user report: "auto-download cache se nahi
+      // aata, seedha download mein laga deta hai"): pehle
+      // `_maybeAutoDownload()` `_autoCacheInBackground()` se PEHLE call
+      // hota tha (dono `unawaited`/parallel) — matlab jab tak auto-cache
+      // ka network download poora hokar CacheDB mein likha jaata, tab tak
+      // auto-download queue ka worker already `youtube_service.download()`
+      // chala chuka hota tha aur cache-row abhi khaali paata (race
+      // condition) — isliye cache-copy shortcut kabhi mil hi nahi paata
+      // tha aur har baar poora naya (duplicate) network download hota
+      // tha. Ab auto-download ko auto-cache ke COMPLETE hone ke BAAD
+      // trigger karte hain — cache-row hamesha ready milega, cache-copy
+      // shortcut (`youtube_service.dart download()` mein already maujood)
+      // ab guaranteed use hoga. Agar auto-cache fail bhi ho jaaye, `.then`
+      // fir bhi chalta hai — `download()` khud normal network-fallback
+      // path use kar lega, koi crash/deadlock nahi.
+      unawaited(cacheFuture.then((_) => _maybeAutoDownload(song)));
       // Agla gaana bhi abhi se resolve karna shuru kar do (instant next ke liye)
       _prefetchNext();
     } catch (e) {
@@ -874,6 +885,13 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         // history me record hona chahiye, warna offline-heavy users ke
         // liye "Most/Never Played" hamesha khali/galat rahega.
         unawaited(PlayHistoryDB.instance.recordPlay(song));
+        // BUG FIX (isi session — auto-download sirf network-play path pe
+        // trigger hota tha, is local-file-first path pe bilkul nahi thi).
+        // Ab agar ye gaana sirf CACHE me tha (Download me nahi) aur
+        // auto-download ON hai, wahan bhi trigger hoga — `_maybeAutoDownload`
+        // khud DownloadDB check karta hai, isliye already-downloaded case
+        // me ye turant harmless no-op hoga.
+        unawaited(_maybeAutoDownload(song));
         // LRU freshen karo taaki abhi-abhi replay hua gaana jaldi evict
         // na ho (pichla/replay hua gaana cache me tika rahe).
         await CacheDB.instance.update(

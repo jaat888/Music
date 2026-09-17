@@ -21,7 +21,97 @@
 >    sleep-timer icon ab actual state (on/off) reflect karte hain. Inhe wapas
 >    static grey icon mat banao — user ne specifically iski request ki thi.
 
-## Batch 28 (2026-09-17) — "4MB ke gaane ko 1 min lagta hai, atka hua lagta hai" + laggy animation
+## Batch 30 (2026-09-17) — Batch 29 ke 2 fixes properly redo (user ne reject kiya)
+
+User ne Batch 29 ke 2 changes pe feedback diya ki wo galat approach the:
+
+1. **Daily Mix refresh cadence** — sirf "khaali result cache mat karo"
+   kaafi nahi tha; user chahte hain personalization **har 4 ghante**
+   khud-ba-khud refresh ho (jaisa listening pattern din mein badalta
+   rehta hai), poore CALENDAR DIN ke liye nahi. **Fix:** cache key ab
+   date + "4-hour bucket" (`_periodKey`, `daily_mix_service.dart`) hai —
+   din mein 6 baar (00-04, 04-08, ... 20-24) khud naya Mix generate hota
+   hai, latest history ke saath.
+
+2. **Home feed "aur gaane" section** — Batch 29 ka fix ("12 categories
+   dikhne ke baad scroll ruk jao") user ko pasand nahi aaya: "YouTube se
+   AUR playlist fetch karne the, tune pura hi badal diya, ab sirf repeat
+   hi aayega" — matlab woh chahte the genuinely NAYA content aata rahe,
+   bas rukna nahi chahiye THA (jo purana behavior "12 ke baad wapas
+   Bollywood se same 12 gaane" karta tha, wahi asli buggy repeat tha,
+   sirf "band kar dena" uska sahi fix nahi tha).
+
+   **Asli sahi fix:** `youtube_service.dart` me naya `searchPage(query,
+   continuation)` method (stateless, per-caller apna continuation token
+   sambhalta hai — `loadMoreSearchResults()` jaisa hi mechanism jo Search
+   screen already use karta hai, bas usse independent state, taaki 12
+   alag categories ek-dusre ka pagination overwrite na karein).
+   `home_screen.dart` ab har category ka apna `continuation` token yaad
+   rakhta hai (`_categoryContinuation` map) — jab category cycle karke
+   wapas aati hai, YouTube se us category ka **agla page** (naye 12
+   gaane) aata hai, purane 12 nahi. Category sirf tab permanently skip
+   hoti hai jab YouTube khud bole "is query ke liye aur results nahi"
+   (`continuation == null`) — `_categoryExhausted` set. Jab tak kam se
+   kam ek category ke paas aur pages hain, scroll kabhi dead-end nahi
+   hoga, aur koi bhi do consecutive pages same nahi honge.
+
+## Batch 29 (2026-09-17) — Daily Mix stuck-empty bug, home-feed infinite repeat, auto-download race condition
+
+**Ask (3 alag reports):**
+1. Daily Mix — shuru mein (history khaali thi) ek baar khaali aaya, uske
+   baad history ban jaane ke baad bhi khaali hi dikhta raha.
+2. Home screen ke neeche wala "X — aur gaane" section Search screen jaisa
+   hi content dikhata hai aur baar-baar (repeat) aata hai scroll karte waqt.
+3. "Auto-download on Play" setting cache ka fayda nahi utha rahi — har
+   baar poora fresh network download kar deti hai, jabki gaana usi waqt
+   cache bhi ho raha hota hai.
+
+**Fixes:**
+
+- **`daily_mix_service.dart`** — 2 jagah bug tha:
+  - `_generate()` se khaali result (`[]`, jab history hi nahi thi) memory
+    AUR SharedPreferences dono me `today` ki date ke saath cache ho jaata
+    tha. Cache sirf DATE badalne pe invalidate hota tha, history badalne
+    pe nahi — isliye "history ban gayi lekin abhi bhi khaali dikh raha"
+    exactly isi wajah se ho raha tha. **Fix:** khaali result ab kahin bhi
+    cache nahi hota — agli baar Home screen khulne/refresh hone par turant
+    dobara try hoga.
+  - Isse bhi zaroori: user ke phone pe is bug ki wajah se **already ek
+    khaali cache disk pe pada hoga** (aaj ki date ke saath) — sirf upar
+    wala fix isse khud theek nahi karta (purana khaali cache read hoke
+    return ho jaata, naya code kabhi chalta hi nahi). Isliye read-path
+    mein bhi fix kiya: agar stored cache khaali nikle to use IGNORE karke
+    fresh generate karo. Isse purana atka hua state bhi apne aap (agli
+    Home-load pe) theek ho jaayega — app data clear karne ki zaroorat
+    nahi.
+
+- **`home_screen.dart`** — infinite-scroll ke "extra category sections"
+  (`_kCategories`, sirf 12 fixed categories: Bollywood/Punjabi/etc.) sab
+  12 dikhne ke baad **modulo (`% _kCategories.length`) se wapas Bollywood
+  se cycle** kar jaate the — infinite loop mein wahi 12 sections (bilkul
+  same static query, bilkul same results, kyunki har "X — aur gaane"
+  section `YoutubeService.search()` — wahi function jo Search screen
+  khud use karta hai — se banta hai) baar-baar dikhte rehte the. **Fix:**
+  saare 12 ek-ek baar dikhne ke baad scroll simply ruk jaata hai, koi
+  naya duplicate section nahi jodta — feed genuinely khatam hota hai.
+
+- **`background_service.dart`** — asli race condition mili: `_playSong()`
+  mein `_maybeAutoDownload(song)` aur `_autoCacheInBackground(song, url)`
+  dono `unawaited` (parallel) chalte the, aur `_maybeAutoDownload` PEHLE
+  call hota tha. `youtube_service.dart`'s `download()` mein pehle se
+  "agar cache mein hai to seedha copy karo, dobara download mat karo"
+  wala shortcut maujood tha (kisi purani session ka fix) — lekin cache
+  abhi likha hi nahi gaya hota tha jab tak auto-download check karta,
+  isliye cache-row hamesha khaali milta aur shortcut kabhi trigger hi
+  nahi hota tha — har baar poora fresh (duplicate) network download hota
+  tha. **Fix:** auto-download ab auto-cache ke COMPLETE hone ke *baad*
+  (`.then()`) trigger hota hai — cache-row hamesha ready milega, cache-
+  copy shortcut ab guaranteed use hoga (turant, koi extra network call
+  nahi). Ek aur jagah bhi yehi missing tha — jab gaana already sirf-
+  cache (download nahi) se seedha bajta hai (local-file-first path),
+  wahan auto-download trigger hi nahi hota tha; ab wahan bhi hai.
+
+
 
 **Ask (screenshot ke saath, download queue section circled):** download
 abhi bhi slow feel hota hai chhote files ke liye bhi, aur us section ki
