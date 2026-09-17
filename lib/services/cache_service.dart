@@ -5,6 +5,8 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+
+import 'like_service.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -16,7 +18,10 @@ class CacheService extends ChangeNotifier {
   CacheService._internal();
   static final CacheService instance = CacheService._internal();
 
-  static const int defaultLimitBytes = 3 * 1024 * 1024 * 1024; // 3GB (user ki request pe 2GB se badhaya)
+  static const int defaultLimitBytes = 3 * 1024 * 1024 * 1024; // 3GB safety ceiling
+  // Part 6: last 15 non-favorite played songs stay in local cache.
+  // Favorites are protected and do not consume this 15-song rotation.
+  static const int maxRecentPlayedSongs = 15;
   static const String _keyLimit = 'cache_limit_bytes';
   static const String _keyWifiOnly = 'cache_wifi_only';
 
@@ -27,9 +32,12 @@ class CacheService extends ChangeNotifier {
     return _prefs!;
   }
 
-  // Cache folder — app ke temporary/cache directory ke andar
+  // Cache folder — app-private support storage. Unlike the OS temporary
+  // directory, this is not treated as disposable cache storage, so the
+  // recent-15 playback files remain available for Previous/replay until our
+  // own eviction policy removes them.
   Future<Directory> getAudioCacheDir() async {
-    final baseDir = await getTemporaryDirectory();
+    final baseDir = await getApplicationSupportDirectory();
     final dir = Directory(p.join(baseDir.path, 'sursathi_cache'));
     if (!await dir.exists()) {
       await dir.create(recursive: true);
@@ -67,13 +75,27 @@ class CacheService extends ChangeNotifier {
   }
 
   // Song ko cache me daalo — pehle size check, fir DB entry, fir limit enforce
-  Future<void> cacheSong(Song song, String filePath) async {
+  Future<void> cacheSong(
+    Song song,
+    String filePath, {
+    bool markAsPlayed = false,
+  }) async {
     final file = File(filePath);
     if (!await file.exists()) return;
     final size = await file.length();
 
-    await CacheDB.instance.add(song: song, filePath: filePath, size: size);
+    // Determine protection BEFORE insertion/enforcement so a liked song never
+    // passes through an unprotected eviction window.
+    final isLiked = await LikeService.instance.isLiked(song.id);
+    await CacheDB.instance.add(
+      song: song,
+      filePath: filePath,
+      size: size,
+      protectedFlag: isLiked ? 1 : 0,
+      markAsPlayed: markAsPlayed,
+    );
     await enforceLimit();
+    await enforceRecentPlayedLimit();
     notifyListeners();
   }
 
@@ -99,6 +121,31 @@ class CacheService extends ChangeNotifier {
       }
       await CacheDB.instance.delete(id);
       total -= size;
+    }
+  }
+
+  /// Keep only the 15 most recently played NON-FAVORITE cached songs.
+  /// Protected/liked songs are intentionally never evicted by this rule.
+  Future<void> enforceRecentPlayedLimit() async {
+    while (await CacheDB.instance.countUnprotectedPlayed() > maxRecentPlayedSongs) {
+      final oldest = await CacheDB.instance.getOldestUnprotectedPlayed();
+      if (oldest == null) break;
+
+      final filePath = oldest['file_path'] as String?;
+      final id = oldest['id'] as String;
+      if (filePath != null && filePath.isNotEmpty) {
+        final file = File(filePath);
+        if (await file.exists()) {
+          try {
+            await file.delete();
+          } catch (_) {
+            // DB entry is kept if deletion temporarily fails; retry on the
+            // next cache operation instead of breaking playback.
+            break;
+          }
+        }
+      }
+      await CacheDB.instance.delete(id);
     }
   }
 

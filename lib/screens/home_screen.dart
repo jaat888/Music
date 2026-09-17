@@ -29,6 +29,7 @@ import 'live_playlist_screen.dart';
 import 'daily_mix_screen.dart';
 import 'debug_screen.dart';
 import 'settings_screen.dart';
+import 'radio_language_select_screen.dart';
 
 // Home ki 12 categories — naam, emoji, search query
 class _Category {
@@ -640,6 +641,26 @@ class _HomeTabContentState extends State<_HomeTabContent> {
                       const SizedBox(width: 8),
                       Text('SurSathi', style: AppText.displayM(color: kGreen)),
                       const Spacer(),
+                      // Radio Mode — Phase 9 entry point. Keep this as a
+                      // lightweight additive hook: tapping the icon opens the
+                      // existing Radio language/session flow directly.
+                      Semantics(
+                        button: true,
+                        label: 'Open Radio Mode',
+                        child: IconButton(
+                          tooltip: 'Radio Mode',
+                          icon: const Icon(Icons.radio_rounded),
+                          color: kTextDim,
+                          splashRadius: 22,
+                          onPressed: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => const RadioLanguageSelectScreen(),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
                       // Debug screen — YouTube search/stream troubleshooting
                       IconButton(
                         icon: Icon(Icons.bug_report, color: kTextDim),

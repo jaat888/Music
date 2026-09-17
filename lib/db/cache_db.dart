@@ -3,6 +3,7 @@
 // (jo protected nahi hain) hataane ke kaam aata hai.
 
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:sqflite/sqflite.dart';
 
@@ -30,9 +31,36 @@ class CacheDB {
     required Song song,
     required String filePath,
     required int size,
+    int? protectedFlag,
+    bool markAsPlayed = false,
   }) async {
     final db = await _database;
+    // Preserve an existing protected flag when refreshing an already-cached
+    // favorite. Replacing it with protected=0 would create a small race
+    // where a favorite could become evictable during recache.
+    final existing = await db.query(_table, columns: ['protected'],
+        where: 'id = ?', whereArgs: [song.id], limit: 1);
+    final existingProtected = existing.isNotEmpty
+        ? ((existing.first['protected'] as num?)?.toInt() ?? 0)
+        : 0;
+    final safeProtected = math.max(
+      existingProtected,
+      protectedFlag ?? 0,
+    );
+
+    final existingRow = await db.query(
+      _table,
+      columns: ['last_played'],
+      where: 'id = ?',
+      whereArgs: [song.id],
+      limit: 1,
+    );
+    final oldLastPlayed = existingRow.isNotEmpty
+        ? ((existingRow.first['last_played'] as num?)?.toInt() ?? 0)
+        : 0;
     final now = DateTime.now().millisecondsSinceEpoch;
+    final lastPlayed = markAsPlayed ? now : oldLastPlayed;
+
     await db.insert(
       _table,
       {
@@ -44,8 +72,8 @@ class CacheDB {
         'size': size,
         'duration': song.duration,
         'cached_at': now,
-        'last_played': now,
-        'protected': 0,
+        'last_played': lastPlayed,
+        'protected': safeProtected,
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
@@ -84,55 +112,89 @@ class CacheDB {
     return (total as num?)?.toInt() ?? 0;
   }
 
-  // NEW (2026-09-17) — cache entry ka poora record (title/artist/thumb/
-  // duration samet), sirf file-path nahi — download-from-cache fix ke
-  // liye chahiye (dekho youtube_service.dart download()).
+  Future<bool> _looksLikeAudioFile(File file) async {
+    try {
+      final length = await file.length();
+      if (length < 4096) return false;
+      final raf = await file.open();
+      try {
+        final head = await raf.read(12);
+        if (head.length >= 8 &&
+            head[4] == 0x66 && head[5] == 0x74 &&
+            head[6] == 0x79 && head[7] == 0x70) return true;
+        if (head.length >= 4 &&
+            head[0] == 0x1A && head[1] == 0x45 &&
+            head[2] == 0xDF && head[3] == 0xA3) return true;
+      } finally {
+        await raf.close();
+      }
+    } catch (_) {
+      return false;
+    }
+    return false;
+  }
+
   Future<Map<String, dynamic>?> getRow(String id) async {
     final db = await _database;
     final rows = await db.query(_table, where: 'id = ?', whereArgs: [id], limit: 1);
     if (rows.isEmpty) return null;
     final path = rows.first['file_path'] as String?;
-    if (path == null || path.isEmpty || !await File(path).exists()) return null;
+    if (path == null || path.isEmpty) {
+      await db.delete(_table, where: 'id = ?', whereArgs: [id]);
+      return null;
+    }
+    final file = File(path);
+    if (!await file.exists() || !await _looksLikeAudioFile(file)) {
+      try { if (await file.exists()) await file.delete(); } catch (_) {}
+      await db.delete(_table, where: 'id = ?', whereArgs: [id]);
+      return null;
+    }
     return rows.first;
   }
 
-  // NEW: cached file ka path do agar file abhi bhi disk pe maujood hai —
-  // local-first playback (network resolve se bhi pehle check hota hai).
   Future<String?> getFilePath(String id) async {
-    final db = await _database;
-    final rows = await db.query(_table, where: 'id = ?', whereArgs: [id], limit: 1);
-    if (rows.isEmpty) return null;
-    final path = rows.first['file_path'] as String?;
-    if (path == null || path.isEmpty) return null;
-    if (!await File(path).exists()) return null;
-    return path;
+    final row = await getRow(id);
+    return row?['file_path'] as String?;
   }
 
-  // Sabse purani unprotected entry — cache eviction ke liye
+  Future<int> countUnprotectedPlayed() async {
+    final db = await _database;
+    final result = await db.rawQuery(
+      'SELECT COUNT(*) as count FROM $_table WHERE protected = 0 AND last_played > 0',
+    );
+    return (result.first['count'] as num?)?.toInt() ?? 0;
+  }
+
+  Future<Map<String, dynamic>?> getOldestUnprotectedPlayed() async {
+    final db = await _database;
+    final rows = await db.query(
+      _table,
+      where: 'protected = ? AND last_played > ?',
+      whereArgs: [0, 0],
+      orderBy: 'last_played ASC, cached_at ASC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first;
+  }
+
+  // Size-limit eviction can also evict prefetch-only rows when needed.
   Future<Map<String, dynamic>?> getOldestUnprotected() async {
     final db = await _database;
     final rows = await db.query(
       _table,
       where: 'protected = ?',
       whereArgs: [0],
-      orderBy: 'last_played ASC',
+      orderBy: 'last_played ASC, cached_at ASC',
       limit: 1,
     );
     return rows.isEmpty ? null : rows.first;
   }
 
-  // Entry ko protected mark karo — auto-delete se bach jayegi
   Future<void> markProtected(String id) async {
     final db = await _database;
-    await db.update(
-      _table,
-      {'protected': 1},
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    await db.update(_table, {'protected': 1}, where: 'id = ?', whereArgs: [id]);
   }
 
-  // Poora cache table clear kar do
   Future<void> clearAll() async {
     final db = await _database;
     await db.delete(_table);

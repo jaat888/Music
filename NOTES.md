@@ -1866,3 +1866,300 @@ se:
 STATUS: is dev-environment mein compile-test nahi ho paaya. `getRadioQueue`
 shared state (`_radioSeedId`) ke ek chhote edge-case ke liye
 youtube_service.dart mein comment daala hai.
+
+## Part 8 — Radio Mode Phase 3 (2026-09-17)
+
+Implemented `lib/services/radio_engine.dart` as the standalone selection layer:
+- hard 150-day non-repeat exclusion via `RadioHistoryStore`
+- oldest-history graceful fallback when the candidate pool is exhausted
+- approximate equal-weight language balancing
+- ~60% hits / ~40% latest bucket preference per language
+- popularity + recency + effective mood score + small random jitter
+- weighted-random selection (not always top-score)
+- 3-5 song look-ahead helper without duplicate IDs
+
+Protected playback/resolve pipeline files were not modified. This phase only
+selects candidates; fetching/playing remains the existing app pipeline.
+
+## Part 8 — Radio Mode Phase 4 (2026-09-17)
+
+- Added `lib/screens/radio_language_select_screen.dart`.
+- Radio language selection is multi-select; minimum 1 language is required.
+- Current radio pool options follow the app's existing music categories: Bollywood, Punjabi, Haryanvi.
+- Selected languages persist in `SharedPreferences` under `radio_selected_languages`.
+- On load, saved values are filtered against currently supported radio languages, so stale/removed language codes cannot break the screen.
+- Selection is also mirrored into `RadioService.instance.selectedLanguages` for the current session.
+- `Start Radio` persists the ordered selection and returns it to the caller. Phase 5 will replace this completion step with the actual Radio Player.
+- Added a Radio icon to Home's top bar to open the language selector.
+- No playback/resolve/CDN/background protected methods were modified.
+- No caching/download/prefetch logic was added for Radio Mode.
+
+## Radio Mode — Part 5 (2026-09-17)
+- Added `lib/screens/radio_player_screen.dart`.
+- Reel-style full-screen Radio Player with vertical swipe gestures.
+- Swipe up = skip; skip records history + applies temporary mood decay.
+- Swipe down / Previous = one-step navigation back; it does not apply skip penalty.
+- Play/Pause uses the existing `audioHandler` only; no playback/resolve pipeline changes.
+- Auto-next listens to `just_audio` completion state and selects the next Radio candidate.
+- 4-song look-ahead is selected locally from the Part 3 engine; it is metadata only, not audio pre-cache/download.
+- Favorite uses existing `LikeService`; favorite tags receive the Radio mood boost.
+- Radio candidate loading uses two searches per selected language: relevance/hits + recent uploads.
+- Search failure for one language/query is fail-soft; other candidates can still play.
+- `RadioLanguageSelectScreen` now transitions into `RadioPlayerScreen` after Start Radio.
+- Protected `youtube_service.dart`, `innertube_client.dart`, and protected `background_service.dart` playback methods were not modified.
+- Note: the existing global `audioHandler.playWithRetry()` may still honor the app-wide Auto-download-on-Play setting if that setting is enabled; Part 5 does not alter that protected pipeline behavior.
+
+## Part 6 — Smart Local Playback Cache
+
+- Last **15 non-favorite played songs** are retained in the local audio cache.
+- The cache is **local-first** for Previous/replay: disk cache is checked before any fresh network resolve.
+- When a cached song is played again, its `last_played` timestamp is refreshed so it stays in the 15-song rotation.
+- Favorite/liked songs are marked **protected** and are not evicted by the 15-song rotation or normal cache cleanup.
+- If a song is liked while it is currently playing, the background cache writer detects the liked state after the file is written and protects that cached file.
+- The existing size ceiling remains as a secondary safety limit; protected favorites can remain even when the unprotected rotation is full.
+- Cache failures never block playback; network playback continues normally when a local file is unavailable.
+
+
+## Part 7 — Radio Reset & Change Language
+
+Implemented from the Radio Mode roadmap phase 7.
+
+- Added a top-right ☰ Radio menu with only **Reset & Change Language**.
+- Confirmation dialog warns that the Radio session/mood state will reset while saved language selections remain.
+- Confirm clears temporary mood state, pauses Radio playback, and returns to the Language Select screen.
+- Language Select reloads the persisted selection, so previous choices remain pre-ticked.
+- Radio queue/candidate state is discarded by leaving the player; no protected playback/resolve/CDN pipeline was modified.
+- Part 6 cache behavior remains intact: recent-play cache and favorite protection are not cleared by Radio reset.
+
+## Part 9 — Radio Mode Entry Icon
+
+- Finalized the Home top-bar Radio entry point as a dedicated `radio_rounded` icon.
+- Added explicit accessibility semantics (`Open Radio Mode`) and a tooltip.
+- Tapping the icon opens the existing Radio Language Select flow directly; no duplicate Radio session is created at the Home layer.
+- Removed the temporary selection-count SnackBar from the entry point so navigation remains clean and immediate.
+- No playback/resolve/CDN/background protected pipeline was modified.
+- Existing Parts 1–8 behavior, including 15-song local cache and favorite protection, remains unchanged.
+
+## Part 10 — Radio Mode Documentation & Phase Tracking (2026-09-17)
+
+- Completed the final documentation phase from `PART8_RADIO_MODE_ROADMAP.md`.
+- Consolidated Radio Mode implementation status through Phases 1–9.
+- Documented the Part 6 local-first cache behavior: last 15 non-favorite played songs rotate by LRU; favorite cached songs remain protected.
+- Documented the Part 7 reset/change-language behavior, Part 8 fail-soft synced lyrics, and Part 9 Home entry icon.
+- No application playback/resolve/CDN code was changed in Part 10; this phase only updates project documentation and status tracking.
+
+## Part 11–12 — Radio tuning and transition hardening (2026-09-17)
+- Radio non-repeat window is explicitly fixed at 150 days (5 months), within the original 4–6 month target.
+- Mood scores remain session-only by default.
+- Previous is one-step history navigation and does not create duplicate Radio history entries.
+- Radio Player now serializes auto-next/swipe/Previous transitions with `_transitioning`; fast repeated gestures cannot launch overlapping transitions.
+- The transition guard is released in `finally`, including failed playback paths.
+- Protected streaming/resolve/CDN/background methods remain unchanged.
+
+## Radio — Post Part 3–12 Bug-Fix Audit (2026-09-17)
+
+- Fixed Radio completion ownership: while `RadioPlayerScreen` is active, the global `AudioHandler` completion listener no longer advances the normal `QueueService`; Radio owns its own auto-next transition.
+- Fixed Radio transition subscription lifecycle: the Radio completion listener is cancelled on screen dispose.
+- Fixed mood-decay accounting: skip penalties are now stored separately from the base mood score, so even escalated penalties recover exponentially instead of permanently lowering the base score.
+- Fixed multi-language eligibility: fresh/fallback selection is evaluated per language, so an exhausted language cannot disappear merely because another selected language still has fresh candidates.
+- Improved hits/latest candidate sampling by shuffling within each bucket before applying the approximate 60/40 target.
+- Fixed stale cache metadata: when a CacheDB row points to a missing audio file, the stale row is removed during local-cache lookup.
+- Existing 15-song recent cache and favorite-protected cache behavior remains intact.
+- Protected resolve/CDN pipeline remains unchanged apart from the additive Radio completion-ownership hook.
+
+
+====================================================================
+RADIO BUG-FIX BATCH — 2026-09-17 (SOURCE PATCH AFTER PART 1-12 AUDIT)
+====================================================================
+
+Baseline used:
+- SurSathi Part 1-12 Bug Audit dated 2026-09-17.
+- Flutter/Dart SDK was not available in the audit environment, so this batch
+  is source/static verified only; a real flutter analyze/APK/device playback
+  run is still required on a Flutter-capable machine.
+
+The requested record format below is: BEFORE -> BUG -> FIX -> AFTER.
+
+[BUG-01] RadioEngine.pickNext() missing
+BEFORE: radio_engine.dart called pickNext(), but the method did not exist.
+BUG: compile blocker; Radio could not choose first/next candidate.
+FIX: implemented pickNext() with eligible-pool build, scoring, jitter and
+     weighted-random selection, including excludeIds support.
+AFTER: all existing Radio pickNext() call sites now point to a real method.
+
+[BUG-02] Weighted selection pipeline disconnected
+BEFORE: helper functions existed, but no pickNext() connected them.
+BUG: mood/popularity/recency/language weighting never executed.
+FIX: pickNext() now runs the complete pipeline in the intended order.
+AFTER: selection is executable and weighted rather than undefined.
+
+[BUG-03] Global oldest IDs used for a per-language fallback
+BEFORE: a language used one global oldestPlayedSongIds() list.
+BUG: the list could contain other-language IDs and miss older candidates for
+      the exhausted language.
+FIX: removed the unsafe global fallback path completely. Per-language fresh
+     eligibility is evaluated directly.
+AFTER: a language can no longer accidentally re-introduce a recently-played
+       song from a broken global fallback. The hard 150-day rule wins.
+
+[BUG-04] Fallback could return all recently-played items
+BEFORE: when fallback found nothing, code returned `items` wholesale.
+BUG: this directly bypassed the hard 150-day non-repeat rule.
+FIX: there is now NO fallback to recently-played items.
+AFTER: a song inside the 150-day exact-ID exclusion cannot be selected.
+
+[BUG-05] Android/media-control Next/Previous bypassed Radio
+BEFORE: background_service.dart always routed media Next/Previous to
+        QueueService.
+BUG: notification/headset/car buttons used a different navigation system.
+FIX: Radio registers onNext/onPrevious callbacks with AudioHandler; media
+     controls call those handlers while Radio owns playback.
+AFTER: screen swipe, auto-next and Android media controls use one Radio path.
+
+[BUG-06] Leaving Radio could hand completion back to global queue
+BEFORE: dispose() released ownership but did not stop Radio playback.
+BUG: a still-playing Radio track could later complete under global queue
+      ownership.
+FIX: dispose() now stops playback and releases Radio ownership safely.
+AFTER: leaving Radio cannot leave an orphaned Radio track running.
+
+[BUG-07] Current song updated before playback succeeded
+BEFORE: _current changed before await playWithRetry().
+BUG: failed resolve/play could leave the UI showing an unplayed/failed song.
+FIX: actual playback is awaited first; only then _current and related UI state
+     are updated.
+AFTER: failed playback no longer poisons current Radio state.
+
+[BUG-08] Loading ended before resolve/play completed
+BEFORE: _loading=false was set before playWithRetry().
+BUG: UI could look ready while the audio was still resolving.
+FIX: loading state is cleared only after playback successfully starts.
+AFTER: spinner/ready state follows actual playback start.
+
+[BUG-09] Skip position used wall-clock time
+BEFORE: DateTime.now() - _startedAt counted network delay and pause time.
+BUG: a 20s listen + 5min pause could record about 320s.
+FIX: skipPositionSec now comes from just_audio player.position.
+AFTER: skip position tracks actual playback position, not wall clock.
+
+[BUG-10] One skipped song created two history rows
+BEFORE: start created wasSkipped=false; skip appended wasSkipped=true.
+BUG: duplicated/contradictory events inflated radio_history.
+FIX: RadioHistoryStore.markLatestAsSkipped() edits the existing play event.
+AFTER: one play session remains one history row, later marked as skipped.
+
+[BUG-11] Auto-cache accepted any HTTP body as audio
+BEFORE: request body was piped into .m4a without status/content validation.
+BUG: 403/404/HTML/error bodies could become fake audio cache files.
+FIX: require successful HTTP status and audio/video/octet-stream content type,
+     reject empty/tiny responses, and delete failed partial files.
+AFTER: error responses are not registered as valid cache audio.
+
+[BUG-12] Invalid existing cache could recur forever
+BEFORE: DB/file existence was checked, but file bytes were never validated.
+BUG: a bad-but-existing .m4a row could be retried on every playback.
+FIX: CacheDB validates MP4/M4A (`ftyp`) or WebM/EBML headers plus minimum size;
+     invalid files are deleted from disk and DB.
+AFTER: invalid-but-existing cache rows self-clean when read.
+
+[BUG-13] Prefetch counted as recently played
+BEFORE: CacheDB.add() always wrote last_played=now, including background
+        prefetches the user never heard.
+BUG: fake recent-play entries polluted the 15-song rotation.
+FIX: cache insertion now accepts markAsPlayed; prefetch writes no new
+     last_played value, while real playback updates it.
+AFTER: the 15-song rotation represents played songs, not merely cached ones.
+
+[BUG-14] Favorite protection race on newly cached song
+BEFORE: cache was inserted/enforced first, then LikeService protection ran.
+BUG: a liked song briefly entered the cache as evictable.
+FIX: CacheService checks LikeService BEFORE CacheDB.add() and inserts the
+     protected flag atomically with the row; existing protected state is kept.
+AFTER: a liked cache entry enters enforcement already protected.
+
+[BUG-15] Duplicate hit/latest result lost latest metadata
+BEFORE: one global seen set kept the first hit result and discarded the
+        same video's latest result.
+BUG: overlap was always classified as hit/non-latest and skewed the mix.
+FIX: duplicate IDs are merged; latest flag and strongest soft signals survive.
+AFTER: one song can carry both hit and latest evidence.
+
+[BUG-16 / BUG-23] Search rank treated as real popularity
+BEFORE: rank was given a large popularity influence.
+BUG: search position is not a true view/frequency popularity metric.
+FIX: rank remains only a weak hint with a much smaller weight.
+AFTER: rank cannot overpower mood, language balance and variety.
+
+[BUG-17 / BUG-22] Latest recency was one fixed constant
+BEFORE: every latest candidate had recency=0.85.
+BUG: yesterday's result and a near-boundary result scored the same.
+FIX: latest results receive a continuous position-based relative-recency hint;
+     it is soft and limited, because the current YtResult model does not expose
+     an authoritative publication timestamp.
+AFTER: latest ordering has internal variation instead of one fixed value.
+
+[BUG-18] Language balancing depended on missing pickNext()
+BEFORE: _languageWeight() existed but could not be executed.
+BUG: approximate language balancing was effectively dead.
+FIX: pickNext() now applies a small target-share correction per language.
+AFTER: selected languages influence the weighted pick without a rigid lock.
+
+[BUG-19] Tagging false positives from substring matching
+BEFORE: `contains(keyword)` could match inside unrelated larger words.
+BUG: short keywords such as `dil`, `ram`, `high`, `night` could over-tag.
+FIX: keyword/phrase matching now normalizes punctuation and matches complete
+     tokens/phrases.
+AFTER: accidental substring tags are reduced while multi-word keywords remain
+       supported.
+
+[BUG-20] Fixed 60/40 hit/latest pool did not match natural-mix requirement
+BEFORE: _applyBucketPreference() physically cut candidates into ~60/40 pools.
+BUG: eligible songs were removed before final scoring, making the order ruley.
+FIX: hard bucket filtering was removed. Popularity/recency/latest are soft
+     score hints across the full eligible pool.
+AFTER: old/new/hit/latest can naturally vary (no repeating 60/40 pattern).
+
+[BUG-21] "Old" release age must not mean low priority
+BEFORE: bucket logic implicitly treated hit/latest membership as the main pool
+        decision.
+BUG: release age and last-played age were being conflated.
+FIX: release/newness is only a soft score input; the 150-day last-played rule
+     remains the only hard repeat filter.
+AFTER: an old song not played for 150+ days can compete normally, subject to
+       soft mood/popularity/recency signals.
+
+[BUG-24] Randomness applied after fixed filtering instead of after scoring
+BEFORE: pool was cut first, then shuffled/selected.
+BUG: early filtering reduced variety before weighting could act.
+FIX: order is now: eligible pool -> mood/language/soft type signals -> small
+     random jitter -> weighted random pick.
+AFTER: randomness changes the choice naturally without bypassing eligibility.
+
+[NON-BUG CHECKS KEPT]
+- Radio completion listener cancellation on dispose remains present.
+- Global completion suppression while Radio owns playback remains present.
+- Mood penalty remains separate from base score.
+- Radio transition guard/finally release remains present.
+- Protected resolve/CDN pipeline methods were not redesigned.
+
+[VERIFICATION STATUS]
+- Source/static patch: completed.
+- Flutter/Dart build/analyze: NOT RUN in this environment because SDK is not
+  installed here.
+- Real Android notification/headset/device playback test: still required.
+- Cache header validation is intentionally conservative; if a future provider
+  returns a different container format, the cache validator should be extended
+  rather than accepting arbitrary HTML/error bodies.
+
+
+# v53 Radio Bug Fix Update (2026-09-17)
+
+Existing notes above are unchanged. This section records the implementation target from the Part 1–12 audit.
+
+## Fixed bugs
+- BUG-01 to BUG-05: Radio selection engine, language-aware fallback, hard 150-day non-repeat, media controls.
+- BUG-06 to BUG-10: Radio ownership, playback state, loading, skip timing, duplicate history.
+- BUG-11 to BUG-14: Cache validation, corrupt cache cleanup, prefetch vs played tracking, favorite protection.
+- BUG-15 to BUG-24: Natural old/new/hit/latest weighted mix, soft popularity & recency scoring, tagging improvements.
+
+Format preserved: previous notes were not edited; only this new section was appended.

@@ -454,3 +454,63 @@ section) aur poori project ka fresh zip re-generate karke dena hai — ye
 user ki standing instruction hai, har batch pe repeat karna. Koi bhi gap/
 assumption/limitation aaye to `NOTES.md` me alag se add karna (README me
 nahi) — ye bhi user ki standing instruction hai.
+
+### Radio Mode — Phase 3
+
+The standalone `radio_engine.dart` layer now handles Radio Mode candidate
+pooling and weighted selection. It enforces the existing non-repeat history,
+balances selected languages, keeps an approximate hits/latest mix, applies
+mood scores, and can build a short look-ahead buffer. Playback/stream resolve
+continues through the existing pipeline.
+
+## Radio Mode — Part 5
+Part 5 adds the reel-style Radio Player after language selection. It supports play/pause, one-step previous, favorite, swipe-to-skip, automatic next-track handling, and a small candidate look-ahead buffer. Candidate selection continues to use the Part 3 Radio engine and recent-history rules. Playback itself continues through the existing audio handler.
+
+## Part 6 — Smart Local Playback Cache
+
+- Last **15 non-favorite played songs** are retained in the local audio cache.
+- The cache is **local-first** for Previous/replay: disk cache is checked before any fresh network resolve.
+- When a cached song is played again, its `last_played` timestamp is refreshed so it stays in the 15-song rotation.
+- Favorite/liked songs are marked **protected** and are not evicted by the 15-song rotation or normal cache cleanup.
+- If a song is liked while it is currently playing, the background cache writer detects the liked state after the file is written and protects that cached file.
+- The existing size ceiling remains as a secondary safety limit; protected favorites can remain even when the unprotected rotation is full.
+- Cache failures never block playback; network playback continues normally when a local file is unavailable.
+
+
+## Part 7 — Radio Reset & Change Language
+
+Implemented from the Radio Mode roadmap phase 7.
+
+- Added a top-right ☰ Radio menu with only **Reset & Change Language**.
+- Confirmation dialog warns that the Radio session/mood state will reset while saved language selections remain.
+- Confirm clears temporary mood state, pauses Radio playback, and returns to the Language Select screen.
+- Language Select reloads the persisted selection, so previous choices remain pre-ticked.
+- Radio queue/candidate state is discarded by leaving the player; no protected playback/resolve/CDN pipeline was modified.
+- Part 6 cache behavior remains intact: recent-play cache and favorite protection are not cleared by Radio reset.
+
+### Radio Mode — Part 8
+Radio Player now attempts to load cached/timed lyrics and displays a compact synced subtitle strip when LRC timing is available. Missing/failed lyrics are silently ignored so playback continues normally.
+
+### Radio Mode — Part 9
+
+The Home top bar now exposes a clean, accessible Radio Mode entry icon that opens the existing language-selection flow directly. This is a UI entry-point change only; the protected playback/resolve pipeline remains untouched.
+
+## Radio Mode — Part 10
+
+Documentation/status phase completed. Radio Mode Phases 1–9 are now recorded here and in `NOTES.md` / `FEATURE_ROADMAP.md`. Part 10 makes no runtime or protected-pipeline changes.
+
+## Radio Mode — Parts 11–12
+- Part 11 finalized Radio tuning defaults: 150-day history window, session-only mood state, one-step Previous, and centralized skip/decay constants.
+- Part 12 hardened Radio Player transitions against rapid double swipe/auto-next/Previous races.
+- Existing protected playback/resolve/CDN/background pipeline remains untouched.
+
+## Radio — Post Part 3–12 Bug-Fix Audit (2026-09-17)
+
+- Fixed Radio completion ownership: while `RadioPlayerScreen` is active, the global `AudioHandler` completion listener no longer advances the normal `QueueService`; Radio owns its own auto-next transition.
+- Fixed Radio transition subscription lifecycle: the Radio completion listener is cancelled on screen dispose.
+- Fixed mood-decay accounting: skip penalties are now stored separately from the base mood score, so even escalated penalties recover exponentially instead of permanently lowering the base score.
+- Fixed multi-language eligibility: fresh/fallback selection is evaluated per language, so an exhausted language cannot disappear merely because another selected language still has fresh candidates.
+- Improved hits/latest candidate sampling by shuffling within each bucket before applying the approximate 60/40 target.
+- Fixed stale cache metadata: when a CacheDB row points to a missing audio file, the stale row is removed during local-cache lookup.
+- Existing 15-song recent cache and favorite-protected cache behavior remains intact.
+- Protected resolve/CDN pipeline remains unchanged apart from the additive Radio completion-ownership hook.

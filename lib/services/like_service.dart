@@ -44,7 +44,9 @@ class LikeService extends ChangeNotifier {
     if (willBeLiked) {
       await LikedDB.instance.add(song);
       _likedIds.add(song.id);
-      // Agar ye song cache me bhi hai to protected mark kar do — auto-delete se bach jayegi
+      // Agar ye song cache me hai to protected mark kar do — auto-delete se bach jayegi.
+      // Agar abhi cache me nahi hai, current playback's background cache will
+      // see the liked state and protect it when the file finishes writing.
       await CacheDB.instance.markProtected(song.id);
     } else {
       await LikedDB.instance.remove(song.id);

@@ -186,7 +186,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
             .getAudioUrl(next.id, title: next.title, author: next.artist);
         if (url == null) return;
         _urlCache[next.id] = url; // turant-skip ke liye fallback
-        await _autoCacheInBackground(next, url); // disk pe bhi utaar do
+        await _autoCacheInBackground(next, url, markAsPlayed: false); // disk pe bhi utaar do
       } catch (_) {
         // Prefetch fail hone se playback pe koi asar nahi — normal
         // resolve chain skip/play time pe apne aap fallback ban jaati hai.
@@ -275,6 +275,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // nahi).
     player.processingStateStream.listen((state) {
       if (state == ProcessingState.completed) {
+        if (_radioPlaybackOwned) return;
         if (sleepAtEndOfTrack) {
           sleepAtEndOfTrack = false;
           pause();
@@ -590,8 +591,30 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // `stop()` (aur playWithRetry khud) ek hi Timer share kar sakein.
   Timer? _skipDebounce;
 
+  // Radio Player owns its own candidate/history transitions. When this flag
+  // is true, the global just_audio completion listener must not also advance
+  // QueueService, otherwise one completed Radio song can trigger two next
+  // transitions. This is an additive hook; normal queue playback is unchanged.
+  bool _radioPlaybackOwned = false;
+  Future<void> Function()? _radioNextHandler;
+  Future<void> Function()? _radioPreviousHandler;
+
+  void setRadioPlaybackOwned(
+    bool owned, {
+    Future<void> Function()? onNext,
+    Future<void> Function()? onPrevious,
+  }) {
+    _radioPlaybackOwned = owned;
+    _radioNextHandler = owned ? onNext : null;
+    _radioPreviousHandler = owned ? onPrevious : null;
+  }
+
   @override
   Future<void> skipToNext() async {
+    if (_radioPlaybackOwned && _radioNextHandler != null) {
+      await _radioNextHandler!();
+      return;
+    }
     final q = QueueService.instance;
     // BUG FIX (2026-09-16, v20): "gaana khatam hone ke baad crash/ajeeb
     // behavior" — agar repeat OFF hai aur ye QUEUE KA AAKHRI gaana hai,
@@ -618,6 +641,10 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> skipToPrevious() async {
+    if (_radioPlaybackOwned && _radioPreviousHandler != null) {
+      await _radioPreviousHandler!();
+      return;
+    }
     QueueService.instance.previous();
     await _playCurrentFromQueue();
   }
@@ -687,7 +714,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       // reset karo taaki agli baar drop hone pe wapas poore 3 attempts milein.
       _streamErrorRetries = 0;
       // Cache background me ho jaaye — playback ruke bina
-      final cacheFuture = _autoCacheInBackground(song, url);
+      final cacheFuture = _autoCacheInBackground(song, url, markAsPlayed: true);
       unawaited(cacheFuture);
       // BUG FIX (2026-09-17 — user report: "auto-download cache se nahi
       // aata, seedha download mein laga deta hai"): pehle
@@ -1035,29 +1062,73 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // Stream ho raha song ko chupke se cache folder me download karke DB me
   // register karo — agli baar bina internet ke bhi bajega. Playback isse
   // block nahi hota, isliye caller isko await nahi karta.
-  Future<void> _autoCacheInBackground(Song song, String streamUrl) async {
+  Future<void> _autoCacheInBackground(
+    Song song,
+    String streamUrl, {
+    required bool markAsPlayed,
+  }) async {
+    HttpClient? client;
+    File? file;
     try {
       final dir = await CacheService.instance.getAudioCacheDir();
       final filePath = p.join(dir.path, '${song.id}.m4a');
-      final file = File(filePath);
-      if (await file.exists()) return; // pehle se cached hai
+      file = File(filePath);
+      if (await file.exists()) {
+        if (markAsPlayed) {
+          await CacheDB.instance.update(
+            song.id,
+            lastPlayed: DateTime.now().millisecondsSinceEpoch,
+          );
+        }
+        return;
+      }
 
-      final client = HttpClient();
+      client = HttpClient();
       final request = await client.getUrl(Uri.parse(streamUrl));
       final response = await request.close();
-      final sink = file.openWrite();
-      await response.pipe(sink);
-      await sink.close();
-      client.close();
+      final contentType = response.headers.contentType?.mimeType.toLowerCase();
+      final allowedContent = contentType == null ||
+          contentType.startsWith('audio/') ||
+          contentType.startsWith('video/') ||
+          contentType == 'application/octet-stream';
 
-      await CacheService.instance.cacheSong(song, filePath);
-
-      // Agar ye song liked hai to protect flag turant laga do
-      if (await LikeService.instance.isLiked(song.id)) {
-        await CacheDB.instance.markProtected(song.id);
+      if (response.statusCode < 200 || response.statusCode >= 300 || !allowedContent) {
+        await response.drain<void>();
+        throw HttpException(
+          'Invalid cache response: ${response.statusCode} ${contentType ?? ''}',
+          uri: Uri.tryParse(streamUrl),
+        );
       }
-    } catch (e) {
-      // Cache fail hua to koi baat nahi — playback pe asar nahi padega
+
+      final sink = file.openWrite();
+      try {
+        await response.pipe(sink);
+      } catch (_) {
+        await sink.close();
+        rethrow;
+      }
+      await sink.close();
+
+      if (!await file.exists() || await file.length() < 4096) {
+        throw const FileSystemException('Cached response is empty/too small');
+      }
+
+      await CacheService.instance.cacheSong(
+        song,
+        filePath,
+        markAsPlayed: markAsPlayed,
+      );
+      // One final DB-level content check catches 200/text-error responses
+      // from providers that omit a useful Content-Type header.
+      await CacheDB.instance.getRow(song.id);
+    } catch (_) {
+      if (file != null) {
+        try {
+          if (await file.exists()) await file.delete();
+        } catch (_) {}
+      }
+    } finally {
+      client?.close(force: true);
     }
   }
 }

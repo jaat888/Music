@@ -15,6 +15,8 @@ import 'services/download_queue_service.dart';
 import 'services/like_service.dart';
 import 'services/potoken_service.dart';
 import 'services/queue_service.dart';
+import 'services/radio_history_store.dart';
+import 'services/radio_service.dart';
 import 'services/search_history.dart';
 import 'services/sleep_timer_service.dart';
 import 'services/theme_service.dart';
@@ -92,6 +94,9 @@ void main() {
       }
 
       await LikeService.instance.init();
+      // PART 8 (Radio Mode) — Phase 2: app start pe history load + 4-6
+      // mahine se purani entries purge (non-repeat window ka data layer).
+      await RadioHistoryStore.instance.init();
       // PART 5 (Theme toggle): persisted theme mode ko sync cache me load
       // karo startup pe hi — MaterialApp.build() synchronously (bina async
       // gap ke) sahi theme choose kar sake (dekho theme_service.dart).
@@ -145,6 +150,7 @@ class SurSathiApp extends StatelessWidget {
         ChangeNotifierProvider.value(value: LikeService.instance),
         ChangeNotifierProvider.value(value: ThemeService.instance),
         ChangeNotifierProvider.value(value: QueueService.instance),
+        ChangeNotifierProvider.value(value: RadioService.instance),
         ChangeNotifierProvider.value(value: SearchHistory.instance),
         ChangeNotifierProvider.value(value: SleepTimerService.instance),
       ],
