@@ -247,7 +247,15 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       return;
     }
 
-    await _playSong(song, url, token);
+    // _streamErrorRetries pehle se hi ++ ho chuka hai _handleStreamDrop() me
+    // (attempt 1/2/3) — usi count se header-strategy alternate karo (dekho
+    // `_useHeadersForAttempt` ka comment, Attempt #5).
+    await _playSong(
+      song,
+      url,
+      token,
+      useHeaders: _useHeadersForAttempt(_streamErrorRetries),
+    );
   }
 
   // ---------------- State broadcast ----------------
@@ -383,13 +391,43 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // ---------------- Custom playback methods ----------------
 
   // Streaming URL se seedha play karo (YouTube stream)
-  Future<void> playSong(Song song, String url) => _playSong(song, url, ++_playToken);
+  Future<void> playSong(Song song, String url) =>
+      _playSong(song, url, ++_playToken, useHeaders: true);
 
-  Future<void> _playSong(Song song, String url, int token) async {
+  // BUG FIX (2026-09-17, Attempt #5 — poToken confirm mint ho gaya
+  // (real-device log: "PoToken mint OK"), lekin stream fir bhi turant
+  // drop hua — matlab is case (NewPipeExtractor-resolved URL) ke liye
+  // poToken hi asli wajah NAHI thi. Doosra strong suspect: `cdnHeaders`
+  // (hardcoded DESKTOP Chrome User-Agent/Referer/Origin) — jo har URL pe
+  // blindly lagaya jaata hai, chahe wo kisi bhi client (native
+  // NewPipeExtractor/Android/iOS) se aaya ho. Real mobile-client se aaya
+  // signed URL pe desktop-browser headers bhejna khud mismatch/CDN-reject
+  // ka reason ho sakta hai.
+  // Isko guess-karke-dobara-build karne ki jagah, retry cycle ke andar hi
+  // DONO strategy khud test hoti hai (same build, agla real-device log hi
+  // definitively bata dega): pehla attempt headers ke saath (purana
+  // behavior), stream-drop retry #1 BINA headers ke, retry #2 phir headers
+  // ke saath (fresh URL), retry #3 phir bina — jo bhi attempt "YT PLAY OK"
+  // ke baad drop NAHI hota, uske log se pata chal jayega sahi strategy
+  // kaunsi hai.
+  bool _useHeadersForAttempt(int attemptNumber) => attemptNumber.isEven;
+
+  Future<void> _playSong(
+    Song song,
+    String url,
+    int token, {
+    required bool useHeaders,
+  }) async {
     if (token != _playToken) return; // ek naya request already aa chuka hai
     mediaItem.add(_toMediaItem(song));
     try {
-      await player.setUrl(url, headers: YoutubeService.cdnHeaders);
+      print(
+        'YT PLAY ATTEMPT: "${song.title}" — headers: ${useHeaders ? "WITH cdnHeaders (desktop UA)" : "WITHOUT headers (raw URL, native-client jaisa)"}',
+      );
+      await player.setUrl(
+        url,
+        headers: useHeaders ? YoutubeService.cdnHeaders : null,
+      );
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       await player.play();
       // Playback successfully shuru ho gaya — stream-drop retry counter
@@ -540,7 +578,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // NewPipe/explode/Piped resolve nahi, isliye "next" ab instant hai.
     final cached = _urlCache.remove(song.id);
     if (cached != null) {
-      await _playSong(song, cached, token);
+      await _playSong(song, cached, token, useHeaders: true);
       return;
     }
     for (var attempt = 1; attempt <= 3; attempt++) {
@@ -575,7 +613,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       }
       if (token != _playToken) return; // resolve hone tak user aage badh chuka
       if (url != null) {
-        await _playSong(song, url, token);
+        await _playSong(song, url, token, useHeaders: true);
         return;
       }
       if (attempt < 3) {
