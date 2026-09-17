@@ -1,7 +1,7 @@
 // lib/services/radio_engine.dart
-// Part 8 (Radio Mode) — hardened candidate pool + natural weighted selection.
-// Radio keeps the 150-day exact-song exclusion hard, while old/new/hit/latest
-// signals stay soft so the sequence remains varied rather than 60/40-patterned.
+// SurSathi v55 Radio Enhanced — natural weighted Radio selection.
+// The engine owns the session-level failed set and liked-song weighting so the
+// UI can ask for the next candidate without creating a second Radio pipeline.
 
 import 'dart:math' as math;
 
@@ -74,19 +74,52 @@ class RadioEngine {
   final RadioService _radio;
   final math.Random _random;
 
-  // Search rank is deliberately a weak hint. Natural old/new mixing is driven
-  // by soft score signals; there is no fixed 60/40 bucket filter anymore.
+  // Soft signals only. There is deliberately no fixed old/new bucket split.
   static const double popularityWeight = 8;
   static const double recencyWeight = 10;
   static const double moodWeight = 0.18;
+  static const double likedWeight = 9;
+  // Likes receive a soft boost only after their cooldown has elapsed; the
+  // hard 150-day exact-song repeat rule still applies independently.
+  static const Duration likedBoostCooldown = Duration(hours: 12);
   static const double latestSoftBoost = 1.5;
   static const double randomJitter = 2.5;
   static const double scoreFloor = 0.1;
 
-  /// Builds the eligible pool. Recent exact song IDs are a hard exclusion.
-  /// We intentionally never fall back to a recently-played item: doing so
-  /// would violate the 150-day rule. If a language is exhausted, it simply
-  /// contributes no candidates until more eligible material is fetched.
+  // Radio-session failures are hard blocked until the screen/session is reset.
+  final Set<String> _failedSessionIds = <String>{};
+  final Set<String> _likedIds = <String>{};
+  final Map<String, DateTime> _likedPlayedAt = <String, DateTime>{};
+
+  Set<String> get failedSessionIds => Set.unmodifiable(_failedSessionIds);
+
+  void markFailed(String songId) {
+    if (songId.isNotEmpty) _failedSessionIds.add(songId);
+  }
+
+  void clearFailed() => _failedSessionIds.clear();
+
+  void setLikedIds(Iterable<String> ids) {
+    _likedIds
+      ..clear()
+      ..addAll(ids.where((id) => id.isNotEmpty));
+  }
+
+  void setLiked(String songId, bool liked) {
+    if (liked) {
+      _likedIds.add(songId);
+    } else {
+      _likedIds.remove(songId);
+      _likedPlayedAt.remove(songId);
+    }
+  }
+
+  void markPlayed(String songId) {
+    if (_likedIds.contains(songId)) {
+      _likedPlayedAt[songId] = DateTime.now();
+    }
+  }
+
   List<RadioCandidate> buildPool(
     Iterable<RadioCandidate> candidates, {
     required List<String> selectedLanguages,
@@ -97,38 +130,24 @@ class RadioEngine {
         .toSet();
     if (languages.isEmpty) return const [];
 
-    final all = candidates
+    return candidates
         .where((c) => languages.contains(c.language.trim().toLowerCase()))
+        // 150-day exact-song exclusion remains hard.
+        .where((c) => !_history.wasPlayedRecently(c.song.id))
+        // A failed Radio candidate cannot reappear during this session.
+        .where((c) => !_failedSessionIds.contains(c.song.id))
         .toList();
-    if (all.isEmpty) return const [];
-
-    final result = <RadioCandidate>[];
-    for (final language in languages) {
-      final items = all
-          .where((c) => c.language.trim().toLowerCase() == language)
-          .toList();
-      if (items.isEmpty) continue;
-
-      final fresh = items
-          .where((c) => !_history.wasPlayedRecently(c.song.id))
-          .toList();
-      // Keep the exact-song 150-day exclusion hard. Do not re-add `items`
-      // when `fresh` is empty and do not use a global oldest-ID shortcut.
-      result.addAll(fresh);
-    }
-    return result;
   }
 
-  /// Picks a queue-ahead buffer. Each chosen ID is excluded from the next
-  /// pick so the upcoming list cannot contain duplicates.
   List<RadioCandidate> buildLookAhead(
     Iterable<RadioCandidate> candidates, {
     required List<String> selectedLanguages,
-    int count = 4,
+    int count = 10,
     Set<String> excludeIds = const {},
+    Map<String, int> recentLanguageCounts = const {},
   }) {
     final result = <RadioCandidate>[];
-    final used = <String>{...excludeIds};
+    final used = <String>{...excludeIds, ..._failedSessionIds};
     final source = candidates.toList();
 
     for (var i = 0; i < count; i++) {
@@ -136,6 +155,7 @@ class RadioEngine {
         source,
         selectedLanguages: selectedLanguages,
         excludeIds: used,
+        recentLanguageCounts: recentLanguageCounts,
       );
       if (next == null) break;
       result.add(next);
@@ -144,12 +164,14 @@ class RadioEngine {
     return result;
   }
 
-  /// Weighted random pick after ALL eligible candidates are assembled.
-  /// Language share, mood, popularity and recency are soft influences only.
+  /// Order of influence:
+  /// eligible pool -> mood -> liked boost -> skip-derived mood penalty ->
+  /// language balance -> old/new soft signals -> small randomness -> weighted pick.
   RadioCandidate? pickNext(
     Iterable<RadioCandidate> candidates, {
     required List<String> selectedLanguages,
     Set<String> excludeIds = const {},
+    Map<String, int> recentLanguageCounts = const {},
   }) {
     final pool = buildPool(
       candidates,
@@ -165,40 +187,70 @@ class RadioEngine {
 
     final weights = <double>[];
     for (final candidate in pool) {
+      // 1) Mood score, including the existing temporary skip penalty.
       final tags = candidate.tags.isEmpty ? const ['mixed'] : candidate.tags;
-      final moodSum = tags.fold<double>(
-        0,
-        (sum, tag) => sum + _radio.effectiveScore(tag),
-      );
-      final moodAverage = moodSum / tags.length;
+      final moodAverage = tags
+              .map(_radio.effectiveScore)
+              .fold<double>(0, (sum, score) => sum + score) /
+          tags.length;
       final moodDelta = moodAverage - RadioService.kNeutralScore;
 
-      final language = candidate.language.trim().toLowerCase();
-      final languageBoost = _languageWeight(pool, language, targetShare);
+      var score = 35.0 + moodDelta * moodWeight;
 
-      // `popularity` is only a search-rank proxy, so it stays deliberately
-      // small. `recency` is continuous within the latest search batch and is
-      // also a soft hint, never an eligibility gate.
-      var score = 35.0;
+      // 2) Liked songs get a weighted boost only; liking never makes a hard
+      // repeat eligible and never forces a song to the front.
+      if (_likedIds.contains(candidate.song.id) && _likeBoostReady(candidate.song.id)) {
+        score += likedWeight;
+      }
+
+      // 3) Search-rank popularity and latest/newness remain soft hints.
       score += _clamp01(candidate.popularity) * popularityWeight;
       score += _clamp01(candidate.recency) * recencyWeight;
-      score += moodDelta * moodWeight;
-      score += languageBoost;
       if (candidate.isLatest) score += latestSoftBoost;
-      score += (_random.nextDouble() * 2 - 1) * randomJitter;
 
+      // 4) Language balance is session-aware, not a fixed ratio/bucket.
+      final language = candidate.language.trim().toLowerCase();
+      score += _languageWeight(
+        pool,
+        language,
+        targetShare,
+        recentLanguageCounts,
+      );
+
+      // 5) Keep the weighted random nature of Radio.
+      score += (_random.nextDouble() * 2 - 1) * randomJitter;
       weights.add(math.max(scoreFloor, score));
     }
 
     return pool[_weightedIndex(weights)];
   }
 
+
+  bool _likeBoostReady(String songId) {
+    final playedAt = _likedPlayedAt[songId];
+    if (playedAt == null) return true;
+    return DateTime.now().difference(playedAt) >= likedBoostCooldown;
+  }
+
   double _languageWeight(
     List<RadioCandidate> pool,
     String language,
     double targetShare,
+    Map<String, int> recentLanguageCounts,
   ) {
     if (pool.isEmpty) return 0;
+    final totalRecent = recentLanguageCounts.values.fold<int>(0, (a, b) => a + b);
+    if (totalRecent > 0) {
+      final used = recentLanguageCounts[language] ?? 0;
+      final minUsed = pool
+          .map((c) => recentLanguageCounts[c.language.trim().toLowerCase()] ?? 0)
+          .fold<int>(1 << 30, (a, b) => math.min(a, b));
+      // Prefer languages that have been less represented recently, but keep it
+      // deliberately small so mood/likes still have a real effect.
+      if (used == minUsed) return 5.0;
+      return -math.min(5.0, (used - minUsed).toDouble() * 1.5);
+    }
+
     final count = pool
         .where((c) => c.language.trim().toLowerCase() == language)
         .length;

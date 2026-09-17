@@ -10,6 +10,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/song.dart';
+
 class LyricLine {
   final Duration time;
   final String text;
@@ -58,6 +60,23 @@ class LyricsService {
       _encode(result ?? const LyricsResult()),
     );
     return result;
+  }
+
+  /// Radio metadata prefetch. The work is deliberately bounded to two
+  /// concurrent requests so opening Radio never creates a ten-request burst.
+  Future<void> prefetchForSongs(Iterable<Song> songs, {int maxSongs = 10}) async {
+    final queue = songs.take(maxSongs).toList(growable: false);
+    for (var i = 0; i < queue.length; i += 2) {
+      final batch = queue.skip(i).take(2);
+      await Future.wait(
+        batch.map((song) => getForSong(
+              songId: song.id,
+              title: song.title,
+              artist: song.artist,
+              durationSeconds: song.duration,
+            )),
+      );
+    }
   }
 
   Future<LyricsResult?> _fetch({

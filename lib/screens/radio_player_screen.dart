@@ -1,22 +1,22 @@
 // lib/screens/radio_player_screen.dart
-// Part 8 — Phase 5: Radio Player.
-// Reel-style UI + swipe skip + previous + favorite + auto-next.
-// Playback always goes through the existing audioHandler.playWithRetry().
+// SurSathi v55 Radio Enhanced — same Radio UI, hardened transition/playback layer.
 
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
+
 import '../models/song.dart';
 import '../services/background_service.dart';
 import '../services/like_service.dart';
-import '../services/radio_engine.dart';
 import '../services/lyrics_service.dart';
+import '../services/radio_engine.dart';
 import '../services/radio_history_store.dart';
 import '../services/radio_service.dart';
 import '../services/youtube_service.dart';
-import 'radio_language_select_screen.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
+import 'radio_language_select_screen.dart';
 
 class RadioPlayerScreen extends StatefulWidget {
   final List<String> languages;
@@ -31,35 +31,39 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   final _candidates = <RadioCandidate>[];
   final _upcoming = <RadioCandidate>[];
   final _playedStack = <RadioCandidate>[];
-  StreamSubscription<ProcessingState>? _completionSub;
+  final _artworkCache = <String, NetworkImage>{};
 
+  StreamSubscription<ProcessingState>? _completionSub;
   RadioCandidate? _current;
   bool _loading = true;
   bool _loadingNext = false;
   bool _paused = false;
   bool _liked = false;
-  LyricsResult? _lyrics;
   bool _lyricsLoading = false;
+  LyricsResult? _lyrics;
   String? _error;
-  int _generation = 0;
-  // Part 12 hardening: serialize swipe/auto-next/previous transitions so a
-  // fast double swipe cannot start two Radio songs at the same time.
+  int _sessionGeneration = 0;
+  int _candidateGeneration = 0;
   bool _transitioning = false;
+  String? _recoveringSongId;
+  Future<bool>? _recoveryFuture;
+  final Map<String, int> _recentLanguageCounts = <String, int>{};
 
   @override
   void initState() {
     super.initState();
-    // Radio owns end-of-track transitions. The global AudioHandler completion
-    // listener is told to stay out while this screen is active, preventing a
-    // completed Radio track from advancing both QueueService and Radio.
     audioHandler.setRadioPlaybackOwned(
       true,
       onNext: () => _advance(auto: false),
       onPrevious: _previous,
+      onError: _onRadioPlaybackError,
     );
     _completionSub = audioHandler.player.processingStateStream.listen((state) {
-      if (state == ProcessingState.completed && mounted && _current != null && !_transitioning) {
-        _advance(auto: true);
+      if (state == ProcessingState.completed &&
+          mounted &&
+          _current != null &&
+          !_transitioning) {
+        unawaited(_advance(auto: true));
       }
     });
     _start();
@@ -68,26 +72,43 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   @override
   void dispose() {
     _completionSub?.cancel();
-    // Radio must not keep playing after the screen is gone. Release ownership
-    // immediately, then stop the player; stop() moves processingState to idle,
-    // so it cannot create a completion event for QueueService.
     audioHandler.setRadioPlaybackOwned(false);
     unawaited(audioHandler.stop());
+    _evictRadioArtwork();
     super.dispose();
   }
 
   Future<void> _start() async {
-    final generation = ++_generation;
+    final generation = ++_sessionGeneration;
+    _engine.clearFailed();
+    _candidates.clear();
+    _upcoming.clear();
+    _playedStack.clear();
+    _recentLanguageCounts.clear();
+    final liked = await LikeService.instance.getAllLiked();
+    _engine.setLikedIds(liked.map((song) => song.id));
+    if (!mounted || generation != _sessionGeneration) return;
+
     setState(() {
       _loading = true;
       _error = null;
+      _lyrics = null;
+      _lyricsLoading = false;
     });
+
     try {
       await _fetchCandidates();
-      if (!mounted || generation != _generation) return;
-      await _playCandidate(_pickInitial(), addToHistory: true);
-    } catch (e) {
-      if (!mounted || generation != _generation) return;
+      if (!mounted || generation != _sessionGeneration) return;
+      var started = false;
+      for (var attempt = 0; attempt < 12 && !started; attempt++) {
+        final candidate = _pickNext(excludeIds: const <String>{});
+        if (candidate == null) break;
+        started = await _playCandidate(candidate, addToHistory: true);
+        if (!started) _engine.markFailed(candidate.song.id);
+      }
+      if (!started) throw StateError('No playable radio candidate');
+    } catch (_) {
+      if (!mounted || generation != _sessionGeneration) return;
       setState(() {
         _loading = false;
         _error = 'Radio songs load nahi ho paaye. Internet check karke retry karein.';
@@ -113,28 +134,21 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
           );
           for (var i = 0; i < results.length; i++) {
             final item = results[i];
-            // Search position is only a weak proxy for popularity. Latest-mode
-            // position becomes a continuous relative-recency hint (newer
-            // results near the front score a little higher, never exclusively).
-            final rankSignal = (1.0 - (i / 30.0)).clamp(0.0, 1.0).toDouble();
-            final popularity = qi == 0 ? rankSignal : rankSignal * 0.35;
-            final recency = qi == 1 ? (0.30 + rankSignal * 0.50) : 0.12;
+            final rankSignal =
+                (1.0 - (i / 30.0)).clamp(0.0, 1.0).toDouble();
             final candidate = RadioCandidate.fromSong(
               item.toSong(),
               language: language,
               categoryHint: option.categoryHint,
-              popularity: popularity,
-              recency: recency,
+              popularity: qi == 0 ? rankSignal : rankSignal * 0.35,
+              recency: qi == 1 ? (0.30 + rankSignal * 0.50) : 0.12,
               isLatest: qi == 1,
             );
-
             final existingIndex = byId[item.id];
             if (existingIndex == null) {
               byId[item.id] = _candidates.length;
               _candidates.add(candidate);
             } else {
-              // Preserve both signals when one video appears in both searches.
-              // Previously the first (hits) result discarded its latest flag.
               final existing = _candidates[existingIndex];
               _candidates[existingIndex] = existing.copyWith(
                 popularity: existing.popularity > candidate.popularity
@@ -148,37 +162,59 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
             }
           }
         } catch (_) {
-          // One query/language failing must not kill the whole radio session.
+          // A single language/query failure must not kill the session.
         }
       }
     }
     if (_candidates.isEmpty) throw StateError('No radio candidates');
   }
 
-  RadioCandidate? _pickInitial() {
+  RadioCandidate? _pickNext({Set<String> excludeIds = const <String>{}}) {
     return _engine.pickNext(
       _candidates,
       selectedLanguages: widget.languages,
+      excludeIds: excludeIds,
+      recentLanguageCounts: _recentLanguageCounts,
     );
   }
 
-  Future<void> _playCandidate(RadioCandidate? candidate, {required bool addToHistory}) async {
-    if (candidate == null) throw StateError('No next song');
+  Future<bool> _playCandidate(
+    RadioCandidate candidate, {
+    required bool addToHistory,
+  }) async {
+    final token = ++_candidateGeneration;
 
-    // Do not mark a candidate current/started until the actual player has
-    // successfully started. A failed resolve/play must not poison the UI.
-    await audioHandler.playWithRetry(candidate.song);
-    if (!audioHandler.player.playing) {
-      throw StateError('Radio playback did not start');
-    }
-    if (!mounted) return;
-
+    // Commit all visible Radio identity fields together before playback begins.
+    // The background handler commits the media notification at the same point.
     _current = candidate;
     _paused = false;
+    _lyrics = null;
+    _lyricsLoading = true;
     _liked = await LikeService.instance.isLiked(candidate.song.id);
-    _loadLyrics(candidate.song);
+    if (!mounted || token != _candidateGeneration) return false;
 
-    if (mounted) setState(() => _loading = false);
+    _engine.setLiked(candidate.song.id, _liked);
+
+    setState(() {
+      _loading = true;
+    });
+    unawaited(_preloadArtworkAndMetadata());
+
+    final started = await _playWithRecovery(candidate, token);
+    if (!mounted || token != _candidateGeneration) return false;
+
+    if (!started) {
+      _engine.markFailed(candidate.song.id);
+      _upcoming.removeWhere((item) => item.song.id == candidate.song.id);
+      _lyrics = null;
+      _lyricsLoading = false;
+      return false;
+    }
+
+    _recentLanguageCounts[candidate.language.toLowerCase()] =
+        (_recentLanguageCounts[candidate.language.toLowerCase()] ?? 0) + 1;
+    _engine.markPlayed(candidate.song.id);
+    setState(() => _loading = false);
 
     if (addToHistory) {
       await RadioHistoryStore.instance.record(
@@ -189,85 +225,160 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         wasSkipped: false,
       );
     }
-    await _fillUpcoming();
+
+    unawaited(_loadLyrics(candidate, token));
+    unawaited(_fillUpcoming());
+    return true;
   }
 
-  Future<void> _loadLyrics(Song song) async {
-    if (!mounted) return;
-    setState(() {
-      _lyricsLoading = true;
-      _lyrics = null;
-    });
+  Future<bool> _playWithRecovery(RadioCandidate candidate, int token) async {
+    if (!mounted || token != _candidateGeneration) return false;
+    try {
+      await audioHandler.playWithRetry(candidate.song);
+    } catch (_) {}
+
+    if (!mounted || token != _candidateGeneration) return false;
+    if (audioHandler.player.playing) return true;
+
+    return _ensureRecovery(candidate, token, autoAdvanceOnFailure: false);
+  }
+
+  Future<void> _onRadioPlaybackError(Song song) async {
+    if (!mounted || _current?.song.id != song.id) return;
+    final token = _candidateGeneration;
+    final candidate = _current!;
+    final recovered = await _ensureRecovery(
+      candidate,
+      token,
+      autoAdvanceOnFailure: true,
+    );
+    if (!recovered && mounted && _current?.song.id == song.id) {
+      // _ensureRecovery owns the final failure state and has already skipped
+      // the failed candidate when this callback is the background path.
+      return;
+    }
+  }
+
+  Future<bool> _ensureRecovery(
+    RadioCandidate candidate,
+    int token, {
+    required bool autoAdvanceOnFailure,
+  }) async {
+    if (_recoveringSongId == candidate.song.id && _recoveryFuture != null) {
+      return _recoveryFuture!;
+    }
+
+    final completer = Completer<bool>();
+    _recoveringSongId = candidate.song.id;
+    _recoveryFuture = completer.future;
+
+    () async {
+      var recovered = false;
+      try {
+        for (var retry = 1; retry <= 8; retry++) {
+          await Future.delayed(const Duration(seconds: 2));
+          if (!mounted ||
+              token != _candidateGeneration ||
+              _current?.song.id != candidate.song.id) {
+            break;
+          }
+          try {
+            await audioHandler.playWithRetry(candidate.song);
+          } catch (_) {}
+          if (audioHandler.player.playing) {
+            recovered = true;
+            if (mounted) setState(() => _loading = false);
+            break;
+          }
+        }
+
+        if (!recovered && mounted && _current?.song.id == candidate.song.id) {
+          _engine.markFailed(candidate.song.id);
+          _upcoming.removeWhere((item) => item.song.id == candidate.song.id);
+          if (autoAdvanceOnFailure) {
+            await _advance(auto: true, failedSongId: candidate.song.id);
+          }
+        }
+      } finally {
+        if (!completer.isCompleted) completer.complete(recovered);
+        if (_recoveringSongId == candidate.song.id) {
+          _recoveringSongId = null;
+          _recoveryFuture = null;
+        }
+      }
+    }();
+
+    return completer.future;
+  }
+
+  Future<void> _loadLyrics(RadioCandidate candidate, int token) async {
     try {
       final result = await LyricsService.instance.getForSong(
-        songId: song.id,
-        title: song.title,
-        artist: song.artist,
-        durationSeconds: song.duration,
+        songId: candidate.song.id,
+        title: candidate.song.title,
+        artist: candidate.song.artist,
+        durationSeconds: candidate.song.duration,
       );
-      if (!mounted || _current?.song.id != song.id) return;
+      if (!mounted ||
+          token != _candidateGeneration ||
+          _current?.song.id != candidate.song.id) {
+        return;
+      }
       setState(() {
         _lyrics = result;
         _lyricsLoading = false;
       });
     } catch (_) {
-      if (mounted && _current?.song.id == song.id) {
+      if (mounted &&
+          token == _candidateGeneration &&
+          _current?.song.id == candidate.song.id) {
         setState(() {
-          _lyrics = null;
+          _lyrics = const LyricsResult();
           _lyricsLoading = false;
         });
       }
     }
   }
 
-  int _activeLyricIndex(Duration position, List<LyricLine> lines) {
-    var index = -1;
-    for (var i = 0; i < lines.length; i++) {
-      if (lines[i].time <= position) {
-        index = i;
-      } else {
-        break;
-      }
+  Future<void> _preloadArtworkAndMetadata() async {
+    final songs = <Song>[];
+    if (_current != null) songs.add(_current!.song);
+    songs.addAll(_upcoming.map((c) => c.song));
+    final next = songs.take(10).toList();
+
+    for (final song in next) {
+      if (song.thumb.isEmpty) continue;
+      final provider = _artworkCache.putIfAbsent(song.id, () => NetworkImage(song.thumb));
+      try {
+        if (mounted) await precacheImage(provider, context);
+      } catch (_) {}
     }
-    return index;
+    _trimArtworkCache();
+
+    unawaited(
+      LyricsService.instance.prefetchForSongs(
+        next,
+        maxSongs: 10,
+      ),
+    );
+    unawaited(audioHandler.prefetchRadioSongs(next.take(2).toList()));
   }
 
-  Widget _lyricsStrip() {
-    final result = _lyrics;
-    if (_lyricsLoading) {
-      return const SizedBox(
-        height: 34,
-        child: Center(child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))),
-      );
+  void _trimArtworkCache() {
+    while (_artworkCache.length > 12) {
+      final id = _artworkCache.keys.first;
+      final provider = _artworkCache.remove(id);
+      if (provider != null) {
+        PaintingBinding.instance.imageCache.evict(provider);
+      }
     }
-    if (result == null || !result.hasSynced) return const SizedBox.shrink();
-    final lines = result.synced!;
-    return StreamBuilder<Duration>(
-      stream: audioHandler.player.positionStream,
-      initialData: Duration.zero,
-      builder: (_, snapshot) {
-        final index = _activeLyricIndex(snapshot.data ?? Duration.zero, lines);
-        final text = index >= 0 ? lines[index].text : '';
-        final next = index + 1 < lines.length ? lines[index + 1].text : '';
-        return AnimatedSwitcher(
-          duration: const Duration(milliseconds: 180),
-          child: SizedBox(
-            key: ValueKey('$index-$text'),
-            height: 50,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(text, maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center,
-                  style: AppText.bodyM(color: Colors.white).copyWith(fontWeight: FontWeight.w700)),
-                if (next.isNotEmpty)
-                  Text(next, maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center,
-                    style: AppText.bodyS(color: Colors.white54)),
-              ],
-            ),
-          ),
-        );
-      },
-    );
+  }
+
+  void _evictRadioArtwork() {
+    for (final provider in _artworkCache.values) {
+      PaintingBinding.instance.imageCache.evict(provider);
+    }
+    _artworkCache.clear();
   }
 
   Future<void> _fillUpcoming() async {
@@ -281,58 +392,65 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       final fresh = _engine.buildLookAhead(
         _candidates,
         selectedLanguages: widget.languages,
-        count: 4 - _upcoming.length,
+        count: 10 - _upcoming.length,
         excludeIds: used,
+        recentLanguageCounts: _recentLanguageCounts,
       );
       _upcoming.addAll(fresh);
     } finally {
       _loadingNext = false;
     }
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    unawaited(_preloadArtworkAndMetadata());
   }
 
-  Future<void> _advance({required bool auto}) async {
+  Future<void> _advance({required bool auto, String? failedSongId}) async {
     if (_current == null || _transitioning) return;
     _transitioning = true;
     try {
-    final old = _current!;
-    if (!auto) {
-      final seconds = audioHandler.player.position.inSeconds;
-      await RadioHistoryStore.instance.markLatestAsSkipped(
-        songId: old.song.id,
-        skipPositionSec: seconds,
-      );
-      RadioService.instance.recordSkip(old.tags);
-    } else {
-      RadioService.instance.recordCompleted(old.tags);
-    }
+      final old = _current!;
+      if (failedSongId == old.song.id) {
+        _engine.markFailed(old.song.id);
+      } else if (!auto) {
+        final seconds = audioHandler.player.position.inSeconds;
+        await RadioHistoryStore.instance.markLatestAsSkipped(
+          songId: old.song.id,
+          skipPositionSec: seconds,
+        );
+        RadioService.instance.recordSkip(old.tags);
+      } else {
+        RadioService.instance.recordCompleted(old.tags);
+      }
 
-    _playedStack.add(old);
-    RadioCandidate? next;
-    if (_upcoming.isNotEmpty) {
-      next = _upcoming.removeAt(0);
-    } else {
-      next = _engine.pickNext(
-        _candidates,
-        selectedLanguages: widget.languages,
-        excludeIds: {old.song.id, ..._playedStack.map((e) => e.song.id)},
-      );
-    }
-    if (next == null) {
-      await _fetchCandidates();
-      next = _engine.pickNext(
-        _candidates,
-        selectedLanguages: widget.languages,
-        excludeIds: {old.song.id},
-      );
-    }
-    if (next == null || !mounted) return;
-    setState(() => _loading = true);
-    try {
-      await _playCandidate(next, addToHistory: true);
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
-    }
+      _playedStack.add(old);
+      _upcoming.removeWhere((item) => item.song.id == failedSongId);
+
+      for (var attempt = 0; attempt < 12; attempt++) {
+        RadioCandidate? next;
+        if (_upcoming.isNotEmpty) {
+          next = _upcoming.removeAt(0);
+        } else {
+          next = _pickNext(
+            excludeIds: {
+              old.song.id,
+              ..._playedStack.map((e) => e.song.id),
+            },
+          );
+        }
+        if (next == null) {
+          await _fetchCandidates();
+          next = _pickNext(
+            excludeIds: {old.song.id, ..._playedStack.map((e) => e.song.id)},
+          );
+        }
+        if (next == null || !mounted) return;
+
+        final ok = await _playCandidate(next, addToHistory: true);
+        if (ok) return;
+        _engine.markFailed(next.song.id);
+        _upcoming.removeWhere((item) => item.song.id == next!.song.id);
+      }
     } finally {
       _transitioning = false;
     }
@@ -341,17 +459,13 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   Future<void> _previous() async {
     if (_playedStack.isEmpty || _transitioning) return;
     _transitioning = true;
-    final previous = _playedStack.removeLast();
-    final current = _current;
-    if (current != null) _upcoming.insert(0, current);
-    setState(() => _loading = true);
     try {
-      // Previous is navigation, not a new radio recommendation. It therefore
-      // does not apply skip penalty and does not create a duplicate history
-      // record; the original play record remains the non-repeat marker.
-      await _playCandidate(previous, addToHistory: false);
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
+      final previous = _playedStack.removeLast();
+      final current = _current;
+      if (current != null) _upcoming.insert(0, current);
+      if (!await _playCandidate(previous, addToHistory: false)) {
+        _engine.markFailed(previous.song.id);
+      }
     } finally {
       _transitioning = false;
     }
@@ -388,16 +502,14 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         ],
       ),
     );
-
     if (confirmed != true || !mounted) return;
 
-    _generation++;
+    _sessionGeneration++;
+    _candidateGeneration++;
+    _engine.clearFailed();
     RadioService.instance.resetRadioSession();
     await audioHandler.pause();
     if (!mounted) return;
-
-    // Language screen reads the saved selection, so it opens with the
-    // previous choices already selected as required by the roadmap.
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(builder: (_) => const RadioLanguageSelectScreen()),
       (route) => route.isFirst,
@@ -408,10 +520,17 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     final current = _current;
     if (current == null) return;
     await LikeService.instance.toggleLike(current.song);
-    if (mounted) {
-      setState(() => _liked = !_liked);
-      if (_liked) RadioService.instance.recordFavorite(current.tags);
-    }
+    if (!mounted || _current?.song.id != current.song.id) return;
+    _liked = await LikeService.instance.isLiked(current.song.id);
+    _engine.setLiked(current.song.id, _liked);
+    if (_liked) RadioService.instance.recordFavorite(current.tags);
+    setState(() {});
+  }
+
+  NetworkImage? _artworkFor(RadioCandidate candidate) {
+    final url = candidate.song.thumb;
+    if (url.isEmpty) return null;
+    return _artworkCache.putIfAbsent(candidate.song.id, () => NetworkImage(url));
   }
 
   @override
@@ -419,161 +538,487 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     final current = _current;
     return Scaffold(
       backgroundColor: Colors.black,
-      body: SafeArea(
-        child: current == null
-            ? _loadingBody()
-            : GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onVerticalDragEnd: (details) {
-                  final velocity = details.primaryVelocity ?? 0;
-                  if (velocity < -350) _advance(auto: false);
-                  if (velocity > 350) _previous();
-                },
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (current.song.thumb.isNotEmpty)
-                      Image.network(
-                        current.song.thumb,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => const SizedBox(),
-                      ),
-                    Container(color: Colors.black.withOpacity(.55)),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(22, 14, 22, 26),
-                      child: Column(
-                        children: [
-                          Row(
-                            children: [
-                              IconButton(
-                                tooltip: 'Back',
-                                color: Colors.white,
-                                icon: const Icon(Icons.keyboard_arrow_down, size: 30),
-                                onPressed: () => Navigator.of(context).pop(),
-                              ),
-                              const Spacer(),
-                              Text('RADIO', style: AppText.titleM(color: Colors.white)),
-                              const Spacer(),
-                              PopupMenuButton<String>(
-                                tooltip: 'Radio menu',
-                                icon: const Icon(Icons.menu, color: Colors.white),
-                                onSelected: (value) {
-                                  if (value == 'reset') _confirmResetAndChangeLanguage();
-                                },
-                                itemBuilder: (_) => const [
-                                  PopupMenuItem<String>(
-                                    value: 'reset',
-                                    child: Text('Reset & Change Language'),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                          const Spacer(),
-                          Text(
-                            current.language.toUpperCase(),
-                            style: AppText.bodyS(color: Colors.white70),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            current.song.title,
-                            textAlign: TextAlign.center,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: AppText.displayL(color: Colors.white),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            current.song.artist,
-                            textAlign: TextAlign.center,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: AppText.bodyM(color: Colors.white70),
-                          ),
-                          const SizedBox(height: 16),
-                          _lyricsStrip(),
-                          const SizedBox(height: 8),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              IconButton(
-                                tooltip: 'Previous',
-                                iconSize: 34,
-                                color: Colors.white,
-                                onPressed: _playedStack.isEmpty ? null : _previous,
-                                icon: const Icon(Icons.skip_previous_rounded),
-                              ),
-                              const SizedBox(width: 14),
-                              StreamBuilder<PlayerState>(
-                                stream: audioHandler.player.playerStateStream,
-                                builder: (_, snapshot) {
-                                  final playing = snapshot.data?.playing ?? !_paused;
-                                  return InkResponse(
-                                    onTap: _togglePlay,
-                                    radius: 38,
-                                    child: CircleAvatar(
-                                      radius: 32,
-                                      backgroundColor: kGreen,
-                                      child: Icon(
-                                        playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                                        size: 38,
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                              const SizedBox(width: 14),
-                              IconButton(
-                                tooltip: 'Favorite',
-                                iconSize: 32,
-                                color: _liked ? kGreen : Colors.white,
-                                onPressed: _toggleLike,
-                                icon: Icon(_liked ? Icons.favorite : Icons.favorite_border),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 22),
-                          Text(
-                            '↑ Swipe up = Skip    ↓ Swipe down = Previous',
-                            style: AppText.bodyS(color: Colors.white60),
-                          ),
-                          const SizedBox(height: 8),
-                          if (_loading || _loadingNext)
-                            const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          else
-                            Text('${_upcoming.length} songs ready', style: AppText.bodyS(color: Colors.white54)),
-                        ],
-                      ),
-                    ),
-                  ],
+      body: current == null
+          ? _loadingBody()
+          : Stack(
+              fit: StackFit.expand,
+              children: [
+                _buildArtwork(current),
+                Container(color: Colors.black.withOpacity(.55)),
+                SafeArea(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onVerticalDragEnd: (details) {
+                      final velocity = details.primaryVelocity ?? 0;
+                      if (velocity < -350) unawaited(_advance(auto: false));
+                      if (velocity > 350) unawaited(_previous());
+                    },
+                    child: _buildContent(current),
+                  ),
                 ),
-              ),
+              ],
+            ),
+    );
+  }
+
+  Widget _buildArtwork(RadioCandidate current) {
+    final provider = _artworkFor(current);
+    if (provider == null) return const SizedBox.shrink();
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 300),
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      layoutBuilder: (currentChild, previousChildren) => Stack(
+        fit: StackFit.expand,
+        children: <Widget>[...previousChildren, if (currentChild != null) currentChild],
+      ),
+      transitionBuilder: (child, animation) => FadeTransition(
+        opacity: animation,
+        child: child,
+      ),
+      child: Image(
+        key: ValueKey(current.song.id),
+        image: provider,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => const SizedBox.shrink(),
       ),
     );
   }
 
-  Widget _loadingBody() {
-    return Center(
-      child: _error == null
-          ? const CircularProgressIndicator()
-          : Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.cloud_off, color: Colors.white70, size: 44),
-                const SizedBox(height: 12),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 30),
-                  child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70)),
-                ),
-                const SizedBox(height: 16),
-                ElevatedButton.icon(onPressed: _start, icon: const Icon(Icons.refresh), label: const Text('Retry')),
-              ],
+  Widget _buildContent(RadioCandidate current) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxHeight < 680;
+        return SingleChildScrollView(
+          physics: const BouncingScrollPhysics(),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: constraints.maxHeight),
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(20, compact ? 4 : 10, 20, 20),
+              child: Column(
+                children: [
+                  SizedBox(height: 48, child: _topBar()),
+                  SizedBox(height: compact ? 14 : 28),
+                  Text(current.language.toUpperCase(), style: AppText.bodyS(color: Colors.white70)),
+                  const SizedBox(height: 8),
+                  Text(
+                    current.song.title,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppText.displayL(color: Colors.white),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    current.song.artist,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppText.bodyM(color: Colors.white70),
+                  ),
+                  SizedBox(height: compact ? 10 : 14),
+                  RadioLyrics(
+                    key: ValueKey('lyrics-${current.song.id}'),
+                    result: _lyrics,
+                    loading: _lyricsLoading,
+                  ),
+                  SizedBox(height: compact ? 6 : 12),
+                  RadioPlayerProgress(
+                    key: ValueKey('progress-${current.song.id}'),
+                    player: audioHandler.player,
+                  ),
+                  SizedBox(height: compact ? 12 : 18),
+                  _controls(),
+                  SizedBox(height: compact ? 12 : 20),
+                  Text(
+                    '↑ Swipe up = Skip    ↓ Swipe down = Previous',
+                    style: AppText.bodyS(color: Colors.white60),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 8),
+                  if (_loading || _loadingNext)
+                    const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  else
+                    Text(
+                      '${_upcoming.length} songs ready',
+                      style: AppText.bodyS(color: Colors.white54),
+                    ),
+                ],
+              ),
             ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _topBar() {
+    return Row(
+      children: [
+        SizedBox(
+          width: 48,
+          height: 48,
+          child: IconButton(
+            tooltip: 'Close',
+            color: Colors.white,
+            iconSize: 22,
+            padding: EdgeInsets.zero,
+            icon: const Icon(Icons.close_rounded),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ),
+        const Spacer(),
+        Text('RADIO', style: AppText.titleM(color: Colors.white)),
+        const Spacer(),
+        SizedBox(
+          width: 48,
+          height: 48,
+          child: PopupMenuButton<String>(
+            tooltip: 'Radio menu',
+            icon: const Icon(Icons.menu, color: Colors.white),
+            onSelected: (value) {
+              if (value == 'reset') unawaited(_confirmResetAndChangeLanguage());
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem<String>(
+                value: 'reset',
+                child: Text('Reset & Change Language'),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _controls() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        IconButton(
+          tooltip: 'Previous',
+          iconSize: 34,
+          color: Colors.white,
+          onPressed: _playedStack.isEmpty || _transitioning ? null : _previous,
+          icon: const Icon(Icons.skip_previous_rounded),
+        ),
+        const SizedBox(width: 14),
+        StreamBuilder<PlayerState>(
+          stream: audioHandler.player.playerStateStream,
+          builder: (_, snapshot) {
+            final playing = snapshot.data?.playing ?? !_paused;
+            return InkResponse(
+              onTap: _transitioning ? null : _togglePlay,
+              radius: 38,
+              child: CircleAvatar(
+                radius: 32,
+                backgroundColor: kGreen,
+                child: Icon(
+                  playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  size: 38,
+                  color: Colors.white,
+                ),
+              ),
+            );
+          },
+        ),
+        const SizedBox(width: 14),
+        IconButton(
+          tooltip: 'Favorite',
+          iconSize: 32,
+          color: _liked ? kGreen : Colors.white,
+          onPressed: _toggleLike,
+          icon: Icon(_liked ? Icons.favorite : Icons.favorite_border),
+        ),
+      ],
+    );
+  }
+
+  Widget _loadingBody() {
+    return SafeArea(
+      child: Center(
+        child: _error == null
+            ? const CircularProgressIndicator()
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.cloud_off, color: Colors.white70, size: 44),
+                  const SizedBox(height: 12),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 30),
+                    child: Text(
+                      _error!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  ElevatedButton.icon(
+                    onPressed: _start,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Retry'),
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+}
+
+class RadioPlayerProgress extends StatefulWidget {
+  final AudioPlayer player;
+  const RadioPlayerProgress({super.key, required this.player});
+
+  @override
+  State<RadioPlayerProgress> createState() => _RadioPlayerProgressState();
+}
+
+class _RadioPlayerProgressState extends State<RadioPlayerProgress>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ticker;
+  bool _dragging = false;
+  double _dragMs = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 1),
+    )..addListener(_onFrame)..repeat();
+  }
+
+  @override
+  void dispose() {
+    _ticker
+      ..removeListener(_onFrame)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _onFrame() {
+    if (!mounted || _dragging) return;
+    setState(() {});
+  }
+
+  String _format(Duration d) {
+    final totalSeconds = d.inSeconds;
+    final minutes = totalSeconds ~/ 60;
+    final seconds = totalSeconds % 60;
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final duration = widget.player.duration ?? Duration.zero;
+    final position = _dragging
+        ? Duration(milliseconds: _dragMs.round())
+        : widget.player.position;
+    final maxMs = mathMax(1, duration.inMilliseconds);
+    final valueMs = position.inMilliseconds.clamp(0, maxMs).toDouble();
+
+    return Row(
+      children: [
+        SizedBox(
+          width: 36,
+          child: Text(_format(position), style: AppText.bodyS(color: Colors.white70)),
+        ),
+        Expanded(
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 2.5,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+            ),
+            child: Slider(
+              min: 0,
+              max: maxMs.toDouble(),
+              value: valueMs,
+              onChangeStart: (value) {
+                setState(() {
+                  _dragging = true;
+                  _dragMs = value;
+                });
+              },
+              onChanged: (value) {
+                setState(() => _dragMs = value);
+              },
+              onChangeEnd: (value) async {
+                setState(() {
+                  _dragging = false;
+                  _dragMs = value;
+                });
+                await widget.player.seek(Duration(milliseconds: value.round()));
+              },
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 36,
+          child: Text(_format(duration), textAlign: TextAlign.right, style: AppText.bodyS(color: Colors.white70)),
+        ),
+      ],
+    );
+  }
+
+  double mathMax(num a, num b) => a > b ? a.toDouble() : b.toDouble();
+}
+
+class RadioLyrics extends StatefulWidget {
+  final LyricsResult? result;
+  final bool loading;
+  const RadioLyrics({super.key, required this.result, required this.loading});
+
+  @override
+  State<RadioLyrics> createState() => _RadioLyricsState();
+}
+
+class _RadioLyricsState extends State<RadioLyrics>
+    with SingleTickerProviderStateMixin {
+  final ScrollController _scrollController = ScrollController();
+  late final AnimationController _ticker;
+  int _activeIndex = -1;
+  List<LyricLine> _lines = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _lines = widget.result?.synced ?? const [];
+    _ticker = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 1),
+    )..addListener(_syncActiveLine)..repeat();
+  }
+
+  @override
+  void didUpdateWidget(covariant RadioLyrics oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final newLines = widget.result?.synced ?? const <LyricLine>[];
+    if (!identical(newLines, _lines)) {
+      _lines = newLines;
+      _activeIndex = -1;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _lines.isNotEmpty && _scrollController.hasClients) {
+          _scrollController.jumpTo(0);
+        }
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _ticker
+      ..removeListener(_syncActiveLine)
+      ..dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  int _findActive(Duration position) {
+    var index = -1;
+    for (var i = 0; i < _lines.length; i++) {
+      if (_lines[i].time <= position) {
+        index = i;
+      } else {
+        break;
+      }
+    }
+    return index;
+  }
+
+  void _syncActiveLine() {
+    if (!mounted || _lines.isEmpty) return;
+    final next = _findActive(widgetPlayerPosition);
+    if (next == _activeIndex) return;
+    setState(() => _activeIndex = next);
+    _centerActive(next);
+  }
+
+  Duration get widgetPlayerPosition => audioHandler.player.position;
+
+  void _centerActive(int index) {
+    if (index < 0 || !_scrollController.hasClients) return;
+    const itemExtent = 46.0;
+    const viewportHeight = 220.0;
+    final target = (index * itemExtent) - (viewportHeight / 2) + (itemExtent / 2);
+    final maxScroll = _scrollController.position.maxScrollExtent;
+    final clamped = target.clamp(0.0, maxScroll).toDouble();
+    _scrollController.animateTo(
+      clamped,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.loading) {
+      return const SizedBox(
+        height: 220,
+        child: Center(
+          child: SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+
+    if (_lines.isEmpty) {
+      return const SizedBox(
+        height: 220,
+        child: Center(
+          child: Text(
+            'No synced lyrics available',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.white54, fontSize: 14),
+          ),
+        ),
+      );
+    }
+
+    return SizedBox(
+      height: 220,
+      child: ListView.builder(
+        controller: _scrollController,
+        physics: const NeverScrollableScrollPhysics(),
+        itemExtent: 46,
+        itemCount: _lines.length,
+        itemBuilder: (_, index) {
+          final active = index == _activeIndex;
+          return Center(
+            child: AnimatedDefaultTextStyle(
+              duration: const Duration(milliseconds: 220),
+              curve: Curves.easeOut,
+              style: AppText.bodyM(color: active ? Colors.white : Colors.white54).copyWith(
+                fontWeight: active ? FontWeight.w800 : FontWeight.w500,
+                fontSize: active ? 17 : 14,
+                shadows: active
+                    ? const [Shadow(color: Colors.white54, blurRadius: 10)]
+                    : const [],
+              ),
+              child: AnimatedOpacity(
+                duration: const Duration(milliseconds: 220),
+                opacity: active ? 1 : 0.46,
+                child: Transform.scale(
+                  scale: active ? 1 : 0.92,
+                  child: Text(
+                    _lines[index].text,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 }

@@ -444,7 +444,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // seedha final error dikha deta tha, 0 retries).
   void _handleStreamDrop() {
     final token = _playToken;
-    final song = QueueService.instance.currentSong;
+    final song = _activePlaybackSong ?? QueueService.instance.currentSong;
 
     if (song != null && _streamErrorRetries < _maxStreamErrorRetries) {
       _streamErrorRetries++;
@@ -472,12 +472,11 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         playing: false,
       ),
     );
-    final title = mediaItem.valueOrNull?.title;
-    onError?.call(
-      title != null
-          ? '"$title" play karte waqt error aaya (stream drop ho gaya). Koi aur gaana try karein.'
-          : 'Playback me error aaya. Koi aur gaana try karein.',
-    );
+    if (song != null) {
+      _notifyPlaybackError(song);
+    } else {
+      onError?.call('Playback me error aaya. Koi aur gaana try karein.');
+    }
   }
 
   Future<void> _retryAfterStreamDrop(Song song, int token) async {
@@ -591,6 +590,13 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // `stop()` (aur playWithRetry khud) ek hi Timer share kar sakein.
   Timer? _skipDebounce;
 
+  // v55 Radio Enhanced: Radio owns its own candidate/history/error transitions.
+  // When this flag is true, the global just_audio completion listener must not
+  // also advance QueueService.
+  //
+  // Radio additionally tracks the active Song independently of QueueService so
+  // stream-drop recovery always targets the visible/playing Radio candidate.
+  //
   // Radio Player owns its own candidate/history transitions. When this flag
   // is true, the global just_audio completion listener must not also advance
   // QueueService, otherwise one completed Radio song can trigger two next
@@ -598,15 +604,65 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _radioPlaybackOwned = false;
   Future<void> Function()? _radioNextHandler;
   Future<void> Function()? _radioPreviousHandler;
+  Future<void> Function(Song song)? _radioErrorHandler;
+  Song? _activePlaybackSong;
 
   void setRadioPlaybackOwned(
     bool owned, {
     Future<void> Function()? onNext,
     Future<void> Function()? onPrevious,
+    Future<void> Function(Song song)? onError,
   }) {
     _radioPlaybackOwned = owned;
     _radioNextHandler = owned ? onNext : null;
     _radioPreviousHandler = owned ? onPrevious : null;
+    _radioErrorHandler = owned ? onError : null;
+  }
+
+  /// Radio-only preload. This never touches QueueService or its queue index.
+  /// It resolves and disk-caches only the next two songs, reusing the same
+  /// validated cache path as normal playback.
+  Future<void> prefetchRadioSongs(Iterable<Song> songs) async {
+    for (final song in songs.take(2)) {
+      _prefetchRadioOne(song);
+    }
+  }
+
+  void _prefetchRadioOne(Song song) {
+    if (_urlCache.containsKey(song.id) || _prefetchingIds.contains(song.id)) {
+      return;
+    }
+    _prefetchingIds.add(song.id);
+    () async {
+      try {
+        final already = await DownloadDB.instance.getFilePath(song.id) ??
+            await CacheDB.instance.getFilePath(song.id);
+        if (already != null) return;
+        final url = await YoutubeService.instance
+            .getAudioUrl(song.id, title: song.title, author: song.artist)
+            .timeout(const Duration(seconds: 20));
+        if (url == null) return;
+        _urlCache[song.id] = url;
+        // Keep the in-flight marker until the cache write completes so a
+        // second Radio preload cannot start a duplicate download.
+        await _autoCacheInBackground(song, url, markAsPlayed: false);
+      } catch (_) {
+        // Radio preload is best-effort and must never affect playback.
+      } finally {
+        _prefetchingIds.remove(song.id);
+        if (_urlCache.length > 12) {
+          _urlCache.remove(_urlCache.keys.first);
+        }
+      }
+    }();
+  }
+
+  void _notifyPlaybackError(Song song) {
+    if (_radioPlaybackOwned && _radioErrorHandler != null) {
+      unawaited(_radioErrorHandler!(song));
+      return;
+    }
+    onError?.call('"${song.title}" play nahi ho paya. Koi aur gaana try karein.');
   }
 
   @override
@@ -676,8 +732,10 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // ---------------- Custom playback methods ----------------
 
   // Streaming URL se seedha play karo (YouTube stream)
-  Future<void> playSong(Song song, String url) =>
-      _playSong(song, url, ++_playToken, useHeaders: false);
+  Future<void> playSong(Song song, String url) {
+    _activePlaybackSong = song;
+    return _playSong(song, url, ++_playToken, useHeaders: false);
+  }
 
   // BUG FIX (2026-09-17, Attempt #5 RESULT — real-device log confirm
   // kiya): "WITH cdnHeaders" (desktop Chrome UA) har baar turant "Source
@@ -753,7 +811,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           playing: false,
         ),
       );
-      onError?.call('"${song.title}" play nahi ho paya. Koi aur gaana try karein.');
+      _notifyPlaybackError(song);
     }
   }
 
@@ -785,6 +843,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // dikhe aur spinner/loading state UI me nazar aaye.
   Future<void> playWithRetry(Song song) async {
     final token = ++_playToken;
+    _activePlaybackSong = song;
     // Naya song select hua — purane song ke stream-drop retries ka count
     // carry-forward nahi hona chahiye.
     _streamErrorRetries = 0;
@@ -801,10 +860,17 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // baje — silence better hai galat gaane se.
     if (token == _playToken) {
       try {
-        await player.pause();
+        if (_radioPlaybackOwned) {
+          // Radio switches are atomic: stop clears the previous source/duration
+          // before the new MediaItem is published, so the timeline cannot show
+          // a stale total from the previous song. Normal playback keeps the
+          // existing pause-only behavior to avoid changing the wider app.
+          await player.stop();
+        } else {
+          await player.pause();
+        }
       } catch (_) {
-        // player me abhi koi source hi na ho to pause() error de sakta
-        // hai — usse ignore karo, ye sirf best-effort silence hai
+        // Empty player state can throw on either path — best effort only.
       }
     }
     if (token != _playToken) return; // pause ke dauraan koi naya tap aa gaya
@@ -873,14 +939,17 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // resolve thoda delay hota hai jab tak taps settle na ho jaayein.
     final completer = Completer<void>();
     _skipDebounce?.cancel();
-    _skipDebounce = Timer(const Duration(milliseconds: 300), () async {
-      if (token != _playToken) {
+    _skipDebounce = Timer(
+      _radioPlaybackOwned ? Duration.zero : const Duration(milliseconds: 300),
+      () async {
+        if (token != _playToken) {
+          completer.complete();
+          return;
+        }
+        await _resolveAndPlay(song, token);
         completer.complete();
-        return;
-      }
-      await _resolveAndPlay(song, token);
-      completer.complete();
-    });
+      },
+    );
     return completer.future;
   }
 
@@ -994,15 +1063,13 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         playing: false,
       ),
     );
-    onError?.call(
-      '"${song.title}" abhi available nahi hai (shayad bahut lambi ya '
-      'restricted video hai). Koi aur gaana try karein.',
-    );
+    _notifyPlaybackError(song);
   }
 
   // Local file se play karo — downloaded ya already-cached songs ke liye
   Future<void> playFromFile(Song song, String filePath) async {
     final token = ++_playToken;
+    _activePlaybackSong = song;
     mediaItem.add(_toMediaItem(song.copyWith(filePath: filePath)));
     try {
       await player.setFilePath(filePath);

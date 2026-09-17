@@ -2163,3 +2163,70 @@ Existing notes above are unchanged. This section records the implementation targ
 - BUG-15 to BUG-24: Natural old/new/hit/latest weighted mix, soft popularity & recency scoring, tagging improvements.
 
 Format preserved: previous notes were not edited; only this new section was appended.
+
+
+# v55 Radio Enhanced
+
+This section was appended without changing any previous NOTES.md content.
+
+## Fixed / implemented
+
+- BUG-25 — Radio artwork was inset by SafeArea and could leave black edges.
+  Previous behavior: the full player background lived inside SafeArea and used a raw Image.network, causing edge gaps and visible loading flashes.
+  New behavior: artwork is a full-screen edge-to-edge layer; Radio content alone respects SafeArea, and artwork changes use a 300ms AnimatedSwitcher fade with warmed image providers.
+  Files modified: lib/screens/radio_player_screen.dart
+
+- BUG-26 — Radio screen UI could lag behind the audio/notification identity.
+  Previous behavior: `_current` was assigned only after playback succeeded, while the media notification could already contain the new song.
+  New behavior: one candidate generation commits current artwork/title/artist/like state/lyrics reset/progress identity together before starting the candidate; stale lyric/like results are rejected by the same generation token.
+  Files modified: lib/screens/radio_player_screen.dart, lib/services/background_service.dart
+
+- BUG-27 — Timeline was missing a real player-driven seek bar.
+  Previous behavior: Radio showed no current-vs-total player timeline.
+  New behavior: a draggable timeline reads `just_audio` position/duration, renders smooth frame-driven progress, and seeks the actual player without wall-clock calculation.
+  Files modified: lib/screens/radio_player_screen.dart
+
+- BUG-28 — Lyrics were a two-line switcher, not synchronized scrolling LRC.
+  Previous behavior: only the current and next lyric were shown and the active line did not auto-center.
+  New behavior: parsed LRC lines scroll smoothly, active line is bright/bold/glowing, inactive lines are smaller/faded, and unavailable synced lyrics show `No synced lyrics available` without collapsing layout.
+  Files modified: lib/screens/radio_player_screen.dart, lib/services/lyrics_service.dart
+
+- BUG-29 — Completed Radio playback could stop instead of advancing cleanly.
+  Previous behavior: completion depended on the screen transition timing and the shared background completion path.
+  New behavior: Radio retains playback ownership, completion immediately advances through the Radio candidate path, and the background handler never delegates Radio completion to QueueService.
+  Files modified: lib/screens/radio_player_screen.dart, lib/services/background_service.dart
+
+- BUG-30 — Resolve/play failures could surface repeated user-facing errors.
+  Previous behavior: Radio shared the normal global playback error path, so failed candidates could repeatedly surface retry/error UI.
+  New behavior: Radio errors route to an invisible session recovery callback: after a failure, wait 2 seconds, retry automatically up to 8 times, then mark the song failed for the session and skip it without repeated dialogs.
+  Files modified: lib/screens/radio_player_screen.dart, lib/services/background_service.dart, lib/services/radio_engine.dart
+
+- BUG-31 — Stream-drop recovery used QueueService's current song even during Radio.
+  Previous behavior: background stream-drop handling read `QueueService.instance.currentSong`, which is not authoritative while Radio owns playback.
+  New behavior: the background handler tracks the active playback Song independently and uses the Radio error callback when Radio owns playback.
+  Files modified: lib/services/background_service.dart
+
+- BUG-32 — Radio preload depth was too small and was tied to queue preloading.
+  Previous behavior: Radio kept only four upcoming candidates and background prefetching was designed around QueueService.
+  New behavior: Radio keeps up to ten candidates ahead; the next ten artworks and lyrics metadata are prefetched with bounded concurrency, while only the next two Radio songs receive audio resolve/cache preload through a Radio-only handler API that never mutates QueueService.
+  Files modified: lib/screens/radio_player_screen.dart, lib/services/background_service.dart, lib/services/lyrics_service.dart
+
+- BUG-33 — Radio selection did not explicitly remember session-failed candidates or liked weighting in one engine-owned session state.
+  Previous behavior: exclusion was passed ad hoc by the screen and liked status was checked only for the visible song.
+  New behavior: RadioEngine owns a session failed-ID set and liked-ID set; failed candidates are hard blocked, likes receive a weighted boost only, and the engine keeps hard 150-day exclusion plus mood, skip-derived mood penalty, language balance, soft old/new signals and randomness.
+  Files modified: lib/services/radio_engine.dart, lib/screens/radio_player_screen.dart
+
+- BUG-34 — Media/headset next/previous needed an explicit Radio error/ownership boundary.
+  Previous behavior: Radio had next/previous ownership but no separate Radio error boundary.
+  New behavior: next/previous remain routed to the Radio screen while owned, and playback failures are routed to the same Radio recovery path; QueueService is not taken over.
+  Files modified: lib/services/background_service.dart, lib/screens/radio_player_screen.dart
+
+## Files modified in v55
+
+- lib/screens/radio_player_screen.dart
+- lib/services/radio_engine.dart
+- lib/services/background_service.dart
+- lib/services/lyrics_service.dart
+- NOTES.md (append-only)
+
+`audio_handler.dart`, `lib/widgets/radio_lyrics.dart`, and `lib/widgets/player_progress.dart` were not created or renamed because those files do not exist in the supplied v54 project; the existing architecture keeps the audio handler in `background_service.dart` and the Radio UI in `radio_player_screen.dart`.
