@@ -33,6 +33,7 @@ const String _kNormalizeVolume = 'setting_normalize_volume';
 const String _kDownloadsWifiOnly = 'setting_downloads_wifi_only';
 const String _kDownloadsAutoCleanup = 'setting_downloads_auto_cleanup';
 const String _kDownloadQuality = 'setting_download_quality';
+const String _kAutoDownloadOnPlay = 'setting_auto_download_on_play';
 
 const String _kAutoCache = 'setting_auto_cache';
 const String _kPreloadNext = 'cache_preload_next'; // CacheManagerScreen ke saath shared key
@@ -71,6 +72,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _downloadsWifiOnly = true;
   bool _downloadsAutoCleanup = false;
   String _downloadQuality = 'High';
+  // NEW (v41 — user request): jo gaana play ho wo automatic download ho
+  // jaaye — default OFF (jaisa maanga gaya), user khud ON kare.
+  bool _autoDownloadOnPlay = false;
 
   // Cache
   bool _autoCache = true;
@@ -138,6 +142,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _downloadsWifiOnly = prefs.getBool(_kDownloadsWifiOnly) ?? true;
         _downloadsAutoCleanup = prefs.getBool(_kDownloadsAutoCleanup) ?? false;
         _downloadQuality = prefs.getString(_kDownloadQuality) ?? 'High';
+        _autoDownloadOnPlay = prefs.getBool(_kAutoDownloadOnPlay) ?? false;
 
         _autoCache = prefs.getBool(_kAutoCache) ?? true;
         _preloadNext = prefs.getBool(_kPreloadNext) ?? true;
@@ -550,6 +555,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       current: _downloadQuality,
                       onPicked: (v) =>
                           _setString(_kDownloadQuality, v, () => _downloadQuality = v),
+                    ),
+                  ),
+                  // NEW (v41 — user request): jo gaana play ho wo automatic
+                  // download ho jaaye. Default OFF hai — user khud ON kare.
+                  _buildSwitchTile(
+                    icon: Icons.download_for_offline,
+                    title: 'Auto-download on Play',
+                    subtitle: 'Jo gaana play karo wo apne aap download ho jaaye',
+                    value: _autoDownloadOnPlay,
+                    onChanged: (v) => _setBool(
+                      _kAutoDownloadOnPlay,
+                      v,
+                      () => _autoDownloadOnPlay = v,
                     ),
                   ),
 

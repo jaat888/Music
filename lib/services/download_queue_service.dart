@@ -109,6 +109,18 @@ class DownloadQueueService extends ChangeNotifier {
         await _pushNotification(song);
 
         var success = false;
+        // BUG FIX (v40 — user report: "download speed fast nahi hai"):
+        // pehle `notifyListeners()` har single network chunk pe call hota
+        // tha (koi throttle nahi) — ek 3-4MB gaane ke liye bhi ye sainkdon
+        // baar fire hota, aur har baar poori app ke listening widgets
+        // (jaise full player ka download icon) synchronously rebuild hote.
+        // Dart single-threaded hai — ye rebuild kaam agle network chunk ko
+        // process karne se seedha compete karta tha, isliye download
+        // (khaaskar kam-RAM phones par) slow feel hota tha, chahe asli
+        // network speed theek ho. Ab UI-notify bhi notification ki tarah
+        // sirf jab % badle tabhi fire hota hai (max ~100 baar poori
+        // download mein, chahe file me hazaar chunk hi kyun na hon).
+        var lastNotifiedPct = -1;
         try {
           final path = await YoutubeService.instance.download(
             song.id,
@@ -117,10 +129,12 @@ class DownloadQueueService extends ChangeNotifier {
             onProgress: (received, total) {
               if (total <= 0) return;
               _currentProgress = received / total;
+              final pct = (_currentProgress * 100).round();
+              if (pct == lastNotifiedPct) return;
+              lastNotifiedPct = pct;
               notifyListeners();
               // Notification bahut baar update na ho (spam) — sirf har
               // ~5% pe refresh karo.
-              final pct = (_currentProgress * 100).round();
               if (pct % 5 == 0) {
                 unawaited(_pushNotification(song));
               }

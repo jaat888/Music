@@ -18,6 +18,10 @@ import '../services/youtube_service.dart';
 import '../services/background_service.dart';
 import '../services/like_service.dart';
 import '../services/queue_service.dart';
+import '../services/download_queue_service.dart';
+import '../db/playlist_db.dart';
+import '../models/playlist.dart';
+import 'package:uuid/uuid.dart';
 import '../widgets/song_card.dart';
 import '../widgets/shimmer_song_card.dart';
 import '../widgets/mini_player.dart';
@@ -115,6 +119,73 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
     await showAddToPlaylistSheet(context, song);
   }
 
+  // NEW (v41 — user request): poori playlist ek tap me local library me
+  // save karo (naya playlist bana ke) — bilkul "Import" feature jaisa hi,
+  // bas seedha isi screen se, koi link paste nahi karna.
+  Future<void> _addAllToLibrary() async {
+    if (_tracks.isEmpty) return;
+    final controller = TextEditingController(text: widget.title);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kBgElev,
+        title: Text('Library me save karein', style: AppText.displayS()),
+        content: TextField(
+          controller: controller,
+          style: AppText.bodyM(),
+          decoration: const InputDecoration(labelText: 'Playlist ka naam'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('Cancel', style: AppText.button(color: kTextDim)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: Text('Save', style: AppText.button(color: kGreen)),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty) return;
+
+    final id = const Uuid().v4();
+    await PlaylistDB.instance.createPlaylist(
+      Playlist(
+        id: id,
+        name: name,
+        coverEmoji: '📥',
+        coverGradient: 'default',
+        songIds: const [],
+        createdAt: DateTime.now(),
+      ),
+    );
+    for (final r in _tracks) {
+      await PlaylistDB.instance.addSongToPlaylist(id, r.toSong());
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('"$name" library me save ho gayi — ${_tracks.length} gaane')),
+    );
+  }
+
+  // NEW (v41 — user request): poori playlist ek tap me download queue me
+  // daal do — jo already downloaded/queued hain wo skip ho jaate hain.
+  Future<void> _downloadAll() async {
+    if (_tracks.isEmpty) return;
+    var added = 0;
+    for (final r in _tracks) {
+      final song = r.toSong();
+      if (DownloadQueueService.instance.isActive(song.id)) continue;
+      DownloadQueueService.instance.enqueue(song);
+      added++;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('$added gaane download queue mein daal diye')),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -193,21 +264,50 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
                     ),
                     const SizedBox(height: 16),
                     if (_tracks.isNotEmpty)
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: _playAll,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: kGreen,
-                            foregroundColor: Colors.black,
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: _playAll,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: kGreen,
+                                foregroundColor: Colors.black,
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                              ),
+                              icon: const Icon(Icons.play_arrow),
+                              label: const Text('Play All'),
                             ),
                           ),
-                          icon: const Icon(Icons.play_arrow),
-                          label: const Text('Play All'),
-                        ),
+                          const SizedBox(width: 8),
+                          // NEW (v41): poori playlist library me save karo
+                          Container(
+                            decoration: BoxDecoration(
+                              color: kSurface,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: IconButton(
+                              icon: Icon(Icons.playlist_add, color: kText),
+                              tooltip: 'Library me save karein',
+                              onPressed: _addAllToLibrary,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          // NEW (v41): poori playlist ek tap me download
+                          Container(
+                            decoration: BoxDecoration(
+                              color: kSurface,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: IconButton(
+                              icon: Icon(Icons.download_for_offline_outlined, color: kText),
+                              tooltip: 'Playlist download karo',
+                              onPressed: _downloadAll,
+                            ),
+                          ),
+                        ],
                       ),
                     const SizedBox(height: 16),
                     if (_loading)

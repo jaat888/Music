@@ -32,6 +32,11 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   List<Song> _downloads = [];
   Set<String> _likedIds = {};
 
+  // NEW (v41 — user request): "select karke delete kar sakein" — select
+  // mode + bulk delete.
+  bool _selectMode = false;
+  Set<String> _selectedIds = {};
+
   @override
   void initState() {
     super.initState();
@@ -127,6 +132,74 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     setState(() => _downloads.removeWhere((s) => s.id == song.id));
   }
 
+  // NEW (v41): select mode toggle + bulk delete.
+  void _toggleSelectMode() {
+    setState(() {
+      _selectMode = !_selectMode;
+      _selectedIds.clear();
+    });
+  }
+
+  void _toggleSelected(String id) {
+    setState(() {
+      if (_selectedIds.contains(id)) {
+        _selectedIds.remove(id);
+      } else {
+        _selectedIds.add(id);
+      }
+    });
+  }
+
+  void _selectAll() {
+    setState(() {
+      if (_selectedIds.length == _downloads.length) {
+        _selectedIds.clear();
+      } else {
+        _selectedIds = _downloads.map((s) => s.id).toSet();
+      }
+    });
+  }
+
+  Future<void> _confirmDeleteSelected() async {
+    if (_selectedIds.isEmpty) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: kBgElev,
+        title: Text('Delete karein?', style: AppText.displayS(color: kText)),
+        content: Text(
+          '${_selectedIds.length} gaane hamesha ke liye delete ho jayenge.',
+          style: AppText.bodyM(color: kTextDim),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel', style: AppText.button(color: kTextDim)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Delete', style: AppText.button(color: kRed)),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    for (final song in _downloads.where((s) => _selectedIds.contains(s.id))) {
+      if (song.filePath != null) {
+        final file = File(song.filePath!);
+        if (await file.exists()) await file.delete();
+      }
+      await DownloadDB.instance.delete(song.id);
+    }
+    if (!mounted) return;
+    setState(() {
+      _downloads.removeWhere((s) => _selectedIds.contains(s.id));
+      _selectedIds.clear();
+      _selectMode = false;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -135,9 +208,35 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
         backgroundColor: kBg,
         elevation: 0,
         title: Text(
-          'Downloads',
+          _selectMode ? '${_selectedIds.length} selected' : 'Downloads',
           style: AppText.displayM(color: kGreen).copyWith(fontSize: 24),
         ),
+        // NEW (v41 — user request): select mode se multi-select + delete.
+        actions: [
+          if (_downloads.isNotEmpty && _selectMode) ...[
+            IconButton(
+              icon: Icon(
+                _selectedIds.length == _downloads.length
+                    ? Icons.deselect
+                    : Icons.select_all,
+                color: kText,
+              ),
+              tooltip: 'Select All',
+              onPressed: _selectAll,
+            ),
+            IconButton(
+              icon: Icon(Icons.delete, color: kRed),
+              tooltip: 'Delete selected',
+              onPressed: _selectedIds.isEmpty ? null : _confirmDeleteSelected,
+            ),
+          ],
+          if (_downloads.isNotEmpty)
+            IconButton(
+              icon: Icon(_selectMode ? Icons.close : Icons.checklist, color: kText),
+              tooltip: _selectMode ? 'Cancel' : 'Select',
+              onPressed: _toggleSelectMode,
+            ),
+        ],
       ),
       body: SafeArea(
         child: Column(
@@ -293,6 +392,45 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
         itemCount: _downloads.length,
         itemBuilder: (context, i) {
           final song = _downloads[i];
+          final selected = _selectedIds.contains(song.id);
+          final row = _selectMode
+              ? Row(
+                  children: [
+                    Checkbox(
+                      value: selected,
+                      activeColor: kGreen,
+                      onChanged: (_) => _toggleSelected(song.id),
+                    ),
+                    Expanded(
+                      child: SongCard(
+                        song: song,
+                        isLiked: _likedIds.contains(song.id),
+                        isCached: false,
+                        onTap: () => _toggleSelected(song.id),
+                        onPlay: () => _toggleSelected(song.id),
+                        onDownload: () => _toggleSelected(song.id),
+                        onLike: () => _toggleSelected(song.id),
+                      ),
+                    ),
+                  ],
+                )
+              : SongCard(
+                  song: song,
+                  isLiked: _likedIds.contains(song.id),
+                  isCached: false,
+                  onTap: () => _play(i),
+                  onPlay: () => _play(i),
+                  onDownload: () => _confirmDelete(song),
+                  onLike: () => _toggleLike(song),
+                );
+
+          if (_selectMode) {
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: row,
+            );
+          }
+
           return Padding(
             padding: const EdgeInsets.only(bottom: 6),
             child: Dismissible(
@@ -311,15 +449,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                 ),
                 child: const Icon(Icons.delete, color: Colors.white),
               ),
-              child: SongCard(
-                song: song,
-                isLiked: _likedIds.contains(song.id),
-                isCached: false,
-                onTap: () => _play(i),
-                onPlay: () => _play(i),
-                onDownload: () => _confirmDelete(song),
-                onLike: () => _toggleLike(song),
-              ),
+              child: row,
             ),
           );
         },

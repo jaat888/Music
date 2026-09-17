@@ -18,6 +18,7 @@ import '../db/download_db.dart';
 import '../db/play_history_db.dart';
 import '../models/song.dart';
 import 'cache_service.dart';
+import 'download_queue_service.dart';
 import 'equalizer_presets.dart';
 import 'like_service.dart';
 import 'queue_service.dart';
@@ -682,6 +683,12 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       // Played"/"Most Played" ke liye. Fire-and-forget, playback ko kabhi
       // block/fail nahi karega.
       unawaited(PlayHistoryDB.instance.recordPlay(song));
+      // NEW (v41 — user request): "jo gaana play ho wo automatic download
+      // ho jaaye" — settings me OFF-by-default toggle. Fire-and-forget,
+      // playback ko kabhi block nahi karega, aur DownloadQueueService khud
+      // hi already-downloading/already-downloaded duplicate check karta
+      // hai — isliye yahan seedha enqueue karna safe hai.
+      unawaited(_maybeAutoDownload(song));
       // Playback successfully shuru ho gaya — stream-drop retry counter
       // reset karo taaki agli baar drop hone pe wapas poore 3 attempts milein.
       _streamErrorRetries = 0;
@@ -709,6 +716,21 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         ),
       );
       onError?.call('"${song.title}" play nahi ho paya. Koi aur gaana try karein.');
+    }
+  }
+
+  // NEW (v41): "Auto-download on Play" setting — dekho settings_screen.dart
+  // ('setting_auto_download_on_play', default OFF).
+  Future<void> _maybeAutoDownload(Song song) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final enabled = prefs.getBool('setting_auto_download_on_play') ?? false;
+      if (!enabled) return;
+      if (await DownloadDB.instance.exists(song.id)) return;
+      if (DownloadQueueService.instance.isActive(song.id)) return;
+      DownloadQueueService.instance.enqueue(song);
+    } catch (_) {
+      // Auto-download fail ho to bhi playback pe asar nahi padna chahiye.
     }
   }
 
