@@ -2293,3 +2293,40 @@ This section is appended only; all earlier NOTES.md content remains unchanged.
   analyze` / Android build could not be executed here.
 - Dart delimiter/static source checks passed for the modified Radio/Home files.
 - Project package name, directory structure and existing assets were preserved.
+
+# v55.1 Radio Sync + Lyrics Reliability Hotfix — 2026-09-17
+
+This section is appended only; all earlier NOTES.md content remains unchanged.
+
+## BUG-41 — Lyrics were effectively single-provider dependent
+- Previous behavior: Radio lyrics depended on LRCLIB alone and cached a negative/empty result, so many Indian catalogue songs could remain without lyrics.
+- New behavior: synced LRC is still preferred from LRCLIB, with additional LRCLIB matching by title/artist, then JioSaavn's India catalogue lyrics endpoint and lyrics.ovh as plain-lyrics fallbacks. Temporary provider failures are not cached as permanent "no lyrics" results.
+- Important: plain lyrics are never given fake timestamps. The UI explicitly marks them as available but not synchronized.
+- Files modified: lib/services/lyrics_service.dart
+
+## BUG-42 — Lyrics loading could visually dominate the player
+- Previous behavior: the lyrics area could look like a blocking loading panel and did not distinguish synced lyrics from plain fallback lyrics.
+- New behavior: synced lyrics use a compact centered karaoke presentation with active-line glow, scale/opacity changes and automatic centering. Plain fallback lyrics remain readable in a non-blocking scroll area.
+- Files modified: lib/screens/radio_player_screen.dart
+
+## BUG-43 — Play/Pause did not clearly communicate buffering
+- Previous behavior: the main play control could continue showing a normal play/pause glyph while just_audio was loading or buffering.
+- New behavior: the main control follows just_audio's PlayerState. During loading/buffering it becomes a dedicated animated progress indicator and cannot accidentally start a second playback request.
+- Files modified: lib/screens/radio_player_screen.dart
+
+## BUG-44 — Timeline could rebuild continuously while paused
+- Previous behavior: a permanent frame ticker called setState even when the player was paused.
+- New behavior: position/duration streams are the primary timeline source; the frame ticker only fills visual interpolation while audio is actually playing. Seeking still calls just_audio directly.
+- Files modified: lib/screens/radio_player_screen.dart
+
+## BUG-45 — Notification buffering state needed to stay tied to the real player
+- Previous behavior: Radio UI buffering state and notification state could be interpreted separately.
+- New behavior: the existing background audio handler continues publishing just_audio loading/buffering/ready states through AudioService playbackState. The Radio UI now uses the same just_audio PlayerState for its visible buffering indicator, keeping the notification and main control state aligned without introducing a second playback state machine.
+- Files modified: lib/screens/radio_player_screen.dart (existing background_service state bridge retained; no QueueService takeover)
+
+## Verification
+- Project package name and directory structure preserved.
+- Existing assets preserved.
+- NOTES.md appended only.
+- Dart source delimiter/lexical-balance checks pass for modified files.
+- Flutter SDK is not installed in this build environment, so a device/Gradle build could not be executed here.

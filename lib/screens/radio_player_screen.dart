@@ -638,15 +638,15 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final compact = constraints.maxHeight < 680;
-        final lyricHeight = compact ? 120.0 : 165.0;
+        final lyricHeight = compact ? 132.0 : 176.0;
         return Padding(
-          padding: EdgeInsets.fromLTRB(20, compact ? 4 : 10, 20, 10),
+          padding: EdgeInsets.fromLTRB(20, compact ? 2 : 8, 20, 6),
           child: Column(
             children: [
               SizedBox(height: 48, child: _topBar()),
-              SizedBox(height: compact ? 18 : 30),
+              SizedBox(height: compact ? 14 : 24),
               Text(current.language.toUpperCase(), style: AppText.bodyS(color: Colors.white70)),
-              const SizedBox(height: 7),
+              const SizedBox(height: 6),
               Text(
                 current.song.title,
                 textAlign: TextAlign.center,
@@ -654,7 +654,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
                 overflow: TextOverflow.ellipsis,
                 style: AppText.displayL(color: Colors.white),
               ),
-              const SizedBox(height: 6),
+              const SizedBox(height: 5),
               Text(
                 current.song.artist,
                 textAlign: TextAlign.center,
@@ -662,7 +662,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
                 overflow: TextOverflow.ellipsis,
                 style: AppText.bodyM(color: Colors.white70),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 4),
               Expanded(
                 child: Center(
                   child: SizedBox(
@@ -678,14 +678,11 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
                   ),
                 ),
               ),
+              // Timeline is deliberately the last content block so its
+              // position never jumps when lyrics arrive.
               RadioPlayerProgress(
                 key: ValueKey('progress-${current.song.id}'),
                 player: audioHandler.player,
-              ),
-              const SizedBox(height: 6),
-              Text(
-                _loading ? 'Loading…' : 'Radio',
-                style: AppText.bodyS(color: Colors.white54),
               ),
               const SizedBox(height: 4),
               _controls(),
@@ -750,17 +747,47 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         StreamBuilder<PlayerState>(
           stream: audioHandler.player.playerStateStream,
           builder: (_, snapshot) {
-            final playing = snapshot.data?.playing ?? !_paused;
-            return InkResponse(
-              onTap: _transitioning ? null : _togglePlay,
-              radius: 38,
-              child: CircleAvatar(
-                radius: 32,
-                backgroundColor: kGreen,
-                child: Icon(
-                  playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                  size: 38,
-                  color: Colors.white,
+            final state = snapshot.data;
+            final playing = state?.playing ?? audioHandler.player.playing;
+            final processing = state?.processingState ?? audioHandler.player.processingState;
+            final buffering = processing == ProcessingState.loading ||
+                processing == ProcessingState.buffering;
+            return Semantics(
+              button: true,
+              label: buffering ? 'Buffering' : (playing ? 'Pause' : 'Play'),
+              child: InkResponse(
+                onTap: (_transitioning || buffering) ? null : _togglePlay,
+                radius: 40,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOut,
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    color: kGreen,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: kGreen.withOpacity(.28),
+                        blurRadius: buffering ? 18 : 10,
+                        spreadRadius: buffering ? 2 : 0,
+                      ),
+                    ],
+                  ),
+                  child: buffering
+                      ? const SizedBox(
+                          width: 28,
+                          height: 28,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 3,
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                          ),
+                        )
+                      : Icon(
+                          playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                          size: 40,
+                          color: Colors.white,
+                        ),
                 ),
               ),
             );
@@ -820,6 +847,8 @@ class RadioPlayerProgress extends StatefulWidget {
 class _RadioPlayerProgressState extends State<RadioPlayerProgress>
     with SingleTickerProviderStateMixin {
   late final AnimationController _ticker;
+  StreamSubscription<Duration>? _positionSub;
+  StreamSubscription<Duration?>? _durationSub;
   bool _dragging = false;
   double _dragMs = 0;
 
@@ -830,10 +859,20 @@ class _RadioPlayerProgressState extends State<RadioPlayerProgress>
       vsync: this,
       duration: const Duration(seconds: 1),
     )..addListener(_onFrame)..repeat();
+    // just_audio is the authority. Stream events update the slider
+    // immediately; the frame ticker only fills the visual gap while playing.
+    _positionSub = widget.player.positionStream.listen((_) {
+      if (mounted && !_dragging) setState(() {});
+    });
+    _durationSub = widget.player.durationStream.listen((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   @override
   void dispose() {
+    _positionSub?.cancel();
+    _durationSub?.cancel();
     _ticker
       ..removeListener(_onFrame)
       ..dispose();
@@ -841,7 +880,7 @@ class _RadioPlayerProgressState extends State<RadioPlayerProgress>
   }
 
   void _onFrame() {
-    if (!mounted || _dragging) return;
+    if (!mounted || _dragging || !widget.player.playing) return;
     setState(() {});
   }
 
@@ -998,66 +1037,113 @@ class _RadioLyricsState extends State<RadioLyrics>
   Widget build(BuildContext context) {
     if (widget.loading) {
       return const SizedBox(
-        height: 165,
+        height: 176,
         child: Center(
           child: SizedBox(
-            width: 16,
-            height: 16,
-            child: CircularProgressIndicator(strokeWidth: 2),
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(strokeWidth: 2.2),
           ),
         ),
       );
     }
 
-    if (_lines.isEmpty) {
-      return const SizedBox(
-        height: 165,
-        child: Center(
-          child: Text(
-            'No synced lyrics available',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white54, fontSize: 14),
-          ),
-        ),
-      );
-    }
-
-    return SizedBox(
-      height: 165,
-      child: ListView.builder(
-        controller: _scrollController,
-        physics: const NeverScrollableScrollPhysics(),
-        itemExtent: 40,
-        itemCount: _lines.length,
-        itemBuilder: (_, index) {
-          final active = index == _activeIndex;
-          return Center(
-            child: AnimatedDefaultTextStyle(
-              duration: const Duration(milliseconds: 220),
-              curve: Curves.easeOut,
-              style: AppText.bodyM(color: active ? Colors.white : Colors.white54).copyWith(
-                fontWeight: active ? FontWeight.w800 : FontWeight.w500,
-                fontSize: active ? 16 : 13,
-                shadows: active
-                    ? const [Shadow(color: Colors.white54, blurRadius: 10)]
-                    : const [],
-              ),
-              child: AnimatedOpacity(
-                duration: const Duration(milliseconds: 220),
-                opacity: active ? 1 : 0.46,
-                child: Transform.scale(
-                  scale: active ? 1 : 0.92,
-                  child: Text(
-                    _lines[index].text,
-                    textAlign: TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
+    if (_lines.isNotEmpty) {
+      return SizedBox(
+        height: 176,
+        child: ShaderMask(
+          shaderCallback: (bounds) => const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.transparent, Colors.white, Colors.white, Colors.transparent],
+            stops: [0, .16, .84, 1],
+          ).createShader(bounds),
+          blendMode: BlendMode.dstIn,
+          child: ListView.builder(
+            controller: _scrollController,
+            physics: const NeverScrollableScrollPhysics(),
+            padding: const EdgeInsets.symmetric(vertical: 68),
+            itemExtent: 40,
+            itemCount: _lines.length,
+            itemBuilder: (_, index) {
+              final active = index == _activeIndex;
+              return Center(
+                child: AnimatedDefaultTextStyle(
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOutCubic,
+                  style: AppText.bodyM(color: active ? Colors.white : Colors.white54).copyWith(
+                    fontWeight: active ? FontWeight.w800 : FontWeight.w500,
+                    fontSize: active ? 17 : 13,
+                    height: 1.18,
+                    shadows: active
+                        ? const [
+                            Shadow(color: Colors.white70, blurRadius: 12),
+                            Shadow(color: Colors.white30, blurRadius: 3),
+                          ]
+                        : const [],
+                  ),
+                  child: AnimatedOpacity(
+                    duration: const Duration(milliseconds: 180),
+                    opacity: active ? 1 : 0.38,
+                    child: Transform.scale(
+                      scale: active ? 1 : 0.90,
+                      child: Text(
+                        _lines[index].text,
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                   ),
                 ),
+              );
+            },
+          ),
+        ),
+      );
+    }
+
+    final plain = widget.result?.plain?.trim();
+    if (plain != null && plain.isNotEmpty) {
+      return SizedBox(
+        height: 176,
+        child: ShaderMask(
+          shaderCallback: (bounds) => const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.transparent, Colors.white, Colors.white, Colors.transparent],
+            stops: [0, .14, .86, 1],
+          ).createShader(bounds),
+          blendMode: BlendMode.dstIn,
+          child: ListView(
+            padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 12),
+            physics: const BouncingScrollPhysics(),
+            children: [
+              Text(
+                plain,
+                textAlign: TextAlign.center,
+                style: AppText.bodyM(color: Colors.white70).copyWith(height: 1.55),
               ),
-            ),
-          );
-        },
+              const SizedBox(height: 10),
+              Text(
+                'Lyrics available • sync not available for this version',
+                textAlign: TextAlign.center,
+                style: AppText.bodyS(color: Colors.white38),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return const SizedBox(
+      height: 176,
+      child: Center(
+        child: Text(
+          'Lyrics not available for this song',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white54, fontSize: 14),
+        ),
       ),
     );
   }
