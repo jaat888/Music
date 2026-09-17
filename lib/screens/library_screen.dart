@@ -23,6 +23,7 @@ import 'create_playlist_screen.dart';
 import 'downloads_screen.dart';
 import 'duplicate_songs_screen.dart';
 import 'full_player_screen.dart';
+import 'import_playlist_screen.dart';
 import 'mood_playlist_screen.dart';
 import 'liked_songs_screen.dart';
 import 'playlist_detail_screen.dart';
@@ -169,13 +170,25 @@ class _LibraryScreenState extends State<LibraryScreen> {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Text('Playlists', style: AppText.displayS(color: kText)),
-            TextButton.icon(
-              onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const CreatePlaylistScreen()),
-              ).then((_) => _load()),
-              icon: const Icon(Icons.add, color: kGreen, size: 18),
-              label: Text('Create', style: AppText.bodyM(color: kGreen)),
+            Row(
+              children: [
+                TextButton.icon(
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const ImportPlaylistScreen()),
+                  ).then((_) => _load()),
+                  icon: const Icon(Icons.download_for_offline_outlined, color: kGreen, size: 18),
+                  label: Text('Import', style: AppText.bodyM(color: kGreen)),
+                ),
+                TextButton.icon(
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const CreatePlaylistScreen()),
+                  ).then((_) => _load()),
+                  icon: const Icon(Icons.add, color: kGreen, size: 18),
+                  label: Text('Create', style: AppText.bodyM(color: kGreen)),
+                ),
+              ],
             ),
           ],
         ),

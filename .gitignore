@@ -1,0 +1,33 @@
+# ---------------- Secrets — YE KABHI COMMIT NAHI HONI CHAHIYE ----------------
+# Spotify Client ID/Secret (aur koi bhi future API key) isi file se
+# --dart-define-from-file=env.json ke zariye build-time pe inject hoti hai.
+# Sirf env.json.example (dummy values) commit hoti hai, asli env.json nahi.
+env.json
+.env
+
+# ---------------- Flutter/Dart standard ----------------
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.iml
+.idea/
+
+# ---------------- Android ----------------
+android/.gradle/
+android/local.properties
+android/app/debug
+android/app/profile
+android/app/release
+android/key.properties
+*.jks
+*.keystore
+
+# ---------------- iOS ----------------
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.podspec
+
+# ---------------- Misc ----------------
+*.log
