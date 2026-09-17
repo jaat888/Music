@@ -57,7 +57,7 @@ jobs:
         run: dart run flutter_launcher_icons
 
       - name: Build APK (${{ matrix.build-type }})
-        run: flutter build apk --${{ matrix.build-type }}
+        run: flutter build apk --${{ matrix.build-type }} --dart-define=SPOTIFY_CLIENT_ID=${{ secrets.SPOTIFY_CLIENT_ID }} --dart-define=SPOTIFY_CLIENT_SECRET=${{ secrets.SPOTIFY_CLIENT_SECRET }}
 
       - name: Rename APK
         run: cp build/app/outputs/flutter-apk/app-${{ matrix.build-type }}.apk sursathi-${{ matrix.build-type }}.apk
