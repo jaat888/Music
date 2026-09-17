@@ -26,6 +26,7 @@ import 'downloads_screen.dart';
 import 'full_player_screen.dart';
 import 'live_playlist_screen.dart';
 import 'debug_screen.dart';
+import 'settings_screen.dart';
 
 // Home ki 12 categories — naam, emoji, search query
 class _Category {
@@ -416,10 +417,20 @@ class _HomeTabContentState extends State<_HomeTabContent> {
                       ),
                       IconButton(
                         icon: Icon(Icons.settings, color: kTextDim),
+                        // BUG FIX (v38 — user report: "settings pe click
+                        // karte hi 'Settings jald aa rahi hai' aata hai"):
+                        // `settings_screen.dart` (861 lines, poori settings
+                        // UI) already ban chuki thi, lekin isse kabhi kisi
+                        // screen se navigate hi nahi kiya gaya tha — ye
+                        // button abhi bhi purana placeholder SnackBar
+                        // dikhata tha. Ab seedha SettingsScreen open karta
+                        // hai.
                         onPressed: () {
-                          // Settings screen Batch 13 me banegi
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Settings jald aa rahi hai')),
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const SettingsScreen(),
+                            ),
                           );
                         },
                       ),

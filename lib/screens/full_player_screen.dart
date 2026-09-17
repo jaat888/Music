@@ -15,6 +15,7 @@ import '../services/queue_service.dart';
 import '../services/like_service.dart';
 import '../services/sleep_timer_service.dart';
 import '../services/youtube_service.dart';
+import '../services/download_queue_service.dart';
 import '../widgets/rotating_vinyl.dart';
 import '../widgets/progress_slider.dart';
 import '../widgets/animated_play_button.dart';
@@ -40,7 +41,17 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
   // the (dekho mini_player.dart), lekin full player screen me nahi —
   // isliye yahan bhi same behaviour add kiya, same in-progress spinner
   // pattern ke saath.
-  bool _downloading = false;
+  //
+  // BUG FIX (v38 — user report: "full screen player pe download icon fix
+  // nahi hua"): v37 me DownloadQueueService add hoke home/artist/album/
+  // liked/playlist/mood/smart screens migrate ho gaye the, lekin ye screen
+  // chhoot gayi thi — abhi bhi seedha `YoutubeService.instance.download()`
+  // call karti thi, apne alag local `_downloading` bool ke saath. Isse
+  // download shared queue me register hi nahi hota tha (Downloads screen/
+  // notification progress me nahi dikhta tha), aur agar dusri screen se
+  // wahi gaana pehle se download ho raha ho to yahan duplicate download
+  // shuru ho jaata. Ab `DownloadQueueService` use hota hai — `_downloading`
+  // hata diya, icon seedha shared queue ke live state se driven hai.
   bool _startingRadio = false;
 
   @override
@@ -48,8 +59,15 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
     super.dispose();
   }
 
+  // BUG FIX (v38): ab baaki screens jaisa shared DownloadQueueService use
+  // karta hai — dekho upar wala comment.
   Future<void> _handleDownload(Song song) async {
-    if (_downloading) return;
+    if (DownloadQueueService.instance.isActive(song.id)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('"${song.title}" already download queue mein hai')),
+      );
+      return;
+    }
     final already = await DownloadDB.instance.exists(song.id);
     if (!mounted) return;
     if (already) {
@@ -72,20 +90,10 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
       );
       return;
     }
-    setState(() => _downloading = true);
-    final path = await YoutubeService.instance.download(
-      song.id,
-      song.title,
-      author: song.artist,
-    );
+    DownloadQueueService.instance.enqueue(song);
     if (!mounted) return;
-    setState(() => _downloading = false);
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          path != null ? '${song.title} download ho gaya' : 'Download fail ho gaya',
-        ),
-      ),
+      SnackBar(content: Text('"${song.title}" download queue mein daal diya')),
     );
   }
 
@@ -668,45 +676,70 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           ),
                                           const SizedBox(width: 10),
                                           _chip(
-                                            child: FutureBuilder<bool>(
-                                              // FIX: download icon ab
-                                              // "already downloaded"
-                                              // state ko reflect karta
-                                              // hai (green/filled), sirf
-                                              // static grey nahi rehta.
-                                              future: DownloadDB.instance
-                                                  .exists(song.id),
-                                              builder: (context, dlSnap) {
-                                                final isDownloaded =
-                                                    dlSnap.data ?? false;
-                                                return IconButton(
-                                                  icon: _downloading
-                                                      ?  SizedBox(
-                                                          width: 18,
-                                                          height: 18,
-                                                          child:
-                                                              CircularProgressIndicator(
-                                                            strokeWidth: 2,
-                                                            color: kTextDim,
-                                                          ),
-                                                        )
-                                                      : Icon(
-                                                          isDownloaded
-                                                              ? Icons
-                                                                  .download_done_rounded
-                                                              : Icons
-                                                                  .download_rounded,
-                                                          color: isDownloaded
-                                                              ? kGreen
-                                                              : kTextDim,
-                                                        ),
-                                                  tooltip: isDownloaded
-                                                      ? 'Downloaded'
-                                                      : 'Download',
-                                                  onPressed: _downloading
-                                                      ? null
-                                                      : () => _handleDownload(
-                                                          song),
+                                            // BUG FIX (v38): ListenableBuilder
+                                            // shared DownloadQueueService se
+                                            // jud ke rakhta hai — jab bhi
+                                            // koi bhi screen se (isi gaane
+                                            // ko) queue/download/finish kare,
+                                            // ye icon turant reflect karta
+                                            // hai. Pehle sirf apna local
+                                            // `_downloading` dekhta tha, jo
+                                            // sirf isi screen ke button se
+                                            // download shuru karne par set
+                                            // hota tha.
+                                            child: ListenableBuilder(
+                                              listenable:
+                                                  DownloadQueueService.instance,
+                                              builder: (context, _) {
+                                                final active =
+                                                    DownloadQueueService
+                                                        .instance
+                                                        .isActive(song.id);
+                                                return FutureBuilder<bool>(
+                                                  // FIX: download icon ab
+                                                  // "already downloaded"
+                                                  // state ko reflect karta
+                                                  // hai (green/filled), sirf
+                                                  // static grey nahi rehta.
+                                                  future: DownloadDB.instance
+                                                      .exists(song.id),
+                                                  builder: (context, dlSnap) {
+                                                    final isDownloaded =
+                                                        !active &&
+                                                        (dlSnap.data ?? false);
+                                                    return IconButton(
+                                                      icon: active
+                                                          ? SizedBox(
+                                                              width: 18,
+                                                              height: 18,
+                                                              child:
+                                                                  CircularProgressIndicator(
+                                                                strokeWidth: 2,
+                                                                color: kTextDim,
+                                                              ),
+                                                            )
+                                                          : Icon(
+                                                              isDownloaded
+                                                                  ? Icons
+                                                                      .download_done_rounded
+                                                                  : Icons
+                                                                      .download_rounded,
+                                                              color: isDownloaded
+                                                                  ? kGreen
+                                                                  : kTextDim,
+                                                            ),
+                                                      tooltip: active
+                                                          ? 'Download ho raha hai'
+                                                          : (isDownloaded
+                                                              ? 'Downloaded'
+                                                              : 'Download'),
+                                                      onPressed: active
+                                                          ? null
+                                                          : () =>
+                                                              _handleDownload(
+                                                                  song),
+                                                    );
+                                                  },
                                                 );
                                               },
                                             ),
