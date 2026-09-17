@@ -6,6 +6,18 @@ import 'package:google_fonts/google_fonts.dart';
 import 'colors.dart';
 
 class AppText {
+  static TextStyle titleL({Color? color}) => TextStyle(
+        fontSize: 22,
+        fontWeight: FontWeight.bold,
+        color: color,
+      );
+
+  static TextStyle titleM({Color? color}) => TextStyle(
+        fontSize: 18,
+        fontWeight: FontWeight.w600,
+        color: color,
+      );
+
   AppText._();
 
   // ---------- Display styles (Sora, bold headers) ----------
