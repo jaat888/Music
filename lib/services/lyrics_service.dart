@@ -317,7 +317,7 @@ class LyricsService {
       .toLowerCase()
       // Keep Devanagari/Gurmukhi/Haryanvi letters intact; only strip common
       // title punctuation so Indian-language matching remains useful.
-      .replaceAll(RegExp(r'[\[\](){},.!?;:\'\"|/\\_+*=]+'), ' ')
+      .replaceAll(RegExp(r'''[\[\](){},.!?;:'\"|/\\_+*=]+'''), ' ')
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
 
