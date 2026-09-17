@@ -622,8 +622,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   /// Radio-only preload. This never touches QueueService or its queue index.
   /// It resolves and disk-caches only the next two songs, reusing the same
   /// validated cache path as normal playback.
+  // BUG FIX (v56): 2 → 5 — dekho radio_player_screen.dart ka comment.
   Future<void> prefetchRadioSongs(Iterable<Song> songs) async {
-    for (final song in songs.take(2)) {
+    for (final song in songs.take(5)) {
       _prefetchRadioOne(song);
     }
   }

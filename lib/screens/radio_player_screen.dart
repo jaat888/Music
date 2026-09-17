@@ -421,7 +421,14 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         maxSongs: 10,
       ),
     );
-    unawaited(audioHandler.prefetchRadioSongs(next.take(2).toList()));
+    // BUG FIX (v56 — user report: "agle 5 gano ke request pehle se chale
+    // jaye, taiyar rahe"): pehle sirf agle 2 hi prefetch hote the (BUG-32
+    // ka jaanbujhkar liya gaya conservative default) — teesri baar skip
+    // karte hi loading spinner wapas aa jaata tha (screenshot me exactly
+    // yahi dikh raha tha). Ab agle 5 songs ke stream URL + disk cache
+    // pehle se taiyar rehte hain, isliye kai skips lagatar bhi instant
+    // rehte hain.
+    unawaited(audioHandler.prefetchRadioSongs(next.take(5).toList()));
   }
 
   void _trimArtworkCache() {
@@ -484,7 +491,30 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       }
 
       _playedStack.add(old);
+      // BUG FIX (v56 — user report: "gaana khatam hone ke baad apne aap
+      // agla gaana nahi chalta"): `_playedStack` kabhi trim nahi hota tha
+      // — poori radio session me jitne bhi gaane bajte, sab hamesha ke
+      // liye "exclude" list me reh jaate the. Chhoti candidate pool (jaise
+      // sirf 1-2 language select kiye ho) ke saath, kaafi der Radio sunne
+      // ke baad ye exclude-set poori pool ke barabar ho jaata tha —
+      // `_pickNext()` hamesha `null` deta, `_fetchCandidates()` dobara
+      // wahi results laata (YouTube search results deterministic hote
+      // hain), aur `_advance()` chup-chaap `return` ho jaata — na koi
+      // error, na retry, bas agla gaana kabhi shuru hi nahi hota tha.
+      // Fix: exclude-set ab sirf RECENT gaano tak limited hai (turant
+      // repeat na ho), poori session history tak nahi — pool hamesha
+      // recycle ho sakta hai.
+      if (_playedStack.length > 60) {
+        _playedStack.removeRange(0, _playedStack.length - 60);
+      }
       _upcoming.removeWhere((item) => item.song.id == failedSongId);
+
+      List<String> recentExclude([int window = 40]) {
+        final recent = _playedStack.length > window
+            ? _playedStack.sublist(_playedStack.length - window)
+            : _playedStack;
+        return recent.map((e) => e.song.id).toList();
+      }
 
       for (var attempt = 0; attempt < 12; attempt++) {
         RadioCandidate? next;
@@ -492,19 +522,36 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
           next = _upcoming.removeAt(0);
         } else {
           next = _pickNext(
-            excludeIds: {
-              old.song.id,
-              ..._playedStack.map((e) => e.song.id),
-            },
+            excludeIds: {old.song.id, ...recentExclude()},
           );
         }
         if (next == null) {
           await _fetchCandidates();
           next = _pickNext(
-            excludeIds: {old.song.id, ..._playedStack.map((e) => e.song.id)},
+            excludeIds: {old.song.id, ...recentExclude()},
           );
         }
-        if (next == null || !mounted) return;
+        // FIX: pool genuinely chhoti ho (thoda languages select kiye ho)
+        // to bhi kabhi silently na ruke — exclude window aur chhota
+        // karke ek aakhri baar try karo, recent-most repeats ke alawa
+        // kuch bhi eligible ho sakta hai.
+        if (next == null) {
+          next = _pickNext(
+            excludeIds: {old.song.id, ...recentExclude(8)},
+          );
+        }
+        if (next == null || !mounted) {
+          // Sach mein kuch bhi eligible nahi mila (bahut hi chhoti pool) —
+          // ab chup-chaap na ruko, user ko dikhao taaki wo retry kar sake.
+          if (mounted) {
+            setState(() {
+              _loading = false;
+              _error = 'Is language selection ke liye naye gaane khatam ho '
+                  'gaye. Retry karein ya aur languages select karein.';
+            });
+          }
+          return;
+        }
 
         final ok = await _playCandidate(next, addToHistory: true);
         if (ok) return;

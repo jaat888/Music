@@ -171,7 +171,35 @@ class LyricsService {
           best = map;
         }
       }
-      return best == null ? null : _fromJsonMap(best, source: 'LRCLIB');
+      // BUG FIX (v56 — user report: "lyrics load ho jaaye to bhi sync
+      // achha nahi hota"): pehle yahan hamesha "best" candidate use ho
+      // jaata tha, chahe wo kitna bhi kharab match kyun na ho (koi
+      // minimum score threshold nahi tha) — matlab agar LRCLIB pe is
+      // gaane ka koi decent match nahi tha, to bhi ek bilkul alag
+      // title/duration wale gaane ki LRC timing yahan use ho jaati thi.
+      // Us doosre gaane ki timing is gaane ke audio se kabhi match nahi
+      // karti — isi liye "lyrics dikh rahi hain lekin sync galat hai"
+      // jaisa symptom hota tha. Ab ek minimum score chahiye (kam se kam
+      // decent title overlap + duration proximity) — nahi to yahan se
+      // `null` return hota hai aur pipeline JioSaavn/plain lyrics
+      // fallback pe chala jaata hai, jo galat-sync LRC se behtar hai.
+      // BUG FIX (v57 — user report: "radio me subtitle aata hi nahi, wahi
+      // gaana normal player me chalao to dikh jaata hai"): v56 me diya
+      // gaya `minAcceptableScore = 5.0` real-world data ke liye zyada
+      // strict nikla — LRCLIB ke community-contributed results me artist
+      // ka naam aksar thoda alag format me hota hai (ya bilkul missing),
+      // aur duration bhi 2-5 second idhar-udhar hota hai (intro/outro
+      // trim ka farak) — chahe title theek match ho raha ho. Isse ek
+      // GENUINELY sahi match bhi (title-contains + halka duration
+      // mismatch) score ~4 pe reh jaata tha, 5.0 ke threshold se neeche,
+      // aur reject ho jaata — result: us gaane ka koi bhi lyrics (na
+      // synced, na plain) nahi dikhta tha. Threshold ab 3.0 hai — pure
+      // coincidental ek-shabd title overlap (score sirf 2) ab bhi reject
+      // hota hai, lekin title-match + koi bhi corroborating signal
+      // (artist ya duration) accept ho jaata hai.
+      const minAcceptableScore = 3.0;
+      if (best == null || bestScore < minAcceptableScore) return null;
+      return _fromJsonMap(best, source: 'LRCLIB');
     } catch (_) {
       return null;
     }
