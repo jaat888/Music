@@ -224,43 +224,75 @@ class _MiniPlayerState extends State<MiniPlayer> {
                               // NEW — jo abhi stream ho raha hai wahi seedha
                               // yahin se download ho sake, bina kisi list
                               // me jaake dhundhe.
-                              IconButton(
-                                icon: _downloading
-                                    ? const SizedBox(
-                                        width: 18,
-                                        height: 18,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: Colors.black,
-                                        ),
-                                      )
-                                    : const Icon(Icons.download_rounded, color: Colors.black),
-                                iconSize: 20,
-                                tooltip: 'Download',
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                                onPressed: _downloading ? null : () => _handleDownload(item),
+                              FutureBuilder<bool>(
+                                // FIX: mini player me bhi download icon ab
+                                // "already downloaded" state dikhata hai.
+                                future: DownloadDB.instance.exists(item.id),
+                                builder: (context, dlSnap) {
+                                  final isDownloaded = dlSnap.data ?? false;
+                                  return IconButton(
+                                    icon: _downloading
+                                        ? const SizedBox(
+                                            width: 18,
+                                            height: 18,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: Colors.black,
+                                            ),
+                                          )
+                                        : Icon(
+                                            isDownloaded
+                                                ? Icons.download_done_rounded
+                                                : Icons.download_rounded,
+                                            color: isDownloaded
+                                                ? kGreen
+                                                : Colors.black,
+                                          ),
+                                    iconSize: 20,
+                                    tooltip:
+                                        isDownloaded ? 'Downloaded' : 'Download',
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                    onPressed: _downloading
+                                        ? null
+                                        : () => _handleDownload(item),
+                                  );
+                                },
                               ),
                               // NEW — isi gaane/artist jaisa "radio" queue
                               // me add kar deta hai (current gaana disturb
                               // nahi hota, baad me ye gaane bajenge).
-                              IconButton(
-                                icon: _startingRadio
-                                    ? const SizedBox(
-                                        width: 18,
-                                        height: 18,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: Colors.black,
+                              Builder(builder: (context) {
+                                // FIX: radio "on" hone par icon green.
+                                final radioOn =
+                                    QueueService.instance.radioMode;
+                                return IconButton(
+                                  icon: _startingRadio
+                                      ? const SizedBox(
+                                          width: 18,
+                                          height: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.black,
+                                          ),
+                                        )
+                                      : Icon(
+                                          Icons.radio_rounded,
+                                          color: radioOn ? kGreen : Colors.black,
                                         ),
-                                      )
-                                    : const Icon(Icons.radio_rounded, color: Colors.black),
-                                iconSize: 20,
-                                tooltip: 'Radio shuru karo',
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                                onPressed: _startingRadio ? null : () => _handleRadio(item),
-                              ),
+                                  iconSize: 20,
+                                  tooltip:
+                                      radioOn ? 'Radio band karo' : 'Radio shuru karo',
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                  onPressed: _startingRadio
+                                      ? null
+                                      : () => radioOn
+                                          ? QueueService.instance
+                                              .disableRadioMode()
+                                          : _handleRadio(item),
+                                );
+                              }),
                               IconButton(
                                 icon: Icon(
                                   widget.isLiked ? Icons.favorite : Icons.favorite_border,

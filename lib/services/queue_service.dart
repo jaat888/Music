@@ -36,11 +36,13 @@ class QueueService extends ChangeNotifier {
   void enableRadioMode(Future<List<Song>> Function() supplier) {
     _radioMode = true;
     _radioSupplier = supplier;
+    notifyListeners(); // FIX: UI (radio icon) ko turant reflect karne ke liye
   }
 
   void disableRadioMode() {
     _radioMode = false;
     _radioSupplier = null;
+    notifyListeners();
   }
 
   void _maybeRefillRadio() {

@@ -37,6 +37,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   List<Song> _songs = [];
   Set<String> _likedIds = {};
   Set<String> _cachedIds = {};
+  Set<String> _downloadedIds = {};
 
   @override
   void initState() {
@@ -59,12 +60,14 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
           : await PlaylistDB.instance.getPlaylistSongs(playlist.id);
       final liked = await LikedDB.instance.getAll();
       final cached = await CacheDB.instance.getAll();
+      final downloaded = await DownloadDB.instance.getAll();
       if (!mounted) return;
       setState(() {
         _playlist = playlist;
         _songs = songs;
         _likedIds = liked.map((s) => s.id).toSet();
         _cachedIds = cached.map((e) => e['id'] as String).toSet();
+        _downloadedIds = downloaded.map((s) => s.id).toSet();
       });
     } catch (e) {
       print('PLAYLIST_DETAIL _load() ERROR: $e');
@@ -107,6 +110,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
   Future<void> _download(Song song) async {
     final path = await YoutubeService.instance.download(song.id, song.title, author: song.artist);
     if (!mounted) return;
+    if (path != null) setState(() => _downloadedIds.add(song.id));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content:
@@ -124,6 +128,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
     var failed = 0;
     var skipped = 0;
     final total = _songs.length;
+    final nowDownloaded = <String>{};
 
     late void Function(void Function()) dialogSetState;
     if (!mounted) return;
@@ -161,11 +166,13 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
       final already = await DownloadDB.instance.exists(song.id);
       if (already) {
         skipped++;
+        nowDownloaded.add(song.id);
       } else {
         final path = await YoutubeService.instance
             .download(song.id, song.title, author: song.artist);
         if (path != null) {
           done++;
+          nowDownloaded.add(song.id);
         } else {
           failed++;
         }
@@ -175,6 +182,10 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
 
     if (!mounted) return;
     Navigator.pop(context); // progress dialog band karo
+    // FIX: bulk download ke baad bhi row icons "on" (green) dikhein.
+    setState(() {
+      _downloadedIds = {..._downloadedIds, ...nowDownloaded};
+    });
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -607,6 +618,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                                   song: song,
                                   isLiked: _likedIds.contains(song.id),
                                   isCached: _cachedIds.contains(song.id),
+                                  isDownloaded: _downloadedIds.contains(song.id),
                                   onTap: () => _playFrom(i),
                                   onPlay: () => _playFrom(i),
                                   onDownload: () => _download(song),

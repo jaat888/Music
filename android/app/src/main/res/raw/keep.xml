@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  BUG FIX (2026-09-17, notification icon crash recurrence):
+  Crash log: "Invalid notification (no valid small icon)" on channel
+  com.sursathi.audio, thrown from inside audio_service's notification
+  update code (obfuscated frame in the log — R8 was clearly running on
+  this build).
+
+  Root cause: lib/services/background_service.dart points
+  `androidNotificationIcon` at 'drawable/ic_notification' as a STRING —
+  audio_service's native Android code resolves this at RUNTIME via
+  Resources.getIdentifier("ic_notification", "drawable", packageName).
+  Android's resource shrinker (shrinkResources) only sees resources
+  referenced directly in compiled code/XML as R.drawable.xxx — a name
+  that only exists as a Dart string is invisible to it, so the shrinker
+  can silently strip drawable/ic_notification.xml out of the release
+  APK even though the file is sitting right here in res/drawable/. The
+  drawable was already added once before (v22) to fix this exact crash,
+  but nothing was protecting it from being stripped again by shrinking
+  in a later release build — hence it came back ("phir se ho gaya").
+
+  Fix: tools:keep explicitly tells the resource shrinker this resource
+  IS used, no matter what static analysis sees, so it can never be
+  removed again regardless of shrinkResources being on/off in any
+  future build.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_notification" />

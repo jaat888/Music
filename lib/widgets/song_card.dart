@@ -22,6 +22,10 @@ class SongCard extends StatelessWidget {
   // hamesha jaisa hi rehta hai — baaki saari screens is param ko touch
   // nahi karti, isliye unka behaviour bilkul same rehta hai.
   final VoidCallback? onAddToPlaylist;
+  // NEW: song pehle se offline-downloaded hai to download icon ko
+  // "on" (green + filled) dikhane ke liye. Default false — jo screens
+  // ye pass nahi karti unka behaviour bilkul pehle jaisa hi rehta hai.
+  final bool isDownloaded;
 
   const SongCard({
     super.key,
@@ -33,6 +37,7 @@ class SongCard extends StatelessWidget {
     this.isLiked = false,
     this.isCached = false,
     this.onAddToPlaylist,
+    this.isDownloaded = false,
   });
 
   // Seconds ko "m:ss" format me convert karta hai (e.g. 225 -> "3:45")
@@ -148,7 +153,14 @@ class SongCard extends StatelessWidget {
                 )
               else if (onDownload != null)
                 IconButton(
-                  icon: const Icon(Icons.download_rounded, color: kTextDim, size: 22),
+                  icon: Icon(
+                    isDownloaded
+                        ? Icons.download_done_rounded
+                        : Icons.download_rounded,
+                    color: isDownloaded ? kGreen : kTextDim,
+                    size: 22,
+                  ),
+                  tooltip: isDownloaded ? 'Downloaded' : 'Download',
                   onPressed: onDownload,
                   splashRadius: 18,
                 ),

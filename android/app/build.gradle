@@ -53,6 +53,20 @@ android {
             // opt-out kiya tha, lekin apni file me shuru se hi sahi likhna
             // behtar hai.
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // BUG FIX (2026-09-17): pehle yahan minifyEnabled/shrinkResources
+            // kabhi explicitly set nahi kiya gaya tha — koi bhi future build
+            // config change (ya CI/Play Store upload pipeline) chup-chaap
+            // inhe "true" kar sakta tha, aur tab Android ka resource shrinker
+            // res/drawable/ic_notification.xml ko strip kar deta (ye sirf
+            // Dart se ek STRING ke through, `Resources.getIdentifier()` se
+            // runtime pe dhoonda jaata hai — koi compiled R.drawable.xxx
+            // reference nahi hai jo shrinker static analysis me dekh sake),
+            // jisse phir "no valid small icon" crash aata (dekho
+            // res/raw/keep.xml). Ab dono explicitly false hain, taaki intent
+            // saaf rahe — aur res/raw/keep.xml hamesha ke liye safety-net ki
+            // tarah maujood hai agar future me kabhi inhe true karna pade.
+            minifyEnabled = false
+            shrinkResources = false
         }
     }
 }

@@ -1,6 +1,55 @@
 # SurSathi — Notes / Known Issues
 
-## Batch 23 (2026-09-16) — "Next dabane par 10s lagta hai" + "kai gaane bilkul nahi chalte" (silent fail)
+> ⚠️ **PADHO ISSE PEHLE KUCH BHI CHHEDNE SE (naya Claude instance bhi):**
+> 1. **Streaming/resolve pipeline** (`youtube_service.dart`, `innertube_client.dart`,
+>    `background_service.dart` ke `_resolveAndPlay`/`playSong`/CDN headers wale
+>    hisse, NewPipe native code) — isme **koi chhed-chhaad na karo** jab tak
+>    user specifically isi cheez ka bug na bataye. Ye sabse fragile, sabse
+>    zyada round-trip liya hua hissa hai — chhoti si "cleanup" bhi purana
+>    fixed bug wapas la sakti hai.
+> 2. **Notification icon crash** (`Invalid notification (no valid small icon)`,
+>    channel `com.sursathi.audio`) — ye bug **kai baar recur ho chuka hai**.
+>    Fix already laga hua hai: `androidNotificationIcon: 'drawable/ic_notification'`
+>    (background_service.dart) + drawable khud
+>    (`android/app/src/main/res/drawable/ic_notification.xml`) + resource
+>    shrinker se protect karne wala `android/app/src/main/res/raw/keep.xml`
+>    (`tools:keep`) + `build.gradle` me `minifyEnabled false, shrinkResources
+>    false` explicitly set. **In teeno files ko touch mat karo, aur inhe kabhi
+>    delete/revert mat karo** — warna ye bug FIR SE aayega.
+
+> 3. **CDN headers aur download icon states** (Batch 24 se) — download/radio/
+>    sleep-timer icon ab actual state (on/off) reflect karte hain. Inhe wapas
+>    static grey icon mat banao — user ne specifically iski request ki thi.
+
+## Batch 24 (2026-09-16) — Icon states (download/radio/sleep timer) + playlist download indicator
+
+**Ask:** "download icon pe dikhe ki gaana pehle se download hai", "radio mode
+on hai to uska bhi pata chale", "sleep timer on hai to uska bhi", aur ye
+sabme (playlist screen samet) consistent ho.
+
+**Fixes:**
+- `song_card.dart` — naya `isDownloaded` param; true hone par icon
+  `download_done_rounded` + green, warna pehle jaisa grey `download_rounded`.
+  Default `false` hai, isliye ye jin screens me pass nahi hua wahan behaviour
+  bilkul same raha.
+- `playlist_detail_screen.dart` — `_downloadedIds` set (DownloadDB se load,
+  single + bulk download ke baad update) → `SongCard(isDownloaded: ...)`.
+- `full_player_screen.dart` — download chip ab `DownloadDB.instance.exists()`
+  FutureBuilder se green/filled dikhta hai (HeartButton wale isLiked pattern
+  jaisa hi). Radio chip `queueService.radioMode` se green + tap karne par
+  ab radio band bhi kar sakta hai (pehle sirf start hi hota tha). Sleep-timer
+  chip `_sleepTimer != null` se green/filled.
+- `mini_player.dart` — same download + radio icon state fix.
+- `queue_service.dart` — **bug mila:** `enableRadioMode()`/`disableRadioMode()`
+  kabhi `notifyListeners()` call hi nahi karte the, isliye `radioMode` UI me
+  reactively update hi nahi ho sakta tha chahe kuch bhi try karo. Ab dono
+  jagah `notifyListeners()` add kiya.
+- `full_player_screen.dart` sleep timer — `_startSleepTimer`/`_cancelSleepTimer`
+  pehle koi `setState()` hi nahi karte the (icon kabhi refresh nahi hota),
+  aur timer khud fire hone (auto-pause) ke baad bhi `_sleepTimer` null nahi
+  hota tha (icon hamesha "on" dikhta reh jaata). Dono fix kiye.
+
+
 
 **Problem 1 — Next par 10s delay (network fast hone par bhi):** `skipToNext()`
 har baar tap hone ke BAAD hi poora resolve pipeline (NewPipe native →

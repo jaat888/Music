@@ -99,6 +99,13 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
     );
   }
 
+  void _handleStopRadio() {
+    QueueService.instance.disableRadioMode();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Radio band kar diya')),
+    );
+  }
+
   // MediaItem (audioHandler.mediaItem) se ek poora Song object banao —
   // heart/lyrics jaisi features ko poore Song model ki zaroorat padti hai.
   Song _songFromMediaItem(MediaItem item) {
@@ -144,7 +151,13 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
 
   void _startSleepTimer(Duration d) {
     _sleepTimer?.cancel();
-    _sleepTimer = Timer(d, () => audioHandler.pause());
+    _sleepTimer = Timer(d, () {
+      audioHandler.pause();
+      // FIX: timer khud fire hone ke baad bhi icon "on" hi dikhta rehta
+      // tha (state kabhi reset nahi hoti thi) — ab fire hote hi off dikhao.
+      if (mounted) setState(() => _sleepTimer = null);
+    });
+    setState(() {}); // icon ko turant "on" dikhao
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('${d.inMinutes} min baad music pause ho jayega')),
     );
@@ -152,7 +165,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
 
   void _cancelSleepTimer() {
     _sleepTimer?.cancel();
-    _sleepTimer = null;
+    setState(() => _sleepTimer = null);
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Sleep timer off kar diya')),
     );
@@ -566,25 +579,47 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           ),
                                           const SizedBox(width: 10),
                                           _chip(
-                                            child: IconButton(
-                                              icon: _downloading
-                                                  ? const SizedBox(
-                                                      width: 18,
-                                                      height: 18,
-                                                      child:
-                                                          CircularProgressIndicator(
-                                                        strokeWidth: 2,
-                                                        color: kTextDim,
-                                                      ),
-                                                    )
-                                                  : const Icon(
-                                                      Icons.download_rounded,
-                                                      color: kTextDim,
-                                                    ),
-                                              tooltip: 'Download',
-                                              onPressed: _downloading
-                                                  ? null
-                                                  : () => _handleDownload(song),
+                                            child: FutureBuilder<bool>(
+                                              // FIX: download icon ab
+                                              // "already downloaded"
+                                              // state ko reflect karta
+                                              // hai (green/filled), sirf
+                                              // static grey nahi rehta.
+                                              future: DownloadDB.instance
+                                                  .exists(song.id),
+                                              builder: (context, dlSnap) {
+                                                final isDownloaded =
+                                                    dlSnap.data ?? false;
+                                                return IconButton(
+                                                  icon: _downloading
+                                                      ? const SizedBox(
+                                                          width: 18,
+                                                          height: 18,
+                                                          child:
+                                                              CircularProgressIndicator(
+                                                            strokeWidth: 2,
+                                                            color: kTextDim,
+                                                          ),
+                                                        )
+                                                      : Icon(
+                                                          isDownloaded
+                                                              ? Icons
+                                                                  .download_done_rounded
+                                                              : Icons
+                                                                  .download_rounded,
+                                                          color: isDownloaded
+                                                              ? kGreen
+                                                              : kTextDim,
+                                                        ),
+                                                  tooltip: isDownloaded
+                                                      ? 'Downloaded'
+                                                      : 'Download',
+                                                  onPressed: _downloading
+                                                      ? null
+                                                      : () => _handleDownload(
+                                                          song),
+                                                );
+                                              },
                                             ),
                                           ),
                                           const SizedBox(width: 10),
@@ -600,14 +635,30 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                                         color: kTextDim,
                                                       ),
                                                     )
-                                                  : const Icon(
+                                                  : Icon(
                                                       Icons.radio_rounded,
-                                                      color: kTextDim,
+                                                      // FIX: radio mode
+                                                      // "on" hone par icon
+                                                      // green — pehle
+                                                      // hamesha grey rehta
+                                                      // tha chahe radio
+                                                      // chal hi kyu na
+                                                      // raha ho.
+                                                      color:
+                                                          queueService
+                                                                  .radioMode
+                                                              ? kGreen
+                                                              : kTextDim,
                                                     ),
-                                              tooltip: 'Radio shuru karo',
+                                              tooltip: queueService.radioMode
+                                                  ? 'Radio band karo'
+                                                  : 'Radio shuru karo',
                                               onPressed: _startingRadio
                                                   ? null
-                                                  : () => _handleRadio(song),
+                                                  : () => queueService
+                                                          .radioMode
+                                                      ? _handleStopRadio()
+                                                      : _handleRadio(song),
                                             ),
                                           ),
                                           const SizedBox(width: 10),
@@ -629,9 +680,19 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           const SizedBox(width: 10),
                                           _chip(
                                             child: IconButton(
-                                              icon: const Icon(
-                                                Icons.timer_outlined,
-                                                color: kTextDim,
+                                              icon: Icon(
+                                                // FIX: sleep timer active
+                                                // hone par icon green +
+                                                // filled — pehle hamesha
+                                                // grey outline hi rehta
+                                                // tha, on/off pata hi
+                                                // nahi chalta tha.
+                                                _sleepTimer != null
+                                                    ? Icons.timer
+                                                    : Icons.timer_outlined,
+                                                color: _sleepTimer != null
+                                                    ? kGreen
+                                                    : kTextDim,
                                               ),
                                               onPressed: _showSleepTimerDialog,
                                             ),

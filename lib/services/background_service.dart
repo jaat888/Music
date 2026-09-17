@@ -43,6 +43,16 @@ Future<void> initAudioHandler() async {
       // Fix: apna khud ka single-color vector drawable banaya
       // (android/app/src/main/res/drawable/ic_notification.xml) aur use
       // yahan explicitly point kiya.
+      //
+      // BUG FIX (2026-09-17, recurrence): ye string yahan sirf DART side pe
+      // hai — native Android side isse Resources.getIdentifier() se runtime
+      // pe dhoondta hai, isliye koi bhi compiled R.drawable.ic_notification
+      // reference kahin nahi banta. Iska matlab Android ka resource shrinker
+      // (shrinkResources) ye drawable "unused" samajh ke APK se hata sakta
+      // hai — bilkul yahi wajah thi jab ye crash dobara aaya. Ab
+      // android/app/src/main/res/raw/keep.xml me tools:keep se explicitly
+      // protect kiya hua hai, taaki ye drawable kabhi bhi strip na ho, chahe
+      // future me koi minify/shrink setting on ho jaaye.
       androidNotificationIcon: 'drawable/ic_notification',
       // BUG FIX (2026-09-16, v9): audio_service 0.18.19 me ab ek build-time
       // assert hai — `androidNotificationOngoing: true` sirf

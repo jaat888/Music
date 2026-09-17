@@ -1,5 +1,22 @@
 # SurSathi — Flutter Music App — Progress Notes
 
+> ⚠️ **PEHLE YE PADHO (naya Claude instance bhi, koi bhi kaam shuru karne se
+> pehle):**
+> 1. **Streaming/resolve wale code mein chhed mat karo** — `youtube_service.dart`,
+>    `innertube_client.dart`, aur `background_service.dart` ke play/resolve/CDN-header
+>    wale hisse bahut fragile hain aur bahut round-trip le chuke hain. Sirf tabhi
+>    haath lagao jab user khud isi cheez ka koi specific bug bataye — "cleanup"
+>    ya "refactor" ke naam pe kabhi mat chhedo.
+> 2. **Notification icon crash baar-baar recur ho chuka hai**
+>    (`Invalid notification (no valid small icon)`, channel `com.sursathi.audio`).
+>    Fix in teen jagah hai — inhe kabhi delete/revert/"simplify" mat karo:
+>    - `background_service.dart` → `androidNotificationIcon: 'drawable/ic_notification'`
+>    - `android/app/src/main/res/drawable/ic_notification.xml` (custom icon)
+>    - `android/app/src/main/res/raw/keep.xml` (`tools:keep`) + `build.gradle`
+>      me `minifyEnabled false, shrinkResources false` — resource shrinker se
+>      is drawable ko protect karta hai.
+>    Details: `NOTES.md` me top pe aur usi neeche.
+
 Ye file naye Claude instance (ya khud future-me main) ke liye hai — taaki
 context na khone pe bhi kaam wahi se continue ho jahan se chhoda tha.
 
