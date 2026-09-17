@@ -1,29 +1,32 @@
 // lib/services/download_queue_service.dart
 //
-// NEW (v37 — bug report: "playlist/download ka option nahi ata aur na
-// pata chalta kaunsa gaana queue mein hai; notification mein bhi kaunsa
-// download ho raha hai kaunsa queue mein hai kabhi nahi dikhta").
+// v37 se v40 tak ye queue "serial" thi (ek waqt me sirf 1 gaana download
+// hota tha) — jaan-boojh kar taaki pehle wale parallel-download crash/lag
+// bug se bachaa ja sake.
 //
-// Root cause: pehle har screen (home/artist/album/liked/playlist/mood/
-// smart) apna khud ka `_download(Song)` method rakhta tha jo seedha
-// `YoutubeService.instance.download()` call karta — koi shared state
-// nahi thi, isliye:
-//   1) Do jagah se same/alag gaane ek saath download karo to koi "queue"
-//      concept hi nahi tha — sab parallel chalte, koi progress/order
-//      track nahi hota.
-//   2) Kahin bhi "ye gaana abhi download ho raha hai" ya "ye queue mein
-//      hai" dikhane ka koi tarika nahi tha (na UI mein, na notification
-//      mein) — sirf ek generic "download ho gaya" / "fail ho gaya"
-//      SnackBar end mein aata tha.
+// 2026-09-17 (v42) — user report: (a) poori playlist (jaise 98 gaane)
+// download karte waqt app lag karti hai, (b) download speed baaki apps
+// jaisi fast nahi lagti, (c) "Pause All" jaisa option chahiye taaki
+// download beech me rok saken.
 //
-// Fix: ek single, app-wide serial queue (ek waqt me sirf ek download
-// chalta hai — taaki bahut saare parallel network calls se dobara wahi
-// "app crash/lag" wala pattern na ho jo is app mein playback ke liye
-// pehle fix kiya gaya tha). ChangeNotifier hai taaki koi bhi screen
-// `isQueued`/`isDownloading` se turant UI (spinner/queued-badge) dikha
-// sake, aur ek persistent notification (NotificationService) progress %
-// aur "N aur queue mein" hamesha dikhati rehti hai jab tak queue khaali
-// na ho jaaye.
+// Fix:
+//   1. SPEED — ab ek waqt me sirf 1 nahi, `maxConcurrent` (=3) gaane
+//      parallel download hote hain (chhota, safe worker-pool — poori
+//      playlist ek saath nahi, taaki wahi purana crash/lag pattern wapas
+//      na aaye, lekin 3x tak zyada throughput milta hai).
+//   2. LAG (bulk playlist add) — pehle poori playlist ke liye ek loop mein
+//      `enqueue()` baar-baar call hota tha (har baar apna `notifyListeners()`
+//      — 98 gaano ke liye 98 back-to-back UI rebuild ek hi frame ke andar,
+//      isi se "lag" hota tha jab poori playlist ek saath download pe lagti
+//      thi). Naya `enqueueAll(List<Song>)` sab songs ek saath list mein daal
+//      ke sirf EK baar notify karta hai.
+//   3. PAUSE ALL — `pauseAll()`/`resumeAll()`. NOTE (honest limitation):
+//      jo gaane ABHI download ho rahe hain (in-flight HTTP), unhe turant
+//      cancel nahi karta (उसके liye YoutubeService.download() mein
+//      CancelToken plumbing chahiye, jo abhi nahi hai) — pause karne par wo
+//      chal rahe downloads apni jagah poora ho jaate hain, bas QUEUE mein
+//      pade agle gaano ka start rok deta hai. Practically, chhote
+//      maxConcurrent (3) ki wajah se ye kaafi fast rukta hai.
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -36,33 +39,31 @@ class DownloadQueueService extends ChangeNotifier {
   DownloadQueueService._internal();
   static final DownloadQueueService instance = DownloadQueueService._internal();
 
+  static const int maxConcurrent = 3;
+
   final List<Song> _queue = [];
-  Song? _currentSong;
-  double _currentProgress = 0; // 0.0 - 1.0, sirf currentSong ke liye
-  bool _processing = false;
+  // Abhi active (in-flight) downloads — songId -> Song
+  final Map<String, Song> _active = {};
+  final Map<String, double> _progress = {};
+  int _runningWorkers = 0;
+  bool _paused = false;
 
   List<Song> get queue => List.unmodifiable(_queue);
-  Song? get currentSong => _currentSong;
-  double get currentProgress => _currentProgress;
-  bool get isIdle => _currentSong == null && _queue.isEmpty;
+  List<Song> get activeSongs => List.unmodifiable(_active.values);
+  double progressOf(String id) => _progress[id] ?? 0;
+  bool get isPaused => _paused;
+  bool get isIdle => _active.isEmpty && _queue.isEmpty;
+
+  // BACKWARD-COMPAT getters (purani UI single-song model use karti thi) —
+  // "current" = pehla active download (agar koi ho).
+  Song? get currentSong => _active.isEmpty ? null : _active.values.first;
+  double get currentProgress =>
+      currentSong == null ? 0 : (_progress[currentSong!.id] ?? 0);
 
   bool isQueued(String id) => _queue.any((s) => s.id == id);
-  bool isDownloading(String id) => _currentSong?.id == id;
+  bool isDownloading(String id) => _active.containsKey(id);
   bool isActive(String id) => isQueued(id) || isDownloading(id);
 
-  // Screens (Downloads screen, SongCard wagaira) isse subscribe kar sakte
-  // hain taaki ek download poora hone pe apni list turant refresh kar
-  // sakein (nayi entry DownloadDB mein already `YoutubeService.download()`
-  // khud add kar deta hai — isse sirf UI-refresh trigger karne ke liye).
-  //
-  // BUG FIX (v37): pehle ye ek single nullable field tha — jis screen ne
-  // sabse aakhri baar set kiya wahi "jeetta" tha, aur baaki sab (jaise
-  // main.dart ka global "download ho gaya" SnackBar) permanently overwrite
-  // ho jaate the, chahe wo screen ab visible bhi na ho. Ab ek list hai —
-  // multiple listeners (global + per-screen) ek saath, bina ek-doosre ko
-  // hataye, kaam kar sakte hain. Screens `addListener`/`removeListener`
-  // (standard ChangeNotifier tarah nahi — ye custom hai) use karke apna
-  // callback register/unregister karein (dispose() mein hatana zaroori hai).
   final List<void Function(Song song, bool success)> _finishListeners = [];
 
   void addFinishListener(void Function(Song song, bool success) listener) {
@@ -74,52 +75,75 @@ class DownloadQueueService extends ChangeNotifier {
   }
 
   void _notifyFinished(Song song, bool success) {
-    // List ka copy pe iterate karo — agar koi listener khud ke andar
-    // add/removeFinishListener call kare to concurrent-modification error
-    // na aaye.
     for (final l in List.of(_finishListeners)) {
       try {
         l(song, success);
-      } catch (_) {
-        // Ek listener ka crash baaki listeners ko block na kare.
-      }
+      } catch (_) {}
     }
   }
 
-  // Duplicate check: agar already download/cache mein hai to
-  // `YoutubeService.download()` khud turant (existingPath) return kar
-  // dega — isliye yahan dobara DB check karne ki zaroorat nahi, bas
-  // in-flight duplicate (already queued/downloading) rokna kaafi hai.
   void enqueue(Song song) {
     if (isActive(song.id)) return;
     _queue.add(song);
     notifyListeners();
-    unawaited(_processQueue());
+    _spawnWorkersIfNeeded();
   }
 
-  Future<void> _processQueue() async {
-    if (_processing) return;
-    _processing = true;
+  // NEW (v42): poori playlist/album ek saath download-queue mein daalne ke
+  // liye — sirf EK notifyListeners() (bulk-add lag fix).
+  void enqueueAll(Iterable<Song> songs) {
+    var added = false;
+    for (final song in songs) {
+      if (isActive(song.id)) continue;
+      _queue.add(song);
+      added = true;
+    }
+    if (added) {
+      notifyListeners();
+      _spawnWorkersIfNeeded();
+    }
+  }
+
+  void pauseAll() {
+    if (_paused) return;
+    _paused = true;
+    notifyListeners();
+  }
+
+  void resumeAll() {
+    if (!_paused) return;
+    _paused = false;
+    notifyListeners();
+    _spawnWorkersIfNeeded();
+  }
+
+  // Sirf abhi-tak-shuru-na-hue (queued) gaane hatata hai — jo abhi download
+  // ho rahe hain unhe force-stop nahi karta (dekho file ke top ka
+  // "PAUSE ALL" honest-limitation note).
+  void clearQueue() {
+    if (_queue.isEmpty) return;
+    _queue.clear();
+    notifyListeners();
+  }
+
+  void _spawnWorkersIfNeeded() {
+    if (_paused) return;
+    while (_runningWorkers < maxConcurrent && _queue.isNotEmpty) {
+      _runningWorkers++;
+      unawaited(_workerLoop());
+    }
+  }
+
+  Future<void> _workerLoop() async {
     try {
-      while (_queue.isNotEmpty) {
+      while (!_paused && _queue.isNotEmpty) {
         final song = _queue.removeAt(0);
-        _currentSong = song;
-        _currentProgress = 0;
+        _active[song.id] = song;
+        _progress[song.id] = 0;
         notifyListeners();
-        await _pushNotification(song);
+        unawaited(_pushNotification());
 
         var success = false;
-        // BUG FIX (v40 — user report: "download speed fast nahi hai"):
-        // pehle `notifyListeners()` har single network chunk pe call hota
-        // tha (koi throttle nahi) — ek 3-4MB gaane ke liye bhi ye sainkdon
-        // baar fire hota, aur har baar poori app ke listening widgets
-        // (jaise full player ka download icon) synchronously rebuild hote.
-        // Dart single-threaded hai — ye rebuild kaam agle network chunk ko
-        // process karne se seedha compete karta tha, isliye download
-        // (khaaskar kam-RAM phones par) slow feel hota tha, chahe asli
-        // network speed theek ho. Ab UI-notify bhi notification ki tarah
-        // sirf jab % badle tabhi fire hota hai (max ~100 baar poori
-        // download mein, chahe file me hazaar chunk hi kyun na hon).
         var lastNotifiedPct = -1;
         try {
           final path = await YoutubeService.instance.download(
@@ -128,16 +152,16 @@ class DownloadQueueService extends ChangeNotifier {
             author: song.artist,
             onProgress: (received, total) {
               if (total <= 0) return;
-              _currentProgress = received / total;
-              final pct = (_currentProgress * 100).round();
+              final p = received / total;
+              _progress[song.id] = p;
+              final pct = (p * 100).round();
               if (pct == lastNotifiedPct) return;
               lastNotifiedPct = pct;
+              // BUG FIX (v40, ab bhi lagu): sirf % badalne par hi notify —
+              // har chunk pe nahi, warna 3 parallel downloads ke saath UI
+              // rebuild aur bhi zyada baar fire hoke ulta lag kar deta.
               notifyListeners();
-              // Notification bahut baar update na ho (spam) — sirf har
-              // ~5% pe refresh karo.
-              if (pct % 5 == 0) {
-                unawaited(_pushNotification(song));
-              }
+              if (pct % 10 == 0) unawaited(_pushNotification());
             },
           );
           success = path != null;
@@ -146,21 +170,33 @@ class DownloadQueueService extends ChangeNotifier {
         }
 
         _notifyFinished(song, success);
-        _currentSong = null;
-        _currentProgress = 0;
+        _active.remove(song.id);
+        _progress.remove(song.id);
         notifyListeners();
       }
     } finally {
-      _processing = false;
-      await NotificationService.instance.cancelDownloadProgress();
+      _runningWorkers--;
+      if (_runningWorkers == 0 && _active.isEmpty) {
+        await NotificationService.instance.cancelDownloadProgress();
+      } else if (!_paused) {
+        // Is worker ka kaam khatam ho gaya lekin queue mein abhi bhi kuch
+        // ho sakta hai (dusre worker abhi busy the jab ye nikla) — dobara
+        // check karo taaki koi gaana queue mein "atka" na reh jaaye.
+        _spawnWorkersIfNeeded();
+      }
     }
   }
 
-  Future<void> _pushNotification(Song song) async {
+  Future<void> _pushNotification() async {
     try {
+      final active = _active.values.toList();
+      if (active.isEmpty) return;
+      final first = active.first;
       await NotificationService.instance.showDownloadProgress(
-        songTitle: song.title,
-        progressPercent: (_currentProgress * 100).round(),
+        songTitle: active.length > 1
+            ? '${first.title} +${active.length - 1} aur'
+            : first.title,
+        progressPercent: ((_progress[first.id] ?? 0) * 100).round(),
         queuedCount: _queue.length,
       );
     } catch (_) {

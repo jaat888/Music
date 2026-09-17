@@ -18,7 +18,6 @@ import '../services/background_service.dart';
 import '../services/download_queue_service.dart';
 import '../services/queue_service.dart';
 import '../services/like_service.dart';
-import '../services/youtube_service.dart';
 import '../widgets/song_card.dart';
 import '../widgets/shimmer_song_card.dart';
 import 'create_playlist_screen.dart';
@@ -187,77 +186,32 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
     );
   }
 
-  // NEW — poori playlist ek baar me download karo. Already-downloaded songs
-  // skip ho jaate hain (dobara download nahi hoti), ek chhota non-dismissible
-  // progress dialog dikhata hai jab tak sab process na ho jaayein.
+  // NEW — poori playlist ek baar me download karo.
+  //
+  // BUG FIX (2026-09-17, v42): pehle ye apna ALAG serial for-loop chalata
+  // tha (shared DownloadQueueService use hi nahi karta tha) — ek modal
+  // dialog block kiye rakhta jab tak sab 1-1 karke download na ho jaayein.
+  // Ab shared queue ka `enqueueAll()` use karta hai — poori playlist ek
+  // saath queue mein jaati hai, 3-parallel download (speed fix), aur
+  // Downloads screen se progress/pause bhi dikhta hai, koi blocking dialog
+  // nahi.
   Future<void> _downloadAll() async {
     if (_songs.isEmpty) return;
-    var done = 0;
-    var failed = 0;
+    final toQueue = <Song>[];
     var skipped = 0;
-    final total = _songs.length;
-    final nowDownloaded = <String>{};
-
-    late void Function(void Function()) dialogSetState;
-    if (!mounted) return;
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) {
-          dialogSetState = setDialogState;
-          return AlertDialog(
-            backgroundColor: kBgElev,
-            title: Text('Playlist download ho rahi hai', style: AppText.displayS()),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                LinearProgressIndicator(
-                  value: total == 0 ? 0 : (done + failed + skipped) / total,
-                  color: kGreen,
-                  backgroundColor: kSurface,
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  '${done + failed + skipped}/$total ho gaye · $done download · $skipped pehle se · $failed fail',
-                  style: AppText.bodyS(),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-
-    for (final song in List<Song>.of(_songs)) {
-      final already = await DownloadDB.instance.exists(song.id);
-      if (already) {
+    for (final song in _songs) {
+      if (await DownloadDB.instance.exists(song.id)) {
         skipped++;
-        nowDownloaded.add(song.id);
       } else {
-        final path = await YoutubeService.instance
-            .download(song.id, song.title, author: song.artist);
-        if (path != null) {
-          done++;
-          nowDownloaded.add(song.id);
-        } else {
-          failed++;
-        }
+        toQueue.add(song);
       }
-      dialogSetState(() {});
     }
-
+    DownloadQueueService.instance.enqueueAll(toQueue);
     if (!mounted) return;
-    Navigator.pop(context); // progress dialog band karo
-    // FIX: bulk download ke baad bhi row icons "on" (green) dikhein.
-    setState(() {
-      _downloadedIds = {..._downloadedIds, ...nowDownloaded};
-    });
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          'Playlist download poori — $done naye, $skipped pehle se, $failed fail',
+          '${toQueue.length} gaane download queue mein daale, $skipped pehle se downloaded',
         ),
       ),
     );

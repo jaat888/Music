@@ -171,15 +171,21 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
 
   // NEW (v41 — user request): poori playlist ek tap me download queue me
   // daal do — jo already downloaded/queued hain wo skip ho jaate hain.
+  //
+  // BUG FIX (2026-09-17, v42 — "playlist download pe app lag karti hai"):
+  // pehle yahan loop mein har gaane ke liye alag `enqueue()` call hota tha
+  // (98 gaano ke liye 98 alag notifyListeners() — ek hi frame ke andar
+  // itne UI rebuild se lag hota tha). Ab `enqueueAll()` — poori list ek
+  // saath, sirf EK notify.
   Future<void> _downloadAll() async {
     if (_tracks.isEmpty) return;
-    var added = 0;
-    for (final r in _tracks) {
-      final song = r.toSong();
-      if (DownloadQueueService.instance.isActive(song.id)) continue;
-      DownloadQueueService.instance.enqueue(song);
-      added++;
-    }
+    final songs = _tracks.map((r) => r.toSong()).toList();
+    final before = DownloadQueueService.instance.queue.length +
+        DownloadQueueService.instance.activeSongs.length;
+    DownloadQueueService.instance.enqueueAll(songs);
+    final added = DownloadQueueService.instance.queue.length +
+        DownloadQueueService.instance.activeSongs.length -
+        before;
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('$added gaane download queue mein daal diye')),

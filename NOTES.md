@@ -1593,3 +1593,82 @@ nahi hai). Agla real-device log dekhna — agar phir bhi fail ho:
 compile/run nahi ho saka (na Flutter SDK na network) — sabse zyada risk
 wala hissa theme const-stripping hai (bahut saari files touch hui), real
 build zaroor lena.
+
+---
+
+## 2026-09-17 (v42) — Bug-fixes batch (screenshots se)
+
+1. **Mini player "green-on-green" invisible icon bug — FIXED.** Download-
+   done aur radio-on icons `kGreen` color use karte the, lekin mini player
+   ka background bhi `kGreen` hai — active hote hi icon ghul (invisible ho)
+   jaata tha. Fix: icon color hamesha black, "ON" state ek dark circular
+   badge se dikhate hain (`lib/widgets/mini_player.dart`).
+2. **Mini player se download button hataya — DONE.** (`_handleDownload`/
+   `_downloading` dead code bhi saath mein hataya.)
+3. **Home-screen "Categories" (Spotify jaisa dynamic layout) — SCOPE
+   NEEDED, abhi nahi kiya.** Bada UI-redesign kaam hai, exact reference/
+   layout confirm karna better hoga isse pehle galat direction mein na
+   ban jaaye.
+4. **Personalized + YouTube/Spotify public-playlist aggregation
+   (search + home) — SCOPE NEEDED, abhi nahi kiya.** Spotify ka koi API
+   access/keys is project mein nahi hain (naya, bada integration/legal
+   scope). "User ke sunne ke hisaab se personalize" ke liye local
+   listening-history based recommendation banaya ja sakta hai (bina
+   Spotify ke) — agar yahi scope theek hai to batana, alag se banayenge.
+5. **Playlist bulk-download lag + speed + Pause All — FIXED.**
+   - Speed: `DownloadQueueService` ab serial (1) nahi, 3-parallel worker-
+     pool hai.
+   - Lag: bulk-add (`live_playlist_screen.dart`, `playlist_detail_screen.
+     dart`) ab `enqueueAll()` (ek hi notify) use karta hai — pehle
+     per-song loop se 98 baar UI rebuild hota tha.
+   - `playlist_detail_screen.dart` ka apna ALAG serial/blocking-dialog
+     wala `_downloadAll()` bhi hata ke shared queue pe convert kiya.
+   - Downloads screen: ab saare (3 tak) parallel active downloads dikhते
+     hain + "Pause All"/"Resume All" button. HONEST LIMITATION: pause
+     abhi CHAL RAHE in-flight downloads ko turant cancel nahi karta (koi
+     CancelToken plumbing abhi youtube_service.dart mein nahi hai) — sirf
+     naye (queue mein pade) downloads ka start rokta hai.
+6. **Settings > Appearance clutter — FIXED.** Accent Color / Font Size /
+   Animation Speed / Dynamic Colors (jo khud placeholder tha, kaam kuch
+   karta nahi tha) hata diye. Sirf "Theme" (Dark/Light/System) bacha hai.
+7. **Moods — listening-history-based + daily-refreshing — SCOPE NEEDED,
+   abhi nahi kiya.** Isi tarah ka recommendation-engine kaam hai jaisa
+   point 4 — dono ko saath plan karna better hoga (overlap hai).
+
+STATUS: 1, 2, 5, 6 is dev-environment mein compile-test nahi ho paaye
+(Flutter SDK nahi hai) — CI build ka result/log dekhna. 3, 4, 7 ke liye
+scope confirm karne ka wait hai.
+
+---
+
+## 2026-09-17 (v43) — YouTube-based personalization ("YT Music jaisa")
+
+Spotify route band hai (Feb 2026 se "other users' playlists" API access
+hi hata diya gaya — dekho chat, code-level nahi, Spotify ki policy hai).
+Isliye poora personalization ab sirf YouTube + apni local listening-history
+se:
+
+- **NEW `lib/services/daily_mix_service.dart`** — `PlayHistoryDB.
+  getTopArtists()` se user ke top-played artists nikaal ke, har ek ke liye
+  (uske history mein sabse zyada chale gaane ko "seed" bana ke)
+  `YoutubeService.getRadioQueue()` (wahi jo mini-player ke Radio feature
+  mein use hota hai) se ek 20-gaane ki "Mix" banata hai. Result din-bhar
+  ke liye SharedPreferences mein cache hota hai (roz naya/refresh —
+  jaisa Spotify/YT Music ka Daily Mix karta hai). Naya user (history
+  khaali) → khaali list, section hi nahi dikhta.
+- **NEW `lib/screens/daily_mix_screen.dart`** — ek mix ke gaane
+  (smart_playlist_screen.dart jaisa hi layout), "sab download karo"
+  button.
+- **`home_screen.dart`** — "Your Daily Mixes" horizontal section, search
+  bar ke turant baad, Categories se pehle.
+- **Note**: "Categories" section (Bollywood/Punjabi/etc, fixed 12-item
+  list) abhi bhi static hai — user ka original point 3 (Spotify-style,
+  har baar update) uske alawa tha; isko Daily Mix se overlap na ho isliye
+  abhi chhoda hai — agar chahiye to alag se scope karenge.
+- **Search me sab playlists already aati hain** — `search_screen.dart` ka
+  "Playlists" tab pehle se `YoutubeService.searchPlaylists()` use karta
+  hai (koi naya kaam nahi karna pada, already tha).
+
+STATUS: is dev-environment mein compile-test nahi ho paaya. `getRadioQueue`
+shared state (`_radioSeedId`) ke ek chhote edge-case ke liye
+youtube_service.dart mein comment daala hai.

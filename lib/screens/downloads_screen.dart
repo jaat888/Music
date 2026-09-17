@@ -261,8 +261,8 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
 
   Widget _buildQueueSection() {
     final q = DownloadQueueService.instance;
-    final current = q.currentSong;
-    if (current == null && q.queue.isEmpty) return const SizedBox.shrink();
+    final active = q.activeSongs;
+    if (active.isEmpty && q.queue.isEmpty) return const SizedBox.shrink();
 
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -275,7 +275,11 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (current != null) ...[
+          // NEW (2026-09-17, v42): ab ek saath 3 tak gaane parallel
+          // download hote hain (speed fix) — har active gaane ki apni
+          // progress row yahan dikhti hai (pehle sirf ek "current" hota
+          // tha).
+          for (final song in active) ...[
             Row(
               children: [
                 const SizedBox(
@@ -286,13 +290,13 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    'Download ho raha hai: ${current.title}',
+                    'Download ho raha hai: ${song.title}',
                     style: AppText.bodyM(color: kText),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
                 Text(
-                  '${(q.currentProgress * 100).round()}%',
+                  '${(q.progressOf(song.id) * 100).round()}%',
                   style: AppText.bodyS(color: kGreen),
                 ),
               ],
@@ -301,15 +305,15 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
             ClipRRect(
               borderRadius: BorderRadius.circular(4),
               child: LinearProgressIndicator(
-                value: q.currentProgress > 0 ? q.currentProgress : null,
+                value: q.progressOf(song.id) > 0 ? q.progressOf(song.id) : null,
                 minHeight: 4,
                 color: kGreen,
                 backgroundColor: kSurface,
               ),
             ),
+            const SizedBox(height: 8),
           ],
           if (q.queue.isNotEmpty) ...[
-            if (current != null) const SizedBox(height: 10),
             Text(
               '${q.queue.length} gaana queue mein baaki: '
               '${q.queue.take(3).map((s) => s.title).join(", ")}'
@@ -317,7 +321,27 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
               style: AppText.bodyS(color: kTextDim),
               overflow: TextOverflow.ellipsis,
             ),
+            const SizedBox(height: 8),
           ],
+          // NEW (v42 — user request): "Pause All" taaki chal rahi playlist
+          // download beech mein rok saken (queue mein pade gaane rukte
+          // hain — dekho download_queue_service.dart ke top ka honest
+          // limitation note ke liye).
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: () => q.isPaused ? q.resumeAll() : q.pauseAll(),
+              icon: Icon(
+                q.isPaused ? Icons.play_arrow_rounded : Icons.pause_rounded,
+                color: kGreen,
+                size: 18,
+              ),
+              label: Text(
+                q.isPaused ? 'Resume All' : 'Pause All',
+                style: AppText.bodyS(color: kGreen),
+              ),
+            ),
+          ),
         ],
       ),
     );

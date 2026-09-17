@@ -7,7 +7,6 @@ import 'package:just_audio/just_audio.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 import '../theme/colors.dart';
-import '../db/download_db.dart';
 import '../services/background_service.dart';
 import '../services/queue_service.dart';
 import '../services/youtube_service.dart';
@@ -35,35 +34,12 @@ class MiniPlayer extends StatefulWidget {
 }
 
 class _MiniPlayerState extends State<MiniPlayer> {
-  bool _downloading = false;
   bool _startingRadio = false;
 
-  Future<void> _handleDownload(MediaItem item) async {
-    if (_downloading) return;
-    final already = await DownloadDB.instance.exists(item.id);
-    if (!mounted) return;
-    if (already) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Ye gaana pehle se downloaded hai')),
-      );
-      return;
-    }
-    setState(() => _downloading = true);
-    final path = await YoutubeService.instance.download(
-      item.id,
-      item.title,
-      author: item.artist,
-    );
-    if (!mounted) return;
-    setState(() => _downloading = false);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          path != null ? '${item.title} download ho gaya' : 'Download fail ho gaya',
-        ),
-      ),
-    );
-  }
+  // NOTE (2026-09-17): mini-player se download button hata diya gaya hai
+  // (user ne bola "hata de") — is wajah se `_handleDownload`/`_downloading`
+  // (jo sirf usi button ke liye the) bhi hata diye, taaki dead/unused code
+  // na rahe.
 
   Future<void> _handleRadio(MediaItem item) async {
     if (_startingRadio) return;
@@ -235,65 +211,47 @@ class _MiniPlayerState extends State<MiniPlayer> {
                                 const EqualizerBars(color: Colors.black, size: 20, isPlaying: true),
                                 const SizedBox(width: 4),
                               ],
-                              // NEW — jo abhi stream ho raha hai wahi seedha
-                              // yahin se download ho sake, bina kisi list
-                              // me jaake dhundhe.
-                              FutureBuilder<bool>(
-                                // FIX: mini player me bhi download icon ab
-                                // "already downloaded" state dikhata hai.
-                                future: DownloadDB.instance.exists(item.id),
-                                builder: (context, dlSnap) {
-                                  final isDownloaded = dlSnap.data ?? false;
-                                  return IconButton(
-                                    icon: _downloading
-                                        ? const SizedBox(
-                                            width: 18,
-                                            height: 18,
-                                            child: CircularProgressIndicator(
-                                              strokeWidth: 2,
-                                              color: Colors.black,
-                                            ),
-                                          )
-                                        : Icon(
-                                            isDownloaded
-                                                ? Icons.download_done_rounded
-                                                : Icons.download_rounded,
-                                            color: isDownloaded
-                                                ? kGreen
-                                                : Colors.black,
-                                          ),
-                                    iconSize: 20,
-                                    tooltip:
-                                        isDownloaded ? 'Downloaded' : 'Download',
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                                    onPressed: _downloading
-                                        ? null
-                                        : () => _handleDownload(item),
-                                  );
-                                },
-                              ),
                               // NEW — isi gaane/artist jaisa "radio" queue
                               // me add kar deta hai (current gaana disturb
                               // nahi hota, baad me ye gaane bajenge).
                               Builder(builder: (context) {
-                                // FIX: radio "on" hone par icon green.
+                                // BUG FIX (2026-09-17): pehle "radio ON"
+                                // hone par icon color `kGreen` ho jaata tha
+                                // — lekin poora mini-player background bhi
+                                // kGreen hai, isliye icon green-pe-green ho
+                                // ke GHUL/INVISIBLE ho jaata tha ("option
+                                // green hota aur dikhna band ho jaata").
+                                // Fix: color hamesha black hi rakhte hain
+                                // (jo bg pe hamesha visible hai), "ON" state
+                                // ek chhota dark circular badge se dikhate
+                                // hain — color-match wala invisibility bug
+                                // khatam.
                                 final radioOn =
                                     QueueService.instance.radioMode;
-                                return IconButton(
-                                  icon: _startingRadio
-                                      ? const SizedBox(
-                                          width: 18,
-                                          height: 18,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                            color: Colors.black,
-                                          ),
-                                        )
-                                      : Icon(
-                                          Icons.radio_rounded,
-                                          color: radioOn ? kGreen : Colors.black,
+                                final icon = _startingRadio
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.black,
                                         ),
+                                      )
+                                    : Icon(
+                                        Icons.radio_rounded,
+                                        color: Colors.black,
+                                      );
+                                return IconButton(
+                                  icon: radioOn
+                                      ? Container(
+                                          padding: const EdgeInsets.all(3),
+                                          decoration: BoxDecoration(
+                                            color: Colors.black.withOpacity(0.18),
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: icon,
+                                        )
+                                      : icon,
                                   iconSize: 20,
                                   tooltip:
                                       radioOn ? 'Radio band karo' : 'Radio shuru karo',

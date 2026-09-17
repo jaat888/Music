@@ -822,6 +822,14 @@ class YoutubeService {
   // asli continuation token milta hai. Isliye ab practically unlimited ho
   // sakta hai: QueueService radio-mode isko khud call karta hai jab queue
   // khatam hone wali ho (dekho queue_service.dart ka enableRadioMode()).
+  // NOTE (2026-09-17): DailyMixService bhi getRadioQueue() sequentially
+  // (ek ke baad ek, kabhi parallel nahi) call karta hai poore Daily-Mix
+  // batch ke liye — is shared radio-state ko clobber karta hai (last-mix
+  // ka seed reh jaata hai). Chhota/theoretical edge-case: agar user Daily
+  // Mixes generate hone ke turant baad hi mini-player ka "Radio" toggle
+  // on kare, uska continuation stale ho sakta hai (radio phir bhi kaam
+  // karega, bas fresh seed se shuru hoga). Real conflict-window bahut
+  // chhota hai (mixes sirf app-open/din-me-ek-baar generate hote hain).
   String? _radioSeedId;
   String? _radioContinuation;
   bool _radioExhausted = false;

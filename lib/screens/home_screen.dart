@@ -10,6 +10,7 @@ import '../theme/typography.dart';
 import '../models/song.dart';
 import '../db/liked_db.dart';
 import '../db/cache_db.dart';
+import '../services/daily_mix_service.dart';
 import '../services/download_queue_service.dart';
 import '../services/youtube_service.dart';
 import '../services/background_service.dart';
@@ -25,6 +26,7 @@ import 'library_screen.dart';
 import 'downloads_screen.dart';
 import 'full_player_screen.dart';
 import 'live_playlist_screen.dart';
+import 'daily_mix_screen.dart';
 import 'debug_screen.dart';
 import 'settings_screen.dart';
 
@@ -113,20 +115,76 @@ class _HomeTabContent extends StatefulWidget {
 class _HomeTabContentState extends State<_HomeTabContent> {
   bool _loading = true;
   List<YtResult> _trending = [];
-  // NEW (2026-09-16, v11): YouTube Music jaisa live/curated home feed —
-  // "Quick picks", "Trending", "Mixed for you" jaise sections, seedhe YT
-  // Music se, har baar refresh pe naye/updated. _trending (fixed query)
-  // ab sirf FALLBACK hai — agar live feed kisi wajah se khaali aaye.
+  // YouTube Music jaisa live/curated home feed — "Quick picks", "Trending",
+  // "Mixed for you" jaise sections, seedhe YT Music se, har baar refresh pe
+  // naye/updated. _trending (fixed query) ab sirf FALLBACK hai — agar live
+  // feed kisi wajah se khaali aaye.
   List<YtHomeSection> _homeSections = [];
   Set<String> _likedIds = {};
   Set<String> _cachedIds = {};
+  // NEW (2026-09-17) — "Your Daily Mixes" (dekho daily_mix_service.dart).
+  List<DailyMix> _dailyMixes = [];
   String? _debugError; // TEMPORARY — screen pe error dikhane ke liye, taaki
   // bina logcat/computer ke bhi pata chal sake kya fail ho raha hai
+
+  // ---------------- Home feed "infinite scroll" (client-side) ----------------
+  // IMPORTANT — HONESTY NOTE: `dart_ytmusic_api` ka `getHomeSections()`
+  // andar hi khud saare continuation-pages ek loop me exhaust karke ek
+  // SAATH poori list wapas karta hai (package ka apna source dekha —
+  // `while (continuation != null) { ... }` seedha usi call ke andar hai).
+  // Matlab jab tak `getHomeFeed()` return karta hai, YouTube se poora
+  // data ALREADY aa chuka hota hai — humein "agla network batch" jaisa
+  // koi real continuation token milta hi nahi (package expose nahi karta).
+  // Isliye "infinite scroll pe agla batch fetch" yahan asal me EK extra
+  // network call NAHI hai — jo already-fetched sections hain, unhi ka
+  // agla chunk reveal hota hai (client-side pagination). UX bilkul
+  // "infinite scroll" jaisa hi lagta hai (chhota spinner + neeche scroll
+  // karte hi aur content), bas underlying network trip repeat nahi hoti.
+  static const int _kInitialSectionBatch = 6;
+  static const int _kSectionBatchStep = 6;
+  int _visibleSectionCount = _kInitialSectionBatch;
+  bool _loadingMoreSections = false;
+  final ScrollController _scrollController = ScrollController();
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     _load();
+  }
+
+  @override
+  void dispose() {
+    _scrollController
+      ..removeListener(_onScroll)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (_loadingMoreSections) return;
+    if (_visibleSectionCount >= _homeSections.length) return;
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    // Neeche se ~400px pehle hi agla batch reveal karo, taaki user ko
+    // scroll rukta hua na dikhe.
+    if (pos.pixels >= pos.maxScrollExtent - 400) {
+      _revealMoreSections();
+    }
+  }
+
+  Future<void> _revealMoreSections() async {
+    setState(() => _loadingMoreSections = true);
+    // Chhota artificial delay — sirf spinner ka UX feel dene ke liye
+    // (jaisa asli network "load more" lagta), koi real network call
+    // yahan nahi ho rahi (dekho upar wala HONESTY NOTE).
+    await Future.delayed(const Duration(milliseconds: 300));
+    if (!mounted) return;
+    setState(() {
+      _visibleSectionCount =
+          (_visibleSectionCount + _kSectionBatchStep).clamp(0, _homeSections.length);
+      _loadingMoreSections = false;
+    });
   }
 
   Future<void> _load() async {
@@ -142,7 +200,14 @@ class _HomeTabContentState extends State<_HomeTabContent> {
     // screen me dikh raha tha).
     try {
       // Layer 1: YT Music ka live/curated home feed.
-      final homeSections = await YoutubeService.instance.getHomeFeed();
+      // BUMPED again (2026-09-17, infinite-scroll): 20→40 sections. Ye
+      // EXTRA network cost nahi hai — `getHomeSections()` package ke
+      // andar hi poora feed ek call me fetch kar leta hai (dekho state
+      // ke upar wala HONESTY NOTE); yahan sirf ye tay hota hai ki uss
+      // already-fetched list se hum kitna client-side rakhte hain, taaki
+      // "scroll karke aur sections" dikhane ke liye kuch bacha rahe.
+      final homeSections =
+          await YoutubeService.instance.getHomeFeed(maxSections: 40, maxItemsPerSection: 30);
 
       // Layer 2 (FALLBACK): agar live feed khaali aaye (parsing fail,
       // network hiccup, etc.), purana fixed-query "Trending Now" use
@@ -157,6 +222,15 @@ class _HomeTabContentState extends State<_HomeTabContent> {
 
       final liked = await LikedDB.instance.getAll();
       final cached = await CacheDB.instance.getAll();
+      // NEW (2026-09-17): Daily Mixes alag se load karte hain (apna
+      // try/catch — inme koi bhi dikkat ho to poora home feed fail nahi
+      // hona chahiye, mixes bas section hide ho jaata hai).
+      List<DailyMix> dailyMixes = [];
+      try {
+        dailyMixes = await DailyMixService.instance.getTodaysMixes();
+      } catch (e) {
+        print('DAILY MIX _load() ERROR: $e');
+      }
 
       if (!mounted) return;
       setState(() {
@@ -164,6 +238,10 @@ class _HomeTabContentState extends State<_HomeTabContent> {
         _trending = results;
         _likedIds = liked.map((s) => s.id).toSet();
         _cachedIds = cached.map((e) => e['id'] as String).toSet();
+        _dailyMixes = dailyMixes;
+        // Refresh (pull-to-refresh ya pehli load) — reveal-count reset,
+        // taaki purane scroll-position ka batch naye feed pe carry na ho.
+        _visibleSectionCount = _kInitialSectionBatch;
         // TEMPORARY debug info — agar dono (live feed + fallback) khaali
         // hain par exception nahi aayi, to ye batata hai ki YouTube ne
         // genuinely 0 results diye (rate-limit ya query issue), exception
@@ -273,7 +351,11 @@ class _HomeTabContentState extends State<_HomeTabContent> {
 
     if (_homeSections.isNotEmpty) {
       final widgets = <Widget>[];
-      for (final section in _homeSections) {
+      // Sirf `_visibleSectionCount` sections abhi render hote hain —
+      // "load more" scroll listener (`_onScroll`/`_revealMoreSections`)
+      // isse dheere-dheere badhata hai.
+      final visibleSections = _homeSections.take(_visibleSectionCount);
+      for (final section in visibleSections) {
         widgets.add(SectionHeader(title: section.title));
         if (section.kind == YtHomeSectionKind.songs) {
           widgets.add(
@@ -317,6 +399,22 @@ class _HomeTabContentState extends State<_HomeTabContent> {
             ),
           );
         }
+      }
+      // "Infinite scroll" spinner — jab tak neeche scroll karke agla
+      // batch load ho raha ho (chhota, list ke end me).
+      if (_loadingMoreSections) {
+        widgets.add(
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 16),
+            child: Center(
+              child: SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2.4, color: kGreen),
+              ),
+            ),
+          ),
+        );
       }
       return widgets;
     }
@@ -381,6 +479,7 @@ class _HomeTabContentState extends State<_HomeTabContent> {
               color: kGreen,
               backgroundColor: kBgElev,
               child: ListView(
+                controller: _scrollController,
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 children: [
                   const SizedBox(height: 8),
@@ -459,6 +558,28 @@ class _HomeTabContentState extends State<_HomeTabContent> {
                       ),
                     ),
                   ),
+                  const SizedBox(height: 14),
+                  // NEW (2026-09-17) — "YouTube Music jaisa" personalized
+                  // Daily Mixes: user ki apni listening-history (top
+                  // artists) se banti hain, roz refresh hoti hain. Naya
+                  // user (koi history nahi) ke liye khaali list aati hai —
+                  // us case me section hi nahi dikhta (Categories seedha
+                  // aage aa jaata hai).
+                  if (_dailyMixes.isNotEmpty) ...[
+                    SectionHeader(title: 'Your Daily Mixes'),
+                    SizedBox(
+                      height: 180,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _dailyMixes.length,
+                        separatorBuilder: (_, __) => const SizedBox(width: 12),
+                        itemBuilder: (context, i) {
+                          final mix = _dailyMixes[i];
+                          return _DailyMixCard(mix: mix);
+                        },
+                      ),
+                    ),
+                  ],
                   SectionHeader(title: 'Categories'),
                   SizedBox(
                     height: 95,
@@ -581,6 +702,67 @@ class _HomeMiniPlayerBar extends StatelessWidget {
           },
         );
       },
+    );
+  }
+}
+
+// ---------------- Daily Mix card (2026-09-17, NEW) ----------------
+// YouTube Music ke "Daily Mix" cards jaisa — seed-artist ke naam wala
+// title, mix ke pehle gaane ka thumbnail background, tap karke poori mix
+// khulti hai (daily_mix_screen.dart).
+class _DailyMixCard extends StatelessWidget {
+  final DailyMix mix;
+  const _DailyMixCard({required this.mix});
+
+  @override
+  Widget build(BuildContext context) {
+    final coverThumb = mix.songs.isNotEmpty ? mix.songs.first.thumb : '';
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => DailyMixScreen(mix: mix)),
+      ),
+      child: SizedBox(
+        width: 140,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: coverThumb.isNotEmpty
+                  ? CachedNetworkImage(
+                      imageUrl: coverThumb,
+                      width: 140,
+                      height: 140,
+                      fit: BoxFit.cover,
+                      errorWidget: (context, url, error) => Container(
+                        width: 140,
+                        height: 140,
+                        color: kSurface,
+                        child: const Icon(Icons.auto_awesome, color: Colors.white54),
+                      ),
+                    )
+                  : Container(
+                      width: 140,
+                      height: 140,
+                      color: kSurface,
+                      child: const Icon(Icons.auto_awesome, color: Colors.white54),
+                    ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              mix.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: AppText.bodyM(color: kText).copyWith(fontWeight: FontWeight.w600),
+            ),
+            Text(
+              '${mix.songs.length} gaane',
+              style: AppText.bodyS(color: kTextDim),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

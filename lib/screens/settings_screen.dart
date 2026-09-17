@@ -450,35 +450,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     },
                     onTap: _showThemeModeDialog,
                   ),
-                  _buildAccentTile(),
-                  _buildSliderTile(
-                    icon: Icons.text_fields,
-                    title: 'Font Size',
-                    value: _fontScale,
-                    min: 0.8,
-                    max: 1.3,
-                    label: _fontScale.toStringAsFixed(2),
-                    onChanged: (v) => setState(() => _fontScale = v),
-                    onChangeEnd: (v) => ThemeService.instance.setFontScale(v),
-                  ),
-                  _buildNavTile(
-                    icon: Icons.speed,
-                    title: 'Animation Speed',
-                    subtitle: _animationSpeed <= 0.5
-                        ? 'Slow'
-                        : (_animationSpeed >= 1.5 ? 'Fast' : 'Normal'),
-                    onTap: _showAnimationSpeedDialog,
-                  ),
-                  _buildSwitchTile(
-                    icon: Icons.palette,
-                    title: 'Dynamic Colors',
-                    subtitle: 'Wallpaper se colors nikalo (placeholder)',
-                    value: _dynamicColors,
-                    onChanged: (v) async {
-                      await ThemeService.instance.setDynamicColors(v);
-                      setState(() => _dynamicColors = v);
-                    },
-                  ),
+                  // REMOVED (2026-09-17, user ne bola "bekar hai hata de,
+                  // bas theme ka option chhod de"): Accent Color swatch
+                  // tile (_buildAccentTile()), Font Size slider, Animation
+                  // Speed, aur "Dynamic Colors" (jo already khud placeholder
+                  // tha — kaam kuch karta hi nahi tha). Sirf Theme (Dark/
+                  // Light/System) yahan bacha hai.
 
                   _buildSectionHeader('PLAYBACK'),
                   _buildSwitchTile(
