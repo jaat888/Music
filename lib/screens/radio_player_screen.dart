@@ -2,9 +2,11 @@
 // SurSathi v55 Radio Enhanced — same Radio UI, hardened transition/playback layer.
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
 import '../services/background_service.dart';
@@ -78,6 +80,42 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     super.dispose();
   }
 
+  static const _lastRadioSongKey = 'radio_last_song_v55';
+
+  Future<RadioCandidate?> _loadLastRadioCandidate() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_lastRadioSongKey);
+      if (raw == null || raw.isEmpty) return null;
+      final map = jsonDecode(raw) as Map<String, dynamic>;
+      final songMap = map['song'] as Map<String, dynamic>?;
+      final language = map['language'] as String?;
+      if (songMap == null || language == null || !widget.languages.contains(language)) {
+        return null;
+      }
+      return RadioCandidate.fromSong(
+        Song.fromJson(songMap),
+        language: language,
+        categoryHint: RadioLanguageSelectLookup.byCode(language)?.categoryHint,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _saveLastRadioCandidate(RadioCandidate candidate) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _lastRadioSongKey,
+        jsonEncode({
+          'song': candidate.song.toJson(),
+          'language': candidate.language,
+        }),
+      );
+    } catch (_) {}
+  }
+
   Future<void> _start() async {
     final generation = ++_sessionGeneration;
     _engine.clearFailed();
@@ -97,16 +135,34 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     });
 
     try {
+      // Re-entering Radio should feel like resuming, not starting from zero.
+      // Try the last Radio song first; background_service will use its warm
+      // disk/URL cache when available, so the first screen can start without
+      // waiting for a fresh candidate search.
+      var started = false;
+      final last = await _loadLastRadioCandidate();
+      if (last != null) {
+        _candidates.add(last);
+        started = await _playCandidate(last, addToHistory: false);
+        if (!started) {
+          _engine.markFailed(last.song.id);
+          _candidates.removeWhere((c) => c.song.id == last.song.id);
+        }
+      }
+
+      // Search/fill the real Radio pool after the resume attempt.
       await _fetchCandidates();
       if (!mounted || generation != _sessionGeneration) return;
-      var started = false;
-      for (var attempt = 0; attempt < 12 && !started; attempt++) {
-        final candidate = _pickNext(excludeIds: const <String>{});
-        if (candidate == null) break;
-        started = await _playCandidate(candidate, addToHistory: true);
-        if (!started) _engine.markFailed(candidate.song.id);
+      if (!started) {
+        for (var attempt = 0; attempt < 12 && !started; attempt++) {
+          final candidate = _pickNext(excludeIds: const <String>{});
+          if (candidate == null) break;
+          started = await _playCandidate(candidate, addToHistory: true);
+          if (!started) _engine.markFailed(candidate.song.id);
+        }
       }
       if (!started) throw StateError('No playable radio candidate');
+      unawaited(_fillUpcoming());
     } catch (_) {
       if (!mounted || generation != _sessionGeneration) return;
       setState(() {
@@ -194,6 +250,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     if (!mounted || token != _candidateGeneration) return false;
 
     _engine.setLiked(candidate.song.id, _liked);
+    unawaited(_saveLastRadioCandidate(candidate));
 
     setState(() {
       _loading = true;
@@ -546,15 +603,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
                 _buildArtwork(current),
                 Container(color: Colors.black.withOpacity(.55)),
                 SafeArea(
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onVerticalDragEnd: (details) {
-                      final velocity = details.primaryVelocity ?? 0;
-                      if (velocity < -350) unawaited(_advance(auto: false));
-                      if (velocity > 350) unawaited(_previous());
-                    },
-                    child: _buildContent(current),
-                  ),
+                  child: _buildContent(current),
                 ),
               ],
             ),
@@ -589,67 +638,58 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final compact = constraints.maxHeight < 680;
-        return SingleChildScrollView(
-          physics: const BouncingScrollPhysics(),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: constraints.maxHeight),
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(20, compact ? 4 : 10, 20, 20),
-              child: Column(
-                children: [
-                  SizedBox(height: 48, child: _topBar()),
-                  SizedBox(height: compact ? 14 : 28),
-                  Text(current.language.toUpperCase(), style: AppText.bodyS(color: Colors.white70)),
-                  const SizedBox(height: 8),
-                  Text(
-                    current.song.title,
-                    textAlign: TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: AppText.displayL(color: Colors.white),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    current.song.artist,
-                    textAlign: TextAlign.center,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: AppText.bodyM(color: Colors.white70),
-                  ),
-                  SizedBox(height: compact ? 10 : 14),
-                  RadioLyrics(
-                    key: ValueKey('lyrics-${current.song.id}'),
-                    result: _lyrics,
-                    loading: _lyricsLoading,
-                  ),
-                  SizedBox(height: compact ? 6 : 12),
-                  RadioPlayerProgress(
-                    key: ValueKey('progress-${current.song.id}'),
-                    player: audioHandler.player,
-                  ),
-                  SizedBox(height: compact ? 12 : 18),
-                  _controls(),
-                  SizedBox(height: compact ? 12 : 20),
-                  Text(
-                    '↑ Swipe up = Skip    ↓ Swipe down = Previous',
-                    style: AppText.bodyS(color: Colors.white60),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 8),
-                  if (_loading || _loadingNext)
-                    const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  else
-                    Text(
-                      '${_upcoming.length} songs ready',
-                      style: AppText.bodyS(color: Colors.white54),
-                    ),
-                ],
+        final lyricHeight = compact ? 120.0 : 165.0;
+        return Padding(
+          padding: EdgeInsets.fromLTRB(20, compact ? 4 : 10, 20, 10),
+          child: Column(
+            children: [
+              SizedBox(height: 48, child: _topBar()),
+              SizedBox(height: compact ? 18 : 30),
+              Text(current.language.toUpperCase(), style: AppText.bodyS(color: Colors.white70)),
+              const SizedBox(height: 7),
+              Text(
+                current.song.title,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: AppText.displayL(color: Colors.white),
               ),
-            ),
+              const SizedBox(height: 6),
+              Text(
+                current.song.artist,
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppText.bodyM(color: Colors.white70),
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: Center(
+                  child: SizedBox(
+                    height: lyricHeight,
+                    width: double.infinity,
+                    child: IgnorePointer(
+                      child: RadioLyrics(
+                        key: ValueKey('lyrics-${current.song.id}'),
+                        result: _lyrics,
+                        loading: _lyricsLoading,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              RadioPlayerProgress(
+                key: ValueKey('progress-${current.song.id}'),
+                player: audioHandler.player,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _loading ? 'Loading…' : 'Radio',
+                style: AppText.bodyS(color: Colors.white54),
+              ),
+              const SizedBox(height: 4),
+              _controls(),
+            ],
           ),
         );
       },
@@ -700,11 +740,11 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         IconButton(
-          tooltip: 'Previous',
+          tooltip: 'Next song',
           iconSize: 34,
           color: Colors.white,
-          onPressed: _playedStack.isEmpty || _transitioning ? null : _previous,
-          icon: const Icon(Icons.skip_previous_rounded),
+          onPressed: _transitioning ? null : () => _advance(auto: false),
+          icon: const Icon(Icons.skip_next_rounded),
         ),
         const SizedBox(width: 14),
         StreamBuilder<PlayerState>(
@@ -942,8 +982,8 @@ class _RadioLyricsState extends State<RadioLyrics>
 
   void _centerActive(int index) {
     if (index < 0 || !_scrollController.hasClients) return;
-    const itemExtent = 46.0;
-    const viewportHeight = 220.0;
+    const itemExtent = 40.0;
+    const viewportHeight = 165.0;
     final target = (index * itemExtent) - (viewportHeight / 2) + (itemExtent / 2);
     final maxScroll = _scrollController.position.maxScrollExtent;
     final clamped = target.clamp(0.0, maxScroll).toDouble();
@@ -958,7 +998,7 @@ class _RadioLyricsState extends State<RadioLyrics>
   Widget build(BuildContext context) {
     if (widget.loading) {
       return const SizedBox(
-        height: 220,
+        height: 165,
         child: Center(
           child: SizedBox(
             width: 16,
@@ -971,7 +1011,7 @@ class _RadioLyricsState extends State<RadioLyrics>
 
     if (_lines.isEmpty) {
       return const SizedBox(
-        height: 220,
+        height: 165,
         child: Center(
           child: Text(
             'No synced lyrics available',
@@ -983,11 +1023,11 @@ class _RadioLyricsState extends State<RadioLyrics>
     }
 
     return SizedBox(
-      height: 220,
+      height: 165,
       child: ListView.builder(
         controller: _scrollController,
         physics: const NeverScrollableScrollPhysics(),
-        itemExtent: 46,
+        itemExtent: 40,
         itemCount: _lines.length,
         itemBuilder: (_, index) {
           final active = index == _activeIndex;
@@ -997,7 +1037,7 @@ class _RadioLyricsState extends State<RadioLyrics>
               curve: Curves.easeOut,
               style: AppText.bodyM(color: active ? Colors.white : Colors.white54).copyWith(
                 fontWeight: active ? FontWeight.w800 : FontWeight.w500,
-                fontSize: active ? 17 : 14,
+                fontSize: active ? 16 : 13,
                 shadows: active
                     ? const [Shadow(color: Colors.white54, blurRadius: 10)]
                     : const [],

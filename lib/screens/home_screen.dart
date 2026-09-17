@@ -4,6 +4,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../theme/colors.dart';
 import '../theme/typography.dart';
@@ -30,6 +31,7 @@ import 'daily_mix_screen.dart';
 import 'debug_screen.dart';
 import 'settings_screen.dart';
 import 'radio_language_select_screen.dart';
+import 'radio_player_screen.dart';
 
 // Home ki 12 categories — naam, emoji, search query
 class _Category {
@@ -652,10 +654,15 @@ class _HomeTabContentState extends State<_HomeTabContent> {
                           icon: const Icon(Icons.radio_rounded),
                           color: kTextDim,
                           splashRadius: 22,
-                          onPressed: () {
+                          onPressed: () async {
+                            final prefs = await SharedPreferences.getInstance();
+                            final saved = prefs.getStringList('radio_selected_languages') ?? const <String>[];
+                            if (!context.mounted) return;
                             Navigator.of(context).push(
                               MaterialPageRoute(
-                                builder: (_) => const RadioLanguageSelectScreen(),
+                                builder: (_) => saved.isNotEmpty
+                                    ? RadioPlayerScreen(languages: saved)
+                                    : const RadioLanguageSelectScreen(),
                               ),
                             );
                           },

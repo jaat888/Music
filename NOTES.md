@@ -2230,3 +2230,66 @@ This section was appended without changing any previous NOTES.md content.
 - NOTES.md (append-only)
 
 `audio_handler.dart`, `lib/widgets/radio_lyrics.dart`, and `lib/widgets/player_progress.dart` were not created or renamed because those files do not exist in the supplied v54 project; the existing architecture keeps the audio handler in `background_service.dart` and the Radio UI in `radio_player_screen.dart`.
+
+# v55 Radio UX Hotfix — 2026-09-17
+
+This section is appended only; all earlier NOTES.md content remains unchanged.
+
+## BUG-35 — Synced lyrics blocked Radio swipe/skip interaction
+- Previous behavior: the large lyrics ListView participated in the vertical
+  gesture arena while the whole player also listened for vertical swipes. This
+  could consume the gesture and make Radio skip/previous feel unresponsive.
+- New behavior: Radio no longer uses swipe navigation at all, and the lyrics
+  surface is non-interactive. Skip is an explicit next-song button, so lyrics
+  can never block playback controls.
+- Files modified: lib/screens/radio_player_screen.dart
+
+## BUG-36 — Previous button and swipe hint made the Radio controls confusing
+- Previous behavior: the player showed a previous button plus "Swipe up = Skip /
+  Swipe down = Previous", even though gesture handling could conflict with
+  synchronized lyrics.
+- New behavior: the on-screen previous button and swipe hint are removed. A
+  dedicated next/skip button is shown beside the play button. Headset/media
+  previous remains available through the Radio ownership handler.
+- Files modified: lib/screens/radio_player_screen.dart
+
+## BUG-37 — Timeline and play controls were too high on the screen
+- Previous behavior: lyrics, timeline, controls and the swipe hint were stacked
+  as a normal scrolling column, pushing the main controls around on different
+  screen sizes.
+- New behavior: title/artist stay slightly below the top bar, synchronized
+  lyrics occupy flexible middle space, and the real player timeline plus play
+  and like/next controls stay anchored toward the bottom inside SafeArea.
+- Files modified: lib/screens/radio_player_screen.dart
+
+## BUG-38 — Reopening Radio always behaved like a fresh session
+- Previous behavior: tapping Radio from Home always opened language selection,
+  even after the user had already chosen languages.
+- New behavior: language selection is shown only when no Radio languages have
+  been saved. Later Radio taps open the Radio player directly with the saved
+  language set.
+- Files modified: lib/screens/home_screen.dart
+
+## BUG-39 — Radio did not resume the last cached Radio song
+- Previous behavior: reopening Radio started candidate discovery again, so the
+  user could see a fresh loading/buffering period instead of returning to the
+  last Radio track.
+- New behavior: the last Radio song identity is persisted. On the next Radio
+  open it is attempted first, allowing background_service to use its existing
+  disk/in-memory cache before falling back to normal Radio discovery. The last
+  song is not duplicated into Radio history merely because Radio was reopened.
+- Files modified: lib/screens/radio_player_screen.dart
+
+## BUG-40 — Lyrics panel was visually oversized for a music-player layout
+- Previous behavior: the synchronized lyrics view consumed a fixed 220px area
+  and pushed the timeline/controls downward.
+- New behavior: lyrics are presented as a compact centered synchronized panel,
+  with a smaller active line and reduced inactive-line scale/opacity, leaving
+  the bottom controls and timeline accessible on compact phones.
+- Files modified: lib/screens/radio_player_screen.dart
+
+## Verification
+- Dart/Flutter SDK is not installed in this build environment, so `flutter
+  analyze` / Android build could not be executed here.
+- Dart delimiter/static source checks passed for the modified Radio/Home files.
+- Project package name, directory structure and existing assets were preserved.
