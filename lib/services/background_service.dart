@@ -286,6 +286,11 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // wo galat MIME-type guess kar leta tha. Ab dono saath cache hote hain.
   final Map<String, ({String url, String format})> _urlCache = {};
   final Set<String> _prefetchingIds = {};
+  // STABILITY (v86): prefetching several YouTube streams concurrently was
+  // itself causing the device log's RequestLimitExceededException. Keep a
+  // single resolver pipeline for background prefetch; foreground playback
+  // remains independent and can start immediately.
+  Future<void> _prefetchTail = Future<void>.value();
 
   // FIX (user request, 2026-09-17): pehle sirf agle 2 gaane prefetch hote
   // the — ab agle 3 (jab tak current bajta rehta hai) chup-chaap disk pe
@@ -294,7 +299,11 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // gaana dobara nahi chhua jaata (koi duplicate network call/write nahi).
   void _prefetchNext() {
     final upcoming = QueueService.instance.upcoming;
-    for (final next in upcoming.take(3)) {
+    // Only keep a small warm URL window. Downloading complete upcoming tracks
+    // in the background was unnecessarily consuming bandwidth and, more
+    // importantly, multiplying YouTube extraction requests. The current track
+    // is already cached by _playSong(); the next tracks only need a warm URL.
+    for (final next in upcoming.take(2)) {
       _prefetchOne(next);
     }
   }
@@ -304,32 +313,26 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       return;
     }
     _prefetchingIds.add(next.id);
-    () async {
+    _prefetchTail = _prefetchTail.then((_) async {
       try {
-        // Pehle se download ya cache me hai to kuch karne ki zaroorat
-        // nahi — koi duplicate network/disk call nahi.
-        // (2026-09-18: consolidated — dekho local_media_resolver.dart)
         final already = await LocalMediaResolver.instance.getPath(next.id);
         if (already != null) return;
-
         final resolved = await YoutubeService.instance
-            .getAudioUrlAndFormat(next.id, title: next.title, author: next.artist);
+            .getAudioUrlAndFormat(next.id, title: next.title, author: next.artist)
+            .timeout(const Duration(seconds: 20));
         if (resolved == null) return;
-        _urlCache[next.id] = resolved; // turant-skip ke liye fallback
-        await _autoCacheInBackground(next, resolved.url, markAsPlayed: false); // disk pe bhi utaar do
+        _urlCache[next.id] = resolved; // warm URL for instant next/previous
       } catch (_) {
-        // Prefetch fail hone se playback pe koi asar nahi — normal
-        // resolve chain skip/play time pe apne aap fallback ban jaati hai.
+        // Best-effort only; foreground playback has its own resolve/fallback.
       } finally {
         _prefetchingIds.remove(next.id);
-        // Ab 3 gaane tak prefetch hote hain (pehle 2 the) — cache-cap bhi
-        // thoda badhaya taaki abhi-abhi prefetch hua gaana jaldi evict na
-        // ho jaaye us waqt tak jab woh actually chalne wala ho.
         if (_urlCache.length > 6) {
           _urlCache.remove(_urlCache.keys.first);
         }
       }
-    }();
+    }).catchError((_) {
+      _prefetchingIds.remove(next.id);
+    });
   }
 
   // BUG FIX: pehle koi user-facing feedback nahi tha jab saare YouTube
@@ -796,6 +799,19 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     );
   }
 
+  Future<bool> _waitUntilPlaying({Duration timeout = const Duration(seconds: 6)}) async {
+    if (player.playing) return true;
+    try {
+      await player.playingStream
+          .where((playing) => playing)
+          .first
+          .timeout(timeout);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   @override
   Future<void> play() {
     _logCtl('play() called');
@@ -1032,48 +1048,23 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
-  /// Radio-only preload. This never touches QueueService or its queue index.
-  /// It resolves and disk-caches only the next two songs, reusing the same
-  /// validated cache path as normal playback.
-  // BUG FIX (v56): 2 → 5 — dekho radio_player_screen.dart ka comment.
+  /// Radio-only preload.
+  // STABILITY (v86): share the same serialized warm-URL queue as normal
+  // playback. The old Radio path started up to five full stream resolves
+  // and five background cache downloads at once, which matched the log's
+  // burst of YT PLAY OK / RequestLimitExceededException messages.
   Future<void> prefetchRadioSongs(Iterable<Song> songs) async {
-    final list = songs.take(5).toList();
+    final list = songs
+        .where((song) => song.id != _activePlaybackSong?.id)
+        .take(2)
+        .toList();
     AppLogger.instance.log(
       '[RADIO] prefetchRadioSongs() called — ${list.length} candidates: '
       '${list.map((s) => s.title).join(", ")}',
     );
     for (final song in list) {
-      _prefetchRadioOne(song);
+      _prefetchOne(song);
     }
-  }
-
-  void _prefetchRadioOne(Song song) {
-    if (_urlCache.containsKey(song.id) || _prefetchingIds.contains(song.id)) {
-      return;
-    }
-    _prefetchingIds.add(song.id);
-    () async {
-      try {
-        // (2026-09-18: consolidated — dekho local_media_resolver.dart)
-        final already = await LocalMediaResolver.instance.getPath(song.id);
-        if (already != null) return;
-        final resolved = await YoutubeService.instance
-            .getAudioUrlAndFormat(song.id, title: song.title, author: song.artist)
-            .timeout(const Duration(seconds: 20));
-        if (resolved == null) return;
-        _urlCache[song.id] = resolved;
-        // Keep the in-flight marker until the cache write completes so a
-        // second Radio preload cannot start a duplicate download.
-        await _autoCacheInBackground(song, resolved.url, markAsPlayed: false);
-      } catch (_) {
-        // Radio preload is best-effort and must never affect playback.
-      } finally {
-        _prefetchingIds.remove(song.id);
-        if (_urlCache.length > 12) {
-          _urlCache.remove(_urlCache.keys.first);
-        }
-      }
-    }();
   }
 
   void _notifyPlaybackError(Song song) {
@@ -1545,6 +1536,10 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         } catch (_) {}
         if (token != _playToken) return;
         await player.play();
+        if (!await _waitUntilPlaying()) {
+          throw StateError('local file play() ke baad playing=true nahi hua');
+        }
+        if (token != _playToken) return;
         _setPhase(token, PlaybackPhase.playing);
         // Part 3 (Library smarts): local-first (cache/download) play bhi
         // history me record hona chahiye, warna offline-heavy users ke
@@ -1692,6 +1687,10 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       await player.setFilePath(filePath);
       if (token != _playToken) return; // dauraan koi naya tap aa gaya
       await player.play();
+      if (!await _waitUntilPlaying()) {
+        throw StateError('file play() ke baad playing=true nahi hua');
+      }
+      if (token != _playToken) return;
       _setPhase(token, PlaybackPhase.playing);
       // Part 3 (Library smarts): playFromFile bhi ek "real" play hai.
       unawaited(PlayHistoryDB.instance.recordPlay(song));

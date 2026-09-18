@@ -1770,7 +1770,7 @@ class YoutubeService {
     // kuch dikha sakti hai, real duration nahi badalti lekin ab "atka hua"
     // nahi lagta.
     void Function(String status)? onStatus,
-    bool _retryAfterCdnFailure = true,
+    bool retryAfterCdnFailure = true,
   }) async {
     // FIX (user request): ye check yahan (root level) bhi hona chahiye —
     // sirf UI screens pe nahi — taaki koi bhi caller miss kare to bhi
@@ -1858,8 +1858,19 @@ class YoutubeService {
       final musicDir = await StorageService.getMusicDir();
       final safeName = await StorageService.sanitizeFileName(title);
       final ext = stream.format.isNotEmpty ? stream.format : 'm4a';
-      final filePath = p.join(musicDir.path, '$safeName.$ext');
-      final file = File(filePath);
+      // Two different YouTube videos can have the same title. Never let one
+      // download overwrite the other; keep the readable title and add a
+      // short ID only when the title path is already occupied.
+      var filePath = p.join(musicDir.path, '$safeName.$ext');
+      var file = File(filePath);
+      if (await file.exists()) {
+        final existing = await DownloadDB.instance.getFilePath(videoId);
+        if (existing == null || p.normalize(existing) != p.normalize(filePath)) {
+          final suffix = videoId.length > 8 ? videoId.substring(0, 8) : videoId;
+          filePath = p.join(musicDir.path, '$safeName [$suffix].$ext');
+          file = File(filePath);
+        }
+      }
       final sink = file.openWrite();
 
       // SPEED FIX (2026-09-18): pehle ye EK continuous GET request se
@@ -1911,11 +1922,12 @@ class YoutubeService {
           if (res.statusCode != 200 && res.statusCode != 206) {
             throw Exception('HTTP ${res.statusCode}');
           }
-          // A Range request must return 206 once we move past byte 0.
-          // Some CDN/proxy layers ignore Range and return the whole file
-          // with 200; accepting that here would append the whole file again
-          // on every 10MB iteration and corrupt the downloaded file.
-          if (rangeStart > 0 && res.statusCode == 200) {
+          // We explicitly asked for a byte range. If the server ignores it
+          // and returns the whole object (200), never append that body as a
+          // chunk: doing so can silently corrupt files larger than one chunk.
+          if (res.statusCode == 200 &&
+              (res.headers.containsKey('content-range') == false) &&
+              ((int.tryParse(res.headers['content-length'] ?? '') ?? 0) > chunkSize)) {
             throw Exception('HTTP 200 ignored requested Range at byte $rangeStart');
           }
         } catch (e) {
@@ -1937,9 +1949,11 @@ class YoutubeService {
             int.tryParse(res.headers['content-length'] ?? '');
 
         var gotAnyBytes = false;
+        var bytesInResponse = 0;
         await res.stream.listen(
           (chunk) {
             gotAnyBytes = true;
+            bytesInResponse += chunk.length;
             sink.add(chunk);
             received += chunk.length;
             onProgress?.call(received, total ?? received);
@@ -1948,7 +1962,11 @@ class YoutubeService {
           cancelOnError: true,
         ).asFuture<void>();
 
-        rangeStart += chunkSize;
+        // Prefer the actual Content-Range end when the CDN supplies it.
+        // This prevents a short/intermediate response from causing us to
+        // skip bytes by blindly jumping exactly chunkSize each iteration.
+        final actualEnd = _parseEndFromContentRange(res.headers['content-range']);
+        rangeStart = actualEnd != null ? actualEnd + 1 : rangeStart + bytesInResponse;
         // Chunk khaali aaya (server ke paas is range se aage kuch nahi
         // bacha) YA total pata hai aur wahan tak pahunch gaye — download
         // complete.
@@ -1979,7 +1997,7 @@ class YoutubeService {
           msg.contains('HTTP 429') ||
           msg.contains('HTTP 5') ||
           msg.contains('Range at byte');
-      if (_retryAfterCdnFailure && cdnFailure) {
+      if (retryAfterCdnFailure && cdnFailure) {
         // Stream URLs can expire or be rejected by a CDN after the resolver
         // returned them. Re-resolve once and restart from byte 0 rather than
         // retrying the same dead URL forever. openWrite() on the second pass
@@ -1993,7 +2011,7 @@ class YoutubeService {
           author: author,
           onProgress: onProgress,
           onStatus: onStatus,
-          _retryAfterCdnFailure: false,
+          retryAfterCdnFailure: false,
         );
       }
       return null;
@@ -2009,6 +2027,12 @@ class YoutubeService {
     final totalStr = contentRange.split('/').last.trim();
     if (totalStr == '*') return null;
     return int.tryParse(totalStr);
+  }
+
+  int? _parseEndFromContentRange(String? contentRange) {
+    if (contentRange == null) return null;
+    final match = RegExp(r'^\s*bytes\s+(\d+)-(\d+)\s*/').firstMatch(contentRange);
+    return match == null ? null : int.tryParse(match.group(2)!);
   }
 
   void dispose() {

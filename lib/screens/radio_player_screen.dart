@@ -371,11 +371,11 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     // real failure.
     if (audioHandler.player.playing) return true;
     try {
-      final started = await audioHandler.player.playingStream
+      await audioHandler.player.playingStream
           .where((playing) => playing)
           .first
           .timeout(const Duration(seconds: 6));
-      if (started && mounted && token == _candidateGeneration) return true;
+      if (mounted && token == _candidateGeneration) return true;
     } catch (_) {}
 
     if (!mounted || token != _candidateGeneration) return false;
@@ -430,6 +430,18 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
           } catch (_) {}
           if (audioHandler.player.playing) {
             recovered = true;
+          } else {
+            try {
+              await audioHandler.player.playingStream
+                  .where((playing) => playing)
+                  .first
+                  .timeout(const Duration(seconds: 6));
+              recovered = true;
+            } catch (_) {
+              recovered = false;
+            }
+          }
+          if (recovered) {
             AppLogger.instance.log('[RADIO] _ensureRecovery("${candidate.song.title}") TASK COMPLETE — retry $retry pe recover ho gaya.');
             if (mounted) setState(() => _loading = false);
             break;

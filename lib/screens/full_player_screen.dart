@@ -560,14 +560,19 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                             PlaybackPhase.buffering,
                                             PlaybackPhase.retrying,
                                           }.contains(audioHandler.phase.value);
-                                          final seekbarLoading =
-                                              processingState ==
+                                          // A short ExoPlayer buffering blip is normal even while
+                                          // audio is already audible. Keep the seekbar live in that
+                                          // case; only lock it when the track has NOT started yet.
+                                          final actualPlaying =
+                                              audioHandler.player.playing;
+                                          final seekbarLoading = !actualPlaying &&
+                                              (processingState ==
                                                       AudioProcessingState
                                                           .loading ||
                                                   processingState ==
                                                       AudioProcessingState
                                                           .buffering ||
-                                                  resolvingPhase;
+                                                  resolvingPhase);
                                           return StreamBuilder<Duration?>(
                                             key: ValueKey('duration-${song.id}'),
                                             stream:
@@ -714,12 +719,24 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                             // uske taps bhi block ho jaate
                                             // hain jab tak naya gaana ready
                                             // na ho jaaye.
-                                            final isLoading = processingState ==
-                                                    AudioProcessingState
-                                                        .loading ||
-                                                processingState ==
-                                                    AudioProcessingState
-                                                        .buffering;
+                                            final resolvingPhase = const {
+                                              PlaybackPhase.resolving,
+                                              PlaybackPhase.verifying,
+                                              PlaybackPhase.buffering,
+                                              PlaybackPhase.retrying,
+                                            }.contains(audioHandler.phase.value);
+                                            // Do not flash a spinner over the pause icon
+                                            // just because ExoPlayer reports a tiny buffering
+                                            // blip. If audio is already playing, the real player
+                                            // state is authoritative and the button stays Pause.
+                                            final isLoading = !isPlaying &&
+                                                (processingState ==
+                                                        AudioProcessingState
+                                                            .loading ||
+                                                    processingState ==
+                                                        AudioProcessingState
+                                                            .buffering ||
+                                                    resolvingPhase);
                                             return LoadingRing(
                                               isLoading: isLoading,
                                               size: 70,

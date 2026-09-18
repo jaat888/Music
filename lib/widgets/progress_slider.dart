@@ -74,8 +74,9 @@ class _ProgressSliderState extends State<ProgressSlider> {
         : (hasDuration
             ? widget.position.inMilliseconds.clamp(0, maxMs).toDouble()
             : 0.0);
-    final bufferedFraction = hasDuration && widget.bufferedPosition != null
-        ? (widget.bufferedPosition!.inMilliseconds / maxMs).clamp(0.0, 1.0)
+    final rawBufferedMs = widget.bufferedPosition?.inMilliseconds ?? 0;
+    final bufferedFraction = hasDuration
+        ? (rawBufferedMs.clamp(0, maxMs) / maxMs).clamp(0.0, 1.0)
         : 0.0;
     // Loading ke dauraan drag allow hi nahi karte — `hasDuration` ke saath
     // AND karte hain taaki dono guards ek saath respect ho.

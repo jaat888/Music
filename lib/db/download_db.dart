@@ -23,7 +23,21 @@ class DownloadDB {
   Future<List<Song>> getAll() async {
     final db = await _database;
     final rows = await db.query(_table, orderBy: 'created_at DESC');
-    return rows.map((row) => Song.fromMap(row)).toList();
+    final songs = <Song>[];
+    final staleIds = <String>[];
+    for (final row in rows) {
+      final song = Song.fromMap(row);
+      final path = song.filePath;
+      if (path == null || path.isEmpty || !await File(path).exists()) {
+        staleIds.add(song.id);
+        continue;
+      }
+      songs.add(song);
+    }
+    if (staleIds.isNotEmpty) {
+      await db.delete(_table, where: 'id IN (${List.filled(staleIds.length, '?').join(',')})', whereArgs: staleIds);
+    }
+    return songs;
   }
 
   // Song ko downloads me add karo (filePath zaroor hona chahiye)
@@ -52,14 +66,9 @@ class DownloadDB {
 
   // Check karo ki song already download hai ya nahi
   Future<bool> exists(String id) async {
-    final db = await _database;
-    final rows = await db.query(
-      _table,
-      where: 'id = ?',
-      whereArgs: [id],
-      limit: 1,
-    );
-    return rows.isNotEmpty;
+    // A DB row is not enough: Android can remove/move the actual file.
+    // Treat a stale row as not downloaded so the user can download it again.
+    return (await getFilePath(id)) != null;
   }
 
   // NEW: downloaded file ka path seedha do (agar file abhi bhi disk pe
@@ -74,8 +83,16 @@ class DownloadDB {
     );
     if (rows.isEmpty) return null;
     final path = rows.first['file_path'] as String?;
-    if (path == null || path.isEmpty) return null;
-    if (!await File(path).exists()) return null; // DB me hai par file gayab
+    if (path == null || path.isEmpty) {
+      await db.delete(_table, where: 'id = ?', whereArgs: [id]);
+      return null;
+    }
+    if (!await File(path).exists()) {
+      // Remove the stale row immediately; otherwise every future download
+      // attempt would incorrectly think the song is already downloaded.
+      await db.delete(_table, where: 'id = ?', whereArgs: [id]);
+      return null;
+    }
     return path;
   }
 }
