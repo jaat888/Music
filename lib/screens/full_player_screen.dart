@@ -471,11 +471,27 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                             builder: (context, posSnap) {
                                               final pos = posSnap.data ??
                                                   Duration.zero;
-                                              return ProgressSlider(
-                                                position: pos,
-                                                total: total,
-                                                onSeek: (d) =>
-                                                    audioHandler.seek(d),
+                                              // NEW: buffered-progress —
+                                              // chunked streaming me
+                                              // "kitna load ho chuka hai"
+                                              // dikhane ke liye (dekho
+                                              // progress_slider.dart).
+                                              return StreamBuilder<Duration>(
+                                                key: ValueKey(
+                                                    'buffered-${song.id}'),
+                                                stream: audioHandler
+                                                    .player.bufferedPositionStream,
+                                                initialData: Duration.zero,
+                                                builder: (context, bufSnap) {
+                                                  return ProgressSlider(
+                                                    position: pos,
+                                                    total: total,
+                                                    bufferedPosition:
+                                                        bufSnap.data,
+                                                    onSeek: (d) =>
+                                                        audioHandler.seek(d),
+                                                  );
+                                                },
                                               );
                                             },
                                           );

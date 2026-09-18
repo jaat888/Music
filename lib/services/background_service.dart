@@ -18,6 +18,7 @@ import '../db/download_db.dart';
 import '../db/play_history_db.dart';
 import '../models/song.dart';
 import 'cache_service.dart';
+import 'chunked_audio_source.dart';
 import 'download_queue_service.dart';
 import 'equalizer_presets.dart';
 import 'like_service.dart';
@@ -777,7 +778,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     _activePlaybackSong = song;
     // BUG FIX (2026-09-18, v59): dekho playWithRetry() ka same comment.
     _userPaused = false;
-    return _playSong(song, url, ++_playToken, useHeaders: false);
+    return _playSong(song, url, ++_playToken, useHeaders: false, useChunking: true);
   }
 
   // BUG FIX (2026-09-17, Attempt #5 RESULT — real-device log confirm
@@ -794,29 +795,40 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     String url,
     int token, {
     required bool useHeaders,
+    // SPEED FIX (2026-09-18, re-attempt — dekho chunked_audio_source.dart
+    // ka top comment: pichhli baar wala bug (assumed-vs-actual
+    // content-length mismatch) is baar fix kiya gaya hai). Risk kam
+    // rakhne ke liye: fresh-play call-sites (playSong/playWithRetry) hi
+    // `true` bhejte hain — koi bhi stream-drop RETRY (_retryAfterStreamDrop)
+    // isko default `false` hi rakhta hai, turant wapas proven-reliable
+    // plain `setUrl()` pe. Matlab worst case bhi utna hi reliable jitna
+    // pehle (v61) tha (bas ek extra retry lagega), best case gaana fast
+    // load hoga bina kisi retry ke.
+    bool useChunking = false,
   }) async {
     if (token != _playToken) return; // ek naya request already aa chuka hai
     mediaItem.add(_toMediaItem(song));
     try {
       print(
-        'YT PLAY ATTEMPT: "${song.title}" — headers: ${useHeaders ? "WITH cdnHeaders (desktop UA)" : "WITHOUT headers (raw URL, native-client jaisa)"}',
+        'YT PLAY ATTEMPT: "${song.title}" — headers: ${useHeaders ? "WITH cdnHeaders (desktop UA)" : "WITHOUT headers (raw URL, native-client jaisa)"}'
+        '${useChunking ? " — CHUNKED (speed-fix)" : ""}',
       );
-      // REVERT (2026-09-18): `ChunkedYoutubeAudioSource` (custom
-      // StreamAudioSource, HTTP Range-chunked streaming) real device pe
-      // test kiya to SAARE gaane turant "Source error" de rahe the
-      // (dekho sursathi_app_log.txt — pehle se bhi bura, ab kaam hi nahi
-      // kar raha, pehle sirf "slow" tha). Iska exact root cause (local
-      // just_audio HTTP-proxy ko diya gaya declared contentLength ACTUAL
-      // stream se mismatch ho sakta hai — googlevideo CDN maanga gaya
-      // poora range hamesha na de) bina real-device debug ke pin karna
-      // risky hai. Isliye WAPAS last-known-WORKING state (plain
-      // `setUrl()`, koi custom chunking nahi) — reliability > speed.
-      // Speed improvement baad me alag se, chhote-chhote verified steps
-      // me, real-device logs dekh ke karenge.
-      await player.setUrl(
-        url,
-        headers: useHeaders ? YoutubeService.cdnHeaders : null,
-      );
+      if (useChunking) {
+        // SPEED FIX: chunked HTTP Range source — dekho
+        // chunked_audio_source.dart ka top comment (poora root-cause +
+        // fix explanation).
+        await player.setAudioSource(
+          ChunkedYoutubeAudioSource(
+            url,
+            headers: useHeaders ? YoutubeService.cdnHeaders : null,
+          ),
+        );
+      } else {
+        await player.setUrl(
+          url,
+          headers: useHeaders ? YoutubeService.cdnHeaders : null,
+        );
+      }
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       await player.play();
       // Part 3 (Library smarts): asli play-history record — "Recently
@@ -1072,7 +1084,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // resolve nahi, isliye "next" ab bhi instant hai.
     final cached = _urlCache.remove(song.id);
     if (cached != null) {
-      await _playSong(song, cached, token, useHeaders: false);
+      await _playSong(song, cached, token, useHeaders: false, useChunking: true);
       return;
     }
 
@@ -1108,7 +1120,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       }
       if (token != _playToken) return; // resolve hone tak user aage badh chuka
       if (url != null) {
-        await _playSong(song, url, token, useHeaders: false);
+        await _playSong(song, url, token, useHeaders: false, useChunking: true);
         return;
       }
       if (attempt < 3) {

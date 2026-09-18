@@ -12,6 +12,7 @@ import '../models/song.dart';
 import '../db/liked_db.dart';
 import '../db/cache_db.dart';
 import '../services/daily_mix_service.dart';
+import '../services/discover_weekly_service.dart';
 import '../services/download_queue_service.dart';
 import '../services/youtube_service.dart';
 import '../services/background_service.dart';
@@ -136,6 +137,10 @@ class _HomeTabContentState extends State<_HomeTabContent> {
   Set<String> _cachedIds = {};
   // NEW (2026-09-17) — "Your Daily Mixes" (dekho daily_mix_service.dart).
   List<DailyMix> _dailyMixes = [];
+  // NEW — "Discover Weekly" (dekho discover_weekly_service.dart) —
+  // DailyMix jaisa hi shape (title+songs) me store karte hain taaki
+  // seedha `_DailyMixCard` reuse ho sake.
+  DailyMix? _discoverWeekly;
   // NEW (2026-09-17, diagnostic): Daily Mix khaali kyun aayi (agar aayi) —
   // sirf tab dikhta hai jab genuinely kuch fail hua ho (naya user jiski
   // history hi nahi hai, uske liye ye null rehta hai aur section chupa
@@ -323,6 +328,23 @@ class _HomeTabContentState extends State<_HomeTabContent> {
         dailyMixDebug = 'EXCEPTION: $e';
       }
 
+      // NEW: Discover Weekly — apna try/catch (Last.fm down ho, ya history
+      // hi na ho — poora home feed fail nahi hona chahiye, section bas
+      // hide ho jaata hai).
+      DailyMix? discoverWeekly;
+      try {
+        final songs = await DiscoverWeeklyService.instance.getThisWeeksMix();
+        if (songs.isNotEmpty) {
+          discoverWeekly = DailyMix(
+            title: 'Discover Weekly',
+            seedArtist: 'Discover Weekly',
+            songs: songs,
+          );
+        }
+      } catch (e) {
+        print('DISCOVER WEEKLY _load() ERROR: $e');
+      }
+
       if (!mounted) return;
       setState(() {
         _homeSections = homeSections;
@@ -330,6 +352,7 @@ class _HomeTabContentState extends State<_HomeTabContent> {
         _likedIds = liked.map((s) => s.id).toSet();
         _cachedIds = cached.map((e) => e['id'] as String).toSet();
         _dailyMixes = dailyMixes;
+        _discoverWeekly = discoverWeekly;
         _dailyMixDebug = dailyMixDebug;
         // Refresh (pull-to-refresh ya pehli load) — reveal-count reset,
         // taaki purane scroll-position ka batch naye feed pe carry na ho.
@@ -754,6 +777,24 @@ class _HomeTabContentState extends State<_HomeTabContent> {
                       child: Text(
                         'Daily Mix nahi ban paayi: $_dailyMixDebug',
                         style: AppText.bodyS(color: kTextDim),
+                      ),
+                    ),
+                  ],
+                  // NEW — "Discover Weekly" (bonus feature — dekho
+                  // discover_weekly_service.dart ka top comment): apna
+                  // listening-history + YouTube radio + (agar configured
+                  // hai) Last.fm "similar artist" data combine karke ek
+                  // pura-hafta-stable list. Naya user (history nahi) ke
+                  // liye khaali aata hai — section hide.
+                  if (_discoverWeekly != null) ...[
+                    SectionHeader(title: 'Discover Weekly'),
+                    SizedBox(
+                      height: 180,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        children: [
+                          _DailyMixCard(mix: _discoverWeekly!),
+                        ],
                       ),
                     ),
                   ],

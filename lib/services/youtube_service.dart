@@ -1023,9 +1023,39 @@ class YoutubeService {
           if (playlists.isNotEmpty) {
             sections.add(YtHomeSection.playlists(title, playlists));
           }
+        } else if (first is AlbumDetailed) {
+          // BUG FIX (2026-09-17): AlbumDetailed-type sections (naye
+          // albums, artist ke albums waghera — home feed pe kaafi common
+          // hain) pehle YAHAN seedha skip ho jaate the — isi wajah se
+          // real feed me bahut zyada sections hone ke bawajood sirf ~6
+          // hi (Song/Video/Playlist-type) bacha reh jaate the. Album ka
+          // `playlistId` field seedha usi playlist-playback pipeline
+          // (getYtMusicPlaylistTracks) se chalta hai jo normal playlists
+          // ke liye already hai — isliye album ko bhi ek
+          // `YtPlaylistPreview` ki tarah treat kar sakte hain, koi naya
+          // fetch-path banane ki zaroorat nahi.
+          final albums = <YtPlaylistPreview>[];
+          for (final item in contents) {
+            if (albums.length >= maxItemsPerSection) break;
+            if (item is! AlbumDetailed) continue;
+            final playableId =
+                item.playlistId.isNotEmpty ? item.playlistId : item.albumId;
+            if (playableId.isEmpty) continue;
+            albums.add(YtPlaylistPreview(
+              id: playableId,
+              title: item.name,
+              subtitle: item.artist.name,
+              thumb:
+                  item.thumbnails.isNotEmpty ? item.thumbnails.last.url : '',
+            ));
+          }
+          if (albums.isNotEmpty) {
+            sections.add(YtHomeSection.playlists(title, albums));
+          }
         }
-        // AlbumDetailed ya koi aur type wale sections is version me
-        // skip hote hain (albums ke liye alag flow chahiye hoga).
+        // Koi aur/unknown type wale sections ab bhi skip hote hain, par
+        // ab wo genuinely rare hain (Song/Video/Playlist/Album hi home
+        // feed ka bulk hote hain).
       }
 
       return sections;
@@ -1794,29 +1824,96 @@ class YoutubeService {
       final safeName = await StorageService.sanitizeFileName(title);
       final ext = stream.format.isNotEmpty ? stream.format : 'm4a';
       final filePath = p.join(musicDir.path, '$safeName.$ext');
-
-      final request = http.Request('GET', Uri.parse(stream.url))
-        ..headers.addAll(cdnHeaders);
-      final response = await _http.send(request);
       final file = File(filePath);
       final sink = file.openWrite();
-      // NEW (v37): pehle seedha `response.stream.pipe(sink)` tha — kaam
-      // karta tha, lekin bytes-received ka koi hisaab nahi rakhta tha,
-      // isliye caller ko progress % kabhi nahi mil sakta tha (download
-      // queue/notification hamesha "kuch pata nahi" state me rehte).
-      // Manual listen se wahi kaam hota hai, bas har chunk pe received
-      // total bhi track/report ho jaata hai.
-      final total = response.contentLength ?? 0;
+
+      // SPEED FIX (2026-09-18): pehle ye EK continuous GET request se
+      // poora file download karta tha — bilkul wahi pattern jo streaming
+      // playback ko bhi throttle karwata tha (dekho chunked_audio_source.
+      // dart ka top comment): YouTube ka CDN "khule", lambe-continuous
+      // connections ko jaanbujhke slow serve karta hai. Ab downloads bhi
+      // BADE FIXED-SIZE HTTP Range chunks (10MB) me sequentially maange
+      // jaate hain — same throttle-bypass jo streaming me kaam kiya.
+      //
+      // NOTE — chunked_audio_source.dart wala "assumed vs actual
+      // content-length" bug yahan STRUCTURALLY exist nahi karta: wahan
+      // bug tha kyunki hum just_audio (ExoPlayer) ko ek DECLARED length
+      // batate the jo agar real se mismatch ho jaaye to player crash ho
+      // jaata. Yahan hum kisi ko koi length "declare" nahi kar rahe —
+      // sirf jo bytes ACTUALLY stream se aate hain wahi count/likhte hain
+      // (`received += chunk.length`), phir agla chunk maangte hain. Kabhi
+      // bhi ek assumed number pe depend nahi karte, isliye wo bug class
+      // yahan lagta hi nahi — phir bhi safety ke liye total size Content-
+      // Range se hi nikaal rahe hain, koi guess nahi.
+      //
+      // BUG FIX (isi mein): pehle `cdnHeaders` (desktop Chrome UA) hamesha
+      // bhejta tha — background_service.dart me real-device testing se
+      // pata chala tha ki "WITHOUT headers" (raw, native-client jaisa)
+      // hi CDN drops se bachata hai. Downloads bhi ab default WITHOUT
+      // headers try karte hain, sirf ek chunk fail hone par WITH headers
+      // fallback.
+      const chunkSize = 10 * 1024 * 1024;
+      var rangeStart = 0;
+      int? total;
       var received = 0;
-      await response.stream.listen(
-        (chunk) {
-          sink.add(chunk);
-          received += chunk.length;
-          onProgress?.call(received, total);
-        },
-        onError: (Object e) => throw e,
-        cancelOnError: true,
-      ).asFuture<void>();
+      var useHeadersForChunk = false;
+
+      while (true) {
+        http.StreamedResponse res;
+        try {
+          final rangeEnd = rangeStart + chunkSize - 1;
+          final req = http.Request('GET', Uri.parse(stream.url));
+          req.headers.addAll({
+            if (useHeadersForChunk) ...cdnHeaders,
+            'Range': 'bytes=$rangeStart-$rangeEnd',
+          });
+          res = await _http.send(req);
+          // 416 = "Range Not Satisfiable" — matlab file khatam ho chuka
+          // hai (ye sirf tab hi hit hota hai jab `total` pata na chala ho
+          // aur humne end-of-file se aage ek range maang li ho). Ye error
+          // nahi hai, normal termination hai.
+          if (res.statusCode == 416) break;
+          if (res.statusCode != 200 && res.statusCode != 206) {
+            throw Exception('HTTP ${res.statusCode}');
+          }
+        } catch (e) {
+          if (!useHeadersForChunk) {
+            // Ek dur ka fallback — kabhi kisi rare stream ko WITH
+            // headers ki zaroorat pad jaaye (dekho background_service.
+            // dart me same pattern).
+            print(
+                'YT DOWNLOAD chunk fail WITHOUT headers ($e), WITH headers try kar rahe: $videoId');
+            useHeadersForChunk = true;
+            continue;
+          }
+          rethrow;
+        }
+
+        // Content-Range se hi total size nikaalo (koi assumption nahi) —
+        // pehle chunk se milta hai, uske baad reuse hota hai.
+        total ??= _parseTotalFromContentRange(res.headers['content-range']) ??
+            int.tryParse(res.headers['content-length'] ?? '');
+
+        var gotAnyBytes = false;
+        await res.stream.listen(
+          (chunk) {
+            gotAnyBytes = true;
+            sink.add(chunk);
+            received += chunk.length;
+            onProgress?.call(received, total ?? received);
+          },
+          onError: (Object e) => throw e,
+          cancelOnError: true,
+        ).asFuture<void>();
+
+        rangeStart += chunkSize;
+        // Chunk khaali aaya (server ke paas is range se aage kuch nahi
+        // bacha) YA total pata hai aur wahan tak pahunch gaye — download
+        // complete.
+        if (!gotAnyBytes) break;
+        if (total != null && rangeStart >= total) break;
+      }
+
       await sink.flush();
       await sink.close();
 
@@ -1837,6 +1934,17 @@ class YoutubeService {
       print('YT DOWNLOAD ERROR: $e');
       return null;
     }
+  }
+
+  // "bytes START-END/TOTAL" se sirf TOTAL nikaalo — download()'s chunked
+  // loop ke liye (dekho chunked_audio_source.dart me bhi same helper,
+  // wahan alag class hai isliye duplicate rakha hai, dono chhote/simple
+  // hain).
+  int? _parseTotalFromContentRange(String? contentRange) {
+    if (contentRange == null || !contentRange.contains('/')) return null;
+    final totalStr = contentRange.split('/').last.trim();
+    if (totalStr == '*') return null;
+    return int.tryParse(totalStr);
   }
 
   void dispose() {
