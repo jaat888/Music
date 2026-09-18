@@ -1277,6 +1277,24 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       } catch (_) {}
       if (token != _playToken) return;
       await player.play();
+
+      // IMPORTANT (v84): just_audio's `play()` Future may complete before
+      // ExoPlayer publishes `playing=true`. The old code immediately marked
+      // the Radio phase as playing, and the Radio screen immediately sampled
+      // `player.playing`; that race produced false "play nahi hua" messages
+      // and unnecessary candidate skips. Wait for the authoritative stream
+      // signal, but fail fast if the player never starts.
+      if (!player.playing) {
+        try {
+          await player.playingStream
+              .where((playing) => playing)
+              .first
+              .timeout(const Duration(seconds: 6));
+        } catch (e) {
+          throw StateError('player.play() ke baad playing=true nahi hua: $e');
+        }
+      }
+      if (token != _playToken) return;
       _setPhase(token, PlaybackPhase.playing);
       // Part 3 (Library smarts): asli play-history record — "Recently
       // Played"/"Most Played" ke liye. Fire-and-forget, playback ko kabhi

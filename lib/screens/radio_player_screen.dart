@@ -360,8 +360,25 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     } catch (_) {}
 
     if (!mounted || token != _candidateGeneration) return false;
-    if (audioHandler.player.playing) return true;
 
+    // IMPORTANT (v84): playWithRetry() can return a few milliseconds before
+    // just_audio flips `player.playing` to true. The old code checked the
+    // boolean immediately, treated a perfectly valid start as a failure,
+    // marked the song failed, and jumped to another candidate. The device log
+    // shows exactly this: a stream was obtained, then Radio immediately said
+    // "play nahi hua" even though playback became READY/PLAYING just after.
+    // Wait briefly for the authoritative playingStream before declaring a
+    // real failure.
+    if (audioHandler.player.playing) return true;
+    try {
+      final started = await audioHandler.player.playingStream
+          .where((playing) => playing)
+          .first
+          .timeout(const Duration(seconds: 6));
+      if (started && mounted && token == _candidateGeneration) return true;
+    } catch (_) {}
+
+    if (!mounted || token != _candidateGeneration) return false;
     return _ensureRecovery(candidate, token, autoAdvanceOnFailure: false);
   }
 
@@ -1068,7 +1085,11 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
               RadioPlayerProgress(
                 key: ValueKey('progress-${current.song.id}'),
                 player: audioHandler.player,
-                enabled: !_loading && !_transitioning,
+                // Player state is authoritative. Once the new source is
+                // READY, the seekbar should become usable even if a small
+                // Radio bookkeeping/transition task is still unwinding.
+                enabled: audioHandler.player.duration != null &&
+                    audioHandler.player.processingState == ProcessingState.ready,
               ),
               const SizedBox(height: 4),
               _controls(),
