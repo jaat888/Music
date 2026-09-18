@@ -51,5 +51,34 @@ class MainActivity : AudioServiceActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        // BUG FIX (2026-09-18, v59 — "Radio me back dabane se app
+        // force-stop jaisa exit ho jaata hai, minimize nahi hota"): jab
+        // Flutter Navigator ke paas pop karne ko kuch nahi bachta,
+        // Flutter/Android ka DEFAULT back-button behavior activity ko
+        // `finish()` kar deta hai — normal "Home button dabao to app
+        // background me chala jaaye" wala minimize nahi hota, poora
+        // task/activity hi tut jaata hai (foreground service/notification
+        // ke liye ye bilkul "app crash ho gaya" jaisa mehsoos hota hai).
+        // `moveTaskToBack(true)` iske bajaye sirf task ko background me
+        // bhej deta hai — activity zinda rehti hai, playback/notification
+        // bina rukawat chalte rehte hain, jaise koi bhi normal Android app
+        // Home button se karta hai. lib/screens/radio_player_screen.dart
+        // ka `WillPopScope` phone ke back button (hardware/gesture) par
+        // isi method ko call karta hai — screen ka apna × (close) button
+        // isse bilkul alag/unaffected rehta hai, seedha Navigator.pop()
+        // use karta hai jaise pehle karta tha.
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.sursathi.sursathi/nav",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "moveTaskToBack" -> {
+                    moveTaskToBack(true)
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 }

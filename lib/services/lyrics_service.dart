@@ -39,6 +39,21 @@ class LyricsService {
   // v3 deliberately invalidates v2's single-provider/negative cache.
   String _cacheKey(String songId) => 'lyrics_v3_$songId';
 
+  // BUG FIX (Radio "subtitle" stuck-loading — v58): Radio was calling
+  // getForSong() for the SAME current song from more than one place at
+  // once — the screen's own direct lyrics load, plus prefetchForSongs()
+  // (which always lists the current song first, and gets triggered twice
+  // per song transition) — each one firing its own independent
+  // LRCLIB -> LRCLIB-search -> JioSaavn -> lyrics.ovh chain. On a slow/
+  // mobile connection those duplicate chains compete for the same
+  // bandwidth, so the one result the screen is actually waiting on could
+  // take far longer than a single request would (this is exactly why the
+  // same song's lyrics loaded fine from the plain LyricsScreen, which only
+  // ever makes one request, but not from Radio). This in-flight map makes
+  // every concurrent call for the same songId share one underlying fetch
+  // instead of starting a new one.
+  final Map<String, Future<LyricsResult?>> _inFlight = {};
+
   Future<LyricsResult?> getForSong({
     required String songId,
     required String title,
@@ -52,30 +67,50 @@ class LyricsService {
       if (decoded != null && decoded.hasAny) return decoded;
     }
 
-    final result = await _fetchMultiSource(
+    final existing = _inFlight[songId];
+    if (existing != null) return existing;
+
+    final future = _fetchMultiSource(
       title: title,
       artist: artist,
       durationSeconds: durationSeconds,
     );
-
-    // Cache only a real result. A temporary provider/network failure should
-    // not permanently turn a song into "no lyrics".
-    if (result != null && result.hasAny) {
-      await prefs.setString(_cacheKey(songId), _encode(result));
+    _inFlight[songId] = future;
+    try {
+      final result = await future;
+      // Cache only a real result. A temporary provider/network failure
+      // should not permanently turn a song into "no lyrics".
+      if (result != null && result.hasAny) {
+        await prefs.setString(_cacheKey(songId), _encode(result));
+      }
+      return result;
+    } finally {
+      _inFlight.remove(songId);
     }
-    return result;
   }
 
-  Future<void> prefetchForSongs(Iterable<Song> songs, {int maxSongs = 10}) async {
+  // BUG FIX (Radio "subtitle" stuck-loading — v58): prefetching upcoming
+  // Radio songs' lyrics must never be able to outlive the songs it was
+  // started for. `isCancelled` lets the caller stop this loop as soon as
+  // the listener has skipped past that batch, instead of it quietly
+  // continuing to fire requests (and eat bandwidth) for songs nobody is
+  // listening to anymore across a long Radio session.
+  Future<void> prefetchForSongs(
+    Iterable<Song> songs, {
+    int maxSongs = 10,
+    bool Function()? isCancelled,
+  }) async {
     // Keep requests serial and bounded. LRCLIB explicitly asks clients to
     // avoid bursts and to identify themselves with a User-Agent.
     for (final song in songs.take(maxSongs)) {
+      if (isCancelled?.call() ?? false) return;
       await getForSong(
         songId: song.id,
         title: song.title,
         artist: song.artist,
         durationSeconds: song.duration,
       );
+      if (isCancelled?.call() ?? false) return;
       await Future.delayed(const Duration(milliseconds: 220));
     }
   }

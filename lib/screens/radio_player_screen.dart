@@ -5,6 +5,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -415,10 +416,18 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     }
     _trimArtworkCache();
 
+    // BUG FIX (Radio "subtitle" stuck-loading / slow skip — v58): tag this
+    // prefetch pass with the candidate generation it started for. Once the
+    // listener skips past this song, `_candidateGeneration` moves on and
+    // this now-stale pass stops instead of continuing to burn bandwidth —
+    // and compete with the *new* current song's own lyrics/audio fetch —
+    // for songs nobody is listening to anymore.
+    final gen = _candidateGeneration;
     unawaited(
       LyricsService.instance.prefetchForSongs(
         next,
         maxSongs: 10,
+        isCancelled: () => _candidateGeneration != gen,
       ),
     );
     // BUG FIX (v56 — user report: "agle 5 gano ke request pehle se chale
@@ -640,23 +649,56 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     return _artworkCache.putIfAbsent(candidate.song.id, () => NetworkImage(url));
   }
 
+  // BUG FIX (2026-09-18, v59 — "phone ka back button dabane se Radio/app
+  // force-stop jaisa exit ho jaata hai, minimize nahi hota"): is screen pe
+  // pehle koi back-button handling hi nahi thi, isliye phone ka hardware/
+  // gesture back seedha normal Flutter Navigator pop try karta tha — jab
+  // koi aur route pop karne ko na bache, Flutter/Android ka default
+  // behavior activity ko `finish()` kar deta hai (background service samet
+  // sab kuch achanak tut jaata hai) — normal apps jaisa sirf "minimize"
+  // (Home button jaisa, task background me chala jaaye, playback/
+  // notification zinda rahe) NAHI hota. Ab yahi phone ka back button sirf
+  // poore app ko background me bhej deta hai (MainActivity.kt ka
+  // `moveTaskToBack`, dekho waha ka comment) — Radio screen jahan ki wahin
+  // rehti hai, gaana bajta rehta hai. Radio se "bahar/exit" (gaana rokna)
+  // ab sirf upar wale × button se hi hota hai (`_topBar()` me
+  // `Navigator.of(context).pop()`) — us pe koi asar nahi, kyunki
+  // `WillPopScope.onWillPop` sirf back-button/system-pop try par hi chalta
+  // hai, seedhe `Navigator.pop()` call par nahi.
+  static const _navChannel = MethodChannel('com.sursathi.sursathi/nav');
+
+  Future<bool> _onBackPressed() async {
+    try {
+      await _navChannel.invokeMethod('moveTaskToBack');
+    } catch (_) {
+      // Channel/native side available na ho (purana build ya kisi wajah
+      // se fail) to bhi crash nahi hona chahiye — is case me purana
+      // (thoda kharab) default behavior hi chalega, naya jaanbujhke koi
+      // aur cheez try nahi karta.
+    }
+    return false; // Radio screen kabhi back-button se pop/exit nahi hoti.
+  }
+
   @override
   Widget build(BuildContext context) {
     final current = _current;
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: current == null
-          ? _loadingBody()
-          : Stack(
-              fit: StackFit.expand,
-              children: [
-                _buildArtwork(current),
-                Container(color: Colors.black.withOpacity(.55)),
-                SafeArea(
-                  child: _buildContent(current),
-                ),
-              ],
-            ),
+    return WillPopScope(
+      onWillPop: _onBackPressed,
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: current == null
+            ? _loadingBody()
+            : Stack(
+                fit: StackFit.expand,
+                children: [
+                  _buildArtwork(current),
+                  Container(color: Colors.black.withOpacity(.55)),
+                  SafeArea(
+                    child: _buildContent(current),
+                  ),
+                ],
+              ),
+      ),
     );
   }
 
@@ -789,7 +831,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         IconButton(
           tooltip: 'Next song',
           iconSize: 34,
-          color: Colors.white,
+          color: _transitioning ? Colors.white38 : Colors.white,
           onPressed: _transitioning ? null : () => _advance(auto: false),
           icon: const Icon(Icons.skip_next_rounded),
         ),
@@ -800,7 +842,24 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
             final state = snapshot.data;
             final playing = state?.playing ?? audioHandler.player.playing;
             final processing = state?.processingState ?? audioHandler.player.processingState;
-            final buffering = processing == ProcessingState.loading ||
+            // BUG FIX ("next dabao to bahut der tak kuch dikhta nahi,
+            // jaise kaam hi nahi kiya" — v58): ye spinner pehle SIRF
+            // just_audio ke apne processingState pe depend karta tha. Ek
+            // Radio transition ka sabse pehla aur sabse lamba step (naye
+            // gaane ka URL network se resolve karna) us player state ke
+            // BADLE se pehle hi ho raha hota hai — `setUrl()`/`play()`
+            // tabhi call hota hai jab URL mil chuka ho. Us poore intezaar
+            // ke dauraan UI me koi spinner ya feedback nahi dikhta tha —
+            // Next button bhi disabled ho jaane ke baad bhi hamesha safed
+            // (enabled jaisa) hi dikhta tha (neeche dekho) — isliye tap
+            // "kaam nahi kiya" jaisa lagta tha, jab tak (kabhi kaafi der
+            // baad) gaana achanak badal na jaaye. Ab screen ka apna
+            // `_loading`/`_transitioning` state bhi turant is spinner ko
+            // trigger karta hai, chahe just_audio abhi tak apna internal
+            // loading state dikha raha ho ya nahi.
+            final buffering = _loading ||
+                _transitioning ||
+                processing == ProcessingState.loading ||
                 processing == ProcessingState.buffering;
             return Semantics(
               button: true,

@@ -225,6 +225,26 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   int _streamErrorRetries = 0;
   static const int _maxStreamErrorRetries = 3;
 
+  // BUG FIX (2026-09-18, v59 — "pause karo to 2-3 sec baad khud hi wapas
+  // shuru se bajne lagta hai", full-screen aur notification dono se): Radio/
+  // gaana YouTube ke signed CDN URL se seedha stream hota hai — koi bhi HTTP
+  // connection ko pause() karke idle chhodo (chahe sirf 2-3 sec ke liye),
+  // kai CDNs (Google Video included) us idle socket ko khud band/reset kar
+  // dete hain. just_audio ye reset EK GENUINE "CDN drop" jaisa hi
+  // `player.playbackEventStream`'s `onError` pe report karta hai — aur
+  // neeche `_handleStreamDrop()` (jo asli mid-song network drops ke liye
+  // bana tha) is "error" ko dekh ke fresh URL nikaal ke playback WAPAS SHURU
+  // SE (`player.setUrl()` + `play()`) chala deta tha. Yahi wajah thi ki user
+  // ka pause "kaam nahi karta" jaisa lagta tha — actually kaam to karta tha,
+  // bas hamara apna hi stream-drop-recovery code use paused player ko
+  // "recover" karke wapas bajne laga deta tha. Fix: jab tak user ne khud
+  // pause() call kiya hai (is flag ke through), `onError` ko silently ignore
+  // karo — koi retry, koi auto-resume nahi. Naya play() ya koi bhi fresh
+  // playWithRetry()/playFromFile() start hote hi ye turant false ho jaata
+  // hai, taaki asli (playing ke dauraan) stream-drop recovery bilkul pehle
+  // jaisa hi kaam karta rahe.
+  bool _userPaused = false;
+
   // PART 2 (Sleep timer — "Song khatam hone tak"): jab true ho, current
   // gaana khatam hote hi (ProcessingState.completed) agle gaane pe
   // skipToNext() karne ke bajaye bas pause() ho jaata hai. Ye flag khud
@@ -261,6 +281,14 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         // bhi gaana nahi chalta" — kyunki fail hi is silent stream se
         // ho raha hota hai, jo _handleStreamDrop() ke andar bhi kabhi
         // log nahi hota tha. Ab yahan turant print karte hain.
+        // BUG FIX (2026-09-18, v59): dekho `_userPaused` field ka comment —
+        // user ke apne pause() ke baad aane wala "drop" fake hota hai, use
+        // real CDN drop maan ke resume/replay nahi karna hai.
+        if (_userPaused) {
+          print('YT PLAYBACK STREAM ERROR ignored — user ne khud pause kiya '
+              'hua hai, auto-resume nahi karenge: $e');
+          return;
+        }
         print('YT PLAYBACK STREAM ERROR (CDN drop, setUrl pass hone ke '
             'baad): $e');
         _handleStreamDrop();
@@ -553,10 +581,22 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // ---------------- Base controls ----------------
 
   @override
-  Future<void> play() => player.play();
+  Future<void> play() {
+    // BUG FIX (2026-09-18, v59): resume ke saath hi "user paused" flag
+    // saaf karo — is se agla genuine stream drop (agar aaye) fir se normal
+    // tarike se retry/recover hoga.
+    _userPaused = false;
+    return player.play();
+  }
 
   @override
-  Future<void> pause() => player.pause();
+  Future<void> pause() {
+    // BUG FIX (2026-09-18, v59): full-screen ka pause button ho ya
+    // notification/lock-screen ka — dono isi handler se guzarte hain, is
+    // liye ek hi jagah flag set karne se dono cases cover ho jaate hain.
+    _userPaused = true;
+    return player.pause();
+  }
 
   @override
   Future<void> seek(Duration position) => player.seek(position);
@@ -735,6 +775,8 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // Streaming URL se seedha play karo (YouTube stream)
   Future<void> playSong(Song song, String url) {
     _activePlaybackSong = song;
+    // BUG FIX (2026-09-18, v59): dekho playWithRetry() ka same comment.
+    _userPaused = false;
     return _playSong(song, url, ++_playToken, useHeaders: false);
   }
 
@@ -845,6 +887,11 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> playWithRetry(Song song) async {
     final token = ++_playToken;
     _activePlaybackSong = song;
+    // BUG FIX (2026-09-18, v59): naya song select karna kabhi bhi "user
+    // paused" state nahi hota — varna agar theek pehle wale gaane ko pause
+    // kiya gaya tha, naya gaana bhi silently us stale flag ki wajah se
+    // stream-drop recovery ke bina reh jaata.
+    _userPaused = false;
     // Naya song select hua — purane song ke stream-drop retries ka count
     // carry-forward nahi hona chahiye.
     _streamErrorRetries = 0;
@@ -1071,6 +1118,8 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> playFromFile(Song song, String filePath) async {
     final token = ++_playToken;
     _activePlaybackSong = song;
+    // BUG FIX (2026-09-18, v59): dekho playWithRetry() ka same comment.
+    _userPaused = false;
     mediaItem.add(_toMediaItem(song.copyWith(filePath: filePath)));
     try {
       await player.setFilePath(filePath);
