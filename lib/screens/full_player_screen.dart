@@ -420,10 +420,46 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                             overflow: TextOverflow.ellipsis,
                                           ),
                                           const SizedBox(height: 4),
-                                          Text(
-                                            song.artist,
-                                            style: AppText.bodyM(),
-                                            textAlign: TextAlign.center,
+                                          // NEW (2026-09-17, v66): explicit
+                                          // phase-status (dekho
+                                          // background_service.dart —
+                                          // `artist` field ab KABHI
+                                          // overwrite nahi hoti, isliye
+                                          // status yahan explicitly
+                                          // `audioHandler.phase` se dikhाते
+                                          // hain, koi implicit/accidental
+                                          // dependency nahi).
+                                          ValueListenableBuilder<PlaybackPhase>(
+                                            valueListenable: audioHandler.phase,
+                                            builder: (context, phase, _) {
+                                              String subtitle = song.artist;
+                                              if (phase != PlaybackPhase.playing &&
+                                                  phase != PlaybackPhase.paused &&
+                                                  phase != PlaybackPhase.idle) {
+                                                subtitle = audioHandler
+                                                        .phaseMessage.value ??
+                                                    switch (phase) {
+                                                      PlaybackPhase.resolving =>
+                                                        'Resolving...',
+                                                      PlaybackPhase.verifying =>
+                                                        'Verifying...',
+                                                      PlaybackPhase.buffering =>
+                                                        'Buffering...',
+                                                      PlaybackPhase.retrying =>
+                                                        'Retrying...',
+                                                      PlaybackPhase.error =>
+                                                        'Playback error',
+                                                      _ => subtitle,
+                                                    };
+                                              }
+                                              return Text(
+                                                subtitle,
+                                                style: AppText.bodyM(),
+                                                textAlign: TextAlign.center,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              );
+                                            },
                                           ),
                                         ],
                                       ),

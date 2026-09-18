@@ -147,11 +147,35 @@ class _MiniPlayerState extends State<MiniPlayer> {
                           ),
                         ),
                         const SizedBox(height: 2),
-                        Text(
-                          item.artist ?? '',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(color: Colors.black54, fontSize: 11),
+                        // NEW (2026-09-17) — PlaybackPhase state machine se
+                        // granular status ("Resolving...", "Retry 2/3...",
+                        // "Playback error") — jab phase "playing" ke alawa
+                        // kuch ho, artist ki jagah ye dikhta hai (subtitle
+                        // hamesha ek hi line hai, extra space nahi lagti).
+                        ValueListenableBuilder<PlaybackPhase>(
+                          valueListenable: audioHandler.phase,
+                          builder: (context, phase, _) {
+                            String subtitle = item.artist ?? '';
+                            if (phase != PlaybackPhase.playing &&
+                                phase != PlaybackPhase.paused &&
+                                phase != PlaybackPhase.idle) {
+                              subtitle = audioHandler.phaseMessage.value ??
+                                  switch (phase) {
+                                    PlaybackPhase.resolving => 'Resolving...',
+                                    PlaybackPhase.verifying => 'Verifying...',
+                                    PlaybackPhase.buffering => 'Buffering...',
+                                    PlaybackPhase.retrying => 'Retrying...',
+                                    PlaybackPhase.error => 'Playback error',
+                                    _ => subtitle,
+                                  };
+                            }
+                            return Text(
+                              subtitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(color: Colors.black54, fontSize: 11),
+                            );
+                          },
                         ),
                       ],
                     ),

@@ -2379,3 +2379,170 @@ This section is appended only; all earlier NOTES.md content remains unchanged.
 - Source-level delimiter/lexical checks were run after the update.
 - Flutter SDK/Android Gradle build is not available in this environment, so a
   device APK build could not be performed here.
+
+---
+
+## 2026-09-17 (v64) — Playback state machine (Phase 1)
+
+User ne ek proper state-machine architecture maanga (jaisa production
+media apps ka common/well-known pattern hota hai — resolving/verifying/
+buffering/playing/error/retrying, ek single source-of-truth, cancellation
+via generation-token).
+
+**Note (honesty):** Spotify/YT Music/Apple Music ka EXACT internal code
+kahin publicly nahi hai — humne unka code copy nahi kiya, balki wahi
+general/industry-standard media-player architecture apnayi hai jo har
+achha player use karta hai.
+
+**Kya mila (achi khabar):** is codebase mein already `_playToken`
+(generation-counter cancellation) ka sahi mechanism tha — bas har jagah
+scattered ad-hoc checks ke roop mein, koi observable STATE nahi.
+
+**Kiya (Phase 1 — foundation, poora rewrite nahi):**
+- `background_service.dart` me naya `enum PlaybackPhase` (idle, resolving,
+  verifying, buffering, playing, paused, retrying, error) + `ValueNotifier
+  <PlaybackPhase> phase` + `ValueNotifier<String?> phaseMessage`.
+- `_setPhase(token, phase, [message])` — wahi purana `_playToken` guard
+  reuse karta hai (stale request phase overwrite nahi kar sakta).
+- Existing transition points (`_resolveAndPlay`, `_playSong`, retry-loop,
+  play()/pause() overrides) ab is phase ko set karte hain.
+- `mini_player.dart` ab is phase ko dikhata hai — jab gaana "playing" nahi
+  hai (resolving/retry/buffering/error), artist ki jagah live status text
+  dikhta hai ("Resolving...", "Retry 2/3...", "Playback error").
+
+**ABHI NAHI kiya (bade scope, agla phase):**
+- Seekbar/buttons ka poora dedicated per-state UI (abhi sirf ek text
+  label hai, poore alag button-sets/animations nahi).
+- Notification (Android) khud is naye phase ko separately show nahi
+  karti — abhi bhi purane `playbackState.processingState` pe hi hai.
+- Cancellation abhi bhi `_playToken` int-based hai, koi formal
+  `CancellationToken`/`Completer`-object class nahi bana (kaam karta hai,
+  bas "clean-code" angle se ek aur upgrade ho sakta hai agar chahiye).
+
+STATUS: is dev-environment mein compile-test nahi ho paaya.
+
+---
+
+## 2026-09-17 (v65) — Playback state machine (Phase 2 — notification + UI)
+
+Phase 1 (v64) ka follow-up — ab poori tarah wired hai:
+
+- **Notification/lock-screen**: `_setPhase()` ab resolving/retrying/
+  buffering/error ke dauraan `MediaItem.artist` ko status-message se
+  temporarily replace karta hai ("Resolving...", "Retry 2/3...", "Stream
+  URL nahi mila") — Android notification ki subtitle line seedha
+  `MediaItem.artist` se aati hai, isliye ab wahan bhi live status dikhta
+  hai. `playing`/`paused` hote hi asli artist wapas aa jaata hai.
+- **Full player screen**: BONUS — koi extra code likhne ki zaroorat nahi
+  padi. `full_player_screen.dart` ka title/artist text pehle se live
+  `mediaItem` stream se aata hai (`_songFromMediaItem`), isliye upar wala
+  notification-fix automatically wahan bhi phase-status dikhata hai.
+- **Retry button (error state) + loading-ring (buffering)**: ye dono
+  already pehle se the (`processingState == error/loading` pe based) —
+  naye phase-system se conflict nahi karte, dono saath kaam karte hain.
+
+**Honest trade-off note**: `MediaItem.artist` ko status-message se
+overwrite karna matlab agar koi code exactly usi 1-2 second window mein
+`_songFromMediaItem()` se asli artist nikaalne ki koshish kare (jaise
+radio start), to usse temporarily "Resolving..." jaisa text mil sakta
+hai, asli artist nahi. Real playback (`_activePlaybackSong`) is se
+UNAFFECTED hai — sirf DISPLAY ke liye hai. Risk bahut chhota/rare hai.
+
+STATUS: is dev-environment mein compile-test nahi ho paaya — agla real
+build/log dekhna.
+
+---
+
+## 2026-09-17 (v66) — Edge-case fix (proper) + prefetch 2→3 songs
+
+**1. Playback-phase edge-case — PROPERLY fixed (v65 ka patch nahi, root
+fix):** v65 mein `MediaItem.artist` ko temporarily status-message se
+overwrite kiya jaata tha (resolving/retrying/error ke dauraan). Dikkat:
+`.artist` field HI wo jagah hai jahan se app ke andar har jagah "asli
+artist" nikala jaata hai — us transient window mein koi bhi consumer
+(radio-seed, `_songFromMediaItem()`) galti se status-text ko "artist"
+samajh sakta tha.
+
+Root fix: `artist` field ab **KABHI nahi chhua jaata** — hamesha asli
+artist. Status message ab `MediaItem.album` field mein jaata hai (jo is
+app mein kahin aur use hi nahi hoti thi, bilkul khaali/unused thi) —
+`_toMediaItem(song, statusOverride: message)`. Isse:
+- Notification: album field se status dikhta hai (**honest note**: album
+  line kitni prominently dikhti hai ye Android version/OEM pe depend
+  karta hai — kuch devices collapsed view mein nahi, sirf expanded/lock-
+  screen mein dikhate hain).
+- `full_player_screen.dart`: pehle (v65) ye ACCIDENTALLY artist-hijack pe
+  depend karke status dikhata tha (implicit/fragile) — ab explicitly
+  `audioHandler.phase`/`phaseMessage` use karta hai (`mini_player.dart`
+  jaisa hi pattern) — dono jagah ab consistent aur robust.
+- Koi bhi consumer jo kabhi bhi `.artist` padhega, use ab hamesha 100%
+  sahi/asli value milegi — koi race/edge-case nahi bacha.
+
+**2. Prefetch 2→3 songs:** `_prefetchNext()` ab agle 3 upcoming gaane
+disk pe cache karta hai (pehle 2 the) — smoother skip/next, kam chance
+ki koi upcoming gaana bina-cache ke mile. `_urlCache` ka eviction-cap
+5→6 (taaki 3 fresh-prefetched entries comfortably fit karein, premature
+evict na ho).
+
+STATUS: is dev-environment mein compile-test nahi ho paaya.
+
+---
+
+## 2026-09-17 (v67) — Radio: haan, same kaam already hua tha (+1 gap fix)
+
+User pooch rahe the "radio mein bhi kiya?" — jawab:
+
+- **Prefetch**: Radio ka apna ALAG (aur pehle se BEHTAR) prefetch tha —
+  `prefetchRadioSongs()` already 5 gaane aage tak cache karta hai (normal
+  queue abhi 3 tak gayi hai). Radio yahan kuch fix karne ki zaroorat
+  nahi thi.
+- **PlaybackPhase state machine**: Radio bhi seedha `audioHandler.
+  playWithRetry()` hi call karta hai (`radio_player_screen.dart` ke
+  `_playWithRecovery`/`_ensureRecovery`) — isliye resolving/retrying/
+  buffering/error phases automatically radio pe bhi fire hote hain, koi
+  alag kaam nahi karna pada.
+- **GAP jo mila aur fix kiya**: `radio_player_screen.dart` ka apna ALAG
+  UI/layout hai (full_player_screen.dart reuse nahi karta), isliye uska
+  apna artist-`Text` widget tha jo phase-status nahi dikhata tha (v65/v66
+  ka fix sirf full_player_screen.dart + mini_player.dart tak pahuncha
+  tha). Ab explicitly wire kiya — radio screen bhi "Resolving...",
+  "Retry...", "Playback error" dikhata hai.
+
+STATUS: is dev-environment mein compile-test nahi ho paaya.
+
+---
+
+## 2026-09-17 (v68) — Radio: 3 real bugs fixed + swipe gesture
+
+1. **Play/pause button "ghumta hi rehta hai" — ROOT CAUSE mila aur FIXED.**
+   `_loading = true` set hota tha jab bhi koi candidate try hota, lekin
+   FAILURE path mein kahin bhi wapas `false` nahi hota tha:
+   - `_playCandidate()` ke fail-branch mein (isse `_previous()` — jo sirf
+     EK hi candidate try karta hai, koi retry-loop nahi — sabse zyada
+     directly is bug ko trigger karta tha: ek fail hua "Previous" tap =
+     permanent spinning button).
+   - `_advance()` ke 12-attempt loop ke pura exhaust ho jaane ke case mein
+     bhi same gap tha.
+   Dono jagah ab `_loading=false` explicitly set hota hai fail hone par.
+2. **"Button se karta hoon to instant nahi hai" — FIXED.** `_playCandidate()`
+   mein do blocking `await` the jo asli playback se related nahi the:
+   `LikeService.isLiked()` (playback shuru hone se PEHLE await hota tha)
+   aur `RadioHistoryStore.record()` (jiski wajah se `_transitioning=false`
+   — jo Next/Prev button ka spinner control karta hai — audio already
+   bajne ke baad bhi der tak true rehta tha). Dono ab non-blocking
+   (`unawaited`) hain — audio jitni jaldi actually bajta hai, button
+   utni hi jaldi normal dikhta hai.
+3. **"Slide se next/previous kaam nahi karta" — ADD kiya (missing tha,
+   bug nahi, feature hi nahi thi).** Ab left/right horizontal swipe se
+   bhi Next/Previous chalta hai — SCOPE JAAN-BOOJH KAR sirf title/
+   artwork/lyrics area tak rakha (seekbar/buttons area ke bahar), taaki
+   seekbar ka apna drag-to-scrub gesture kabhi conflict na kare.
+4. **"Fast play/cache" — ALREADY tha, kuch naya nahi karna pada.**
+   Confirm kiya: Radio `playWithRetry()` ke through hi seedha `_playSong`
+   (`useChunking: true` — SPEED FIX) use karta hai, aur `prefetchRadioSongs()`
+   already agle 5 gaane disk pe cache kar deta hai (normal queue se bhi
+   zyada) — ye sab pehle se sahi tha.
+
+STATUS: is dev-environment mein compile-test nahi ho paaya — khaaskar
+swipe-gesture ka scoping (Expanded ke andar GestureDetector) real device
+pe zaroor test karna, layout-wise koi chhota gap na aaye.

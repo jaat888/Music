@@ -9,6 +9,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:audio_service/audio_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -95,6 +96,23 @@ Future<void> initAudioHandler() async {
   );
 }
 
+// NEW (2026-09-17) — Formal playback state machine phases.
+//
+// Ek gaana select karne se lekar actually bajne tak (ya fail hone tak) ke
+// poore lifecycle ko explicit states mein todte hain, taaki UI (mini
+// player, full player, notification) ko HAMESHA pata ho ki abhi kya ho
+// raha hai — generic "loading" ki jagah.
+enum PlaybackPhase {
+  idle, // kuch bhi resolve/play nahi ho raha
+  resolving, // NewPipe/explode/Piped se stream URL dhoonda ja raha hai
+  verifying, // mila hua URL playable hai ya nahi check ho raha hai
+  buffering, // URL mil gaya, just_audio load/buffer kar raha hai
+  playing,
+  paused,
+  retrying, // ek attempt fail hua, agla try ho raha hai
+  error, // sab attempts fail — ab kuch bhi auto-retry nahi ho raha
+}
+
 class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // PART 1 (Normalize Volume): Android-only loudness enhancer, AudioPlayer
   // ke saath ek AudioPipeline ke through attach hota hai. Ye "true" cross-
@@ -150,6 +168,68 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // chaap return ho jaata hai, kuch bhi overwrite nahi karta.
   int _playToken = 0;
 
+  // NEW (2026-09-17) — PlaybackPhase state machine.
+  //
+  // Upar wala `_playToken` mechanism sahi hai (cancellation ka asli
+  // core — koi purana/stale request kabhi final state overwrite nahi
+  // karta), lekin abhi tak sirf ek "cancellation guard" tha, koi
+  // observable STATE nahi — UI (mini player/full player/notification)
+  // ko pata hi nahi chalta tha ki abhi "resolve ho raha hai" ya "retry
+  // ho raha hai" ya "URL verify ho raha hai" — sirf generic loading-
+  // spinner ya kuch nahi dikhta tha.
+  //
+  // Ye woh well-known general pattern hai jo bade media apps (ExoPlayer
+  // ka apna STATE_*, ya kisi bhi production audio-player ka) use karte
+  // hain: ek FINITE set of phases, ek SINGLE source-of-truth notifier,
+  // aur har state-transition wahi generation-token cancellation use
+  // karta hai jo already yahan tha. (Note: ye hamesha-se-known/public
+  // software-design pattern hai — Spotify/YT Music/Apple Music ka
+  // apna EXACT internal code kisi ko bahar se nahi pata, hum unka code
+  // copy nahi kar rahe, sirf wahi industry-standard architecture apna
+  // rahe hain jo har achha media player use karta hai.)
+  //
+  // `_playToken` ab is class ke bahar `phase`/`phaseMessage` ke through
+  // observable hai — mini_player.dart isse "Resolving...", "Retry
+  // 2/3...", "Playback error" jaisa granular status dikha sakta hai,
+  // generic spinner ki jagah.
+  final ValueNotifier<PlaybackPhase> phase =
+      ValueNotifier(PlaybackPhase.idle);
+  final ValueNotifier<String?> phaseMessage = ValueNotifier(null);
+
+  void _setPhase(int token, PlaybackPhase p, [String? message]) {
+    // Stale request kabhi phase overwrite na kare — wahi `_playToken`
+    // guard jo pehle se poore file mein use hota hai.
+    if (token != _playToken) return;
+    phase.value = p;
+    phaseMessage.value = message;
+
+    // NEW (Phase 2, 2026-09-17): notification/lock-screen bhi phase-aware
+    // — resolving/retrying/buffering/error ke dauraan status message
+    // dikhta hai, taaki sirf mini-player nahi, notification/lock-screen
+    // bhi bataye ki kya ho raha hai.
+    //
+    // BUG FIX (2026-09-17, v66 — user report: "koi kami nahi honi
+    // chahiye"): PEHLE ye status `MediaItem.artist` ko temporarily
+    // OVERWRITE kar deta tha. Dikkat: `MediaItem.artist` hi wo field hai
+    // jisse app ke andar HAR jagah "asli artist" reconstruct hota hai
+    // (`_songFromMediaItem()` in full_player_screen.dart, radio-seed,
+    // etc.) — us 1-2 second transient window mein agar koi bhi cheez
+    // us waqt "asli artist" maangti, usse galti se "Resolving..." jaisa
+    // status-text mil jaata, asli naam nahi. Chhota/rare tha, lekin galat
+    // tha. FIX: `artist` field ab KABHI nahi chhua jaata (hamesha asli
+    // artist) — status ab `album` field mein jaata hai (jo Song/MediaItem
+    // mein waise bhi kabhi use nahi hota tha, khaali/unused tha) — isliye
+    // ab koi bhi consumer jo `.artist` padhta hai use hamesha sahi/asli
+    // value milti hai, chahe kabhi bhi padhe.
+    final song = _activePlaybackSong;
+    if (song == null) return;
+    if (p == PlaybackPhase.playing || p == PlaybackPhase.paused) {
+      mediaItem.add(_toMediaItem(song)); // status clear — album=null
+    } else if (message != null) {
+      mediaItem.add(_toMediaItem(song, statusOverride: message));
+    }
+  }
+
   // FIX: "next dabane par 10s lagta hai" — pehle next song ka poora
   // resolve (NewPipe/explode/Piped) sirf next tap hone ke BAAD shuru hota
   // tha. Ab current gaana play hote hi agla gaana background me chup-
@@ -158,14 +238,14 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   final Map<String, String> _urlCache = {};
   final Set<String> _prefetchingIds = {};
 
-  // FIX (user request): sirf agle gaane ka URL cache karna kaafi nahi tha —
-  // ab agle 2 upcoming gaane bhi (jab tak current bajta rehta hai) chup-
-  // chaap disk pe download/cache ho jaate hain, taaki wo bhi turant aur
-  // offline bhi bajein. Pehle se download/cached gaana dobara nahi
-  // chhua jaata (koi duplicate network call/write nahi).
+  // FIX (user request, 2026-09-17): pehle sirf agle 2 gaane prefetch hote
+  // the — ab agle 3 (jab tak current bajta rehta hai) chup-chaap disk pe
+  // download/cache ho jaate hain, taaki playback aur bhi smooth ho aur
+  // skip/next pe kabhi network-wait na dikhe. Pehle se download/cached
+  // gaana dobara nahi chhua jaata (koi duplicate network call/write nahi).
   void _prefetchNext() {
     final upcoming = QueueService.instance.upcoming;
-    for (final next in upcoming.take(2)) {
+    for (final next in upcoming.take(3)) {
       _prefetchOne(next);
     }
   }
@@ -193,7 +273,10 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         // resolve chain skip/play time pe apne aap fallback ban jaati hai.
       } finally {
         _prefetchingIds.remove(next.id);
-        if (_urlCache.length > 5) {
+        // Ab 3 gaane tak prefetch hote hain (pehle 2 the) — cache-cap bhi
+        // thoda badhaya taaki abhi-abhi prefetch hua gaana jaldi evict na
+        // ho jaaye us waqt tak jab woh actually chalne wala ho.
+        if (_urlCache.length > 6) {
           _urlCache.remove(_urlCache.keys.first);
         }
       }
@@ -587,6 +670,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // saaf karo — is se agla genuine stream drop (agar aaye) fir se normal
     // tarike se retry/recover hoga.
     _userPaused = false;
+    if (phase.value == PlaybackPhase.paused) phase.value = PlaybackPhase.playing;
     return player.play();
   }
 
@@ -596,6 +680,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // notification/lock-screen ka — dono isi handler se guzarte hain, is
     // liye ek hi jagah flag set karne se dono cases cover ho jaate hain.
     _userPaused = true;
+    if (phase.value == PlaybackPhase.playing) phase.value = PlaybackPhase.paused;
     return player.pause();
   }
 
@@ -808,6 +893,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   }) async {
     if (token != _playToken) return; // ek naya request already aa chuka hai
     mediaItem.add(_toMediaItem(song));
+    _setPhase(token, PlaybackPhase.buffering, 'Buffering...');
     try {
       print(
         'YT PLAY ATTEMPT: "${song.title}" — headers: ${useHeaders ? "WITH cdnHeaders (desktop UA)" : "WITHOUT headers (raw URL, native-client jaisa)"}'
@@ -831,6 +917,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       }
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       await player.play();
+      _setPhase(token, PlaybackPhase.playing);
       // Part 3 (Library smarts): asli play-history record — "Recently
       // Played"/"Most Played" ke liye. Fire-and-forget, playback ko kabhi
       // block/fail nahi karega.
@@ -872,6 +959,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       print('YT PLAYER FAIL: "${song.title}" (${song.id}) — URL mila tha '
           'lekin just_audio play nahi kar paya: $e');
       // URL kharab nikla — processing state error kar do, UI ko pata chal jaaye
+      _setPhase(token, PlaybackPhase.error, 'Playback fail: $e');
       playbackState.add(
         playbackState.value.copyWith(
           processingState: AudioProcessingState.error,
@@ -1026,6 +1114,8 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<void> _resolveAndPlay(Song song, int token) async {
+    _setPhase(token, PlaybackPhase.resolving, 'Stream dhoonda ja raha hai...');
+
     // BUG FIX (v37 — "next/previous cache se nahi, seedha net se dubara
     // play karta hai"): pehle yahan SABSE PEHLE `_urlCache` (in-memory,
     // sirf ek NETWORK stream URL) check hota tha, aur disk (download/
@@ -1049,6 +1139,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         await player.setFilePath(localPath);
         if (token != _playToken) return;
         await player.play();
+        _setPhase(token, PlaybackPhase.playing);
         // Part 3 (Library smarts): local-first (cache/download) play bhi
         // history me record hona chahiye, warna offline-heavy users ke
         // liye "Most/Never Played" hamesha khali/galat rahega.
@@ -1094,6 +1185,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       // chup-chaap ruk jaata hai — na error dikhata, na retry karta, na
       // kisi cheez ko overwrite karta.
       if (token != _playToken) return;
+      if (attempt > 1) {
+        _setPhase(token, PlaybackPhase.retrying, 'Try $attempt/3...');
+      }
 
       // BUG FIX: pehle yahan koi timeout nahi tha, aur youtube_service.dart
       // ke andar bhi network calls unbounded the — agar koi request stall
@@ -1129,6 +1223,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     }
     // Teeno attempts fail — error state (sirf agar ye ab bhi latest request hai)
     if (token != _playToken) return;
+    _setPhase(token, PlaybackPhase.error, 'Stream URL nahi mila (3 attempts fail)');
     playbackState.add(
       playbackState.value.copyWith(
         processingState: AudioProcessingState.error,
@@ -1189,11 +1284,15 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // hota agar sirf retry chahiye).
   Future<void> retryCurrent() => _playCurrentFromQueue();
 
-  MediaItem _toMediaItem(Song song) {
+  MediaItem _toMediaItem(Song song, {String? statusOverride}) {
     return MediaItem(
       id: song.id,
       title: song.title,
-      artist: song.artist,
+      artist: song.artist, // HAMESHA asli artist — kabhi overwrite nahi hota (dekho _setPhase comment)
+      // `album` field Song model/UI mein kahin aur use nahi hoti — isliye
+      // isko hi transient phase-status ("Resolving...", "Retry 2/3...")
+      // ke liye "borrow" karte hain, bina `artist` ko chhue.
+      album: statusOverride,
       artUri: song.thumb.isNotEmpty ? Uri.tryParse(song.thumb) : null,
       duration: Duration(seconds: song.duration),
       extras: {'filePath': song.filePath},

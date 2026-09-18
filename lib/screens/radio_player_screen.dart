@@ -248,10 +248,19 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     _paused = false;
     _lyrics = null;
     _lyricsLoading = true;
-    _liked = await LikeService.instance.isLiked(candidate.song.id);
+    // BUG FIX (2026-09-17, v68 — user: "next/prev button se karta hoon to
+    // instant nahi hai"): pehle yahan `await LikeService.instance.
+    // isLiked(...)` tha — ek DB read jo playback resolution shuru hone se
+    // PEHLE hi block karta tha. Heart-icon status playback ke liye zaroori
+    // nahi hai — ab parallel/non-blocking hai, resolution turant shuru
+    // hota hai.
+    unawaited(LikeService.instance.isLiked(candidate.song.id).then((liked) {
+      if (!mounted || token != _candidateGeneration) return;
+      _engine.setLiked(candidate.song.id, liked);
+      setState(() => _liked = liked);
+    }));
     if (!mounted || token != _candidateGeneration) return false;
 
-    _engine.setLiked(candidate.song.id, _liked);
     unawaited(_saveLastRadioCandidate(candidate));
 
     setState(() {
@@ -267,6 +276,16 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       _upcoming.removeWhere((item) => item.song.id == candidate.song.id);
       _lyrics = null;
       _lyricsLoading = false;
+      // BUG FIX (2026-09-17, v68 — user report: "play/pause button ghumta
+      // hi rehta hai"): ROOT CAUSE mila — `_loading` upar `true` set hota
+      // hai (line ~258), lekin is FAILURE branch mein kabhi wapas `false`
+      // nahi hota tha. `_previous()` sirf EK hi `_playCandidate()` call
+      // karta hai (koi retry-loop nahi) — agar wahi ek candidate fail ho
+      // jaaye (network hiccup, dead video, etc.), `_loading` hamesha ke
+      // liye `true` atka reh jaata — play/pause button (jo `_loading ||
+      // _transitioning || ...` dekh ke spinner dikhata hai) permanently
+      // ghumta reh jaata, chahe player actually kuch bhi na kar raha ho.
+      if (mounted) setState(() => _loading = false);
       return false;
     }
 
@@ -276,7 +295,18 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     setState(() => _loading = false);
 
     if (addToHistory) {
-      await RadioHistoryStore.instance.record(
+      // BUG FIX (2026-09-17, v68): pehle ye `await` hota tha — matlab
+      // `_playCandidate()` ka Future tab tak complete NAHI hota tha jab
+      // tak ye DB write poora na ho jaaye. `_advance()`/`_previous()` ka
+      // `_transitioning=false` (jo Next/Prev button ka spinner control
+      // karta hai) `finally` block mein hai, jo sirf tab chalta hai jab
+      // poora `_advance()`/`_previous()` Future resolve ho — matlab AUDIO
+      // already baj raha hota (kyunki `_loading=false` upar hi ho chuka
+      // hai), lekin button abhi bhi "loading" dikhata rehta jab tak ye
+      // history-log DB write (jo user ko kuch dikhta bhi nahi) khatam na
+      // ho jaaye. Fire-and-forget — history save hoti rahegi, bas ab
+      // button ko block nahi karti.
+      unawaited(RadioHistoryStore.instance.record(
         songId: candidate.song.id,
         title: candidate.song.title,
         tags: candidate.tags,
@@ -284,7 +314,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         artist: candidate.song.artist,
         duration: candidate.song.duration,
         wasSkipped: false,
-      );
+      ));
     }
 
     unawaited(_loadLyrics(candidate, token));
@@ -567,6 +597,17 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         _engine.markFailed(next.song.id);
         _upcoming.removeWhere((item) => item.song.id == next!.song.id);
       }
+      // BUG FIX (2026-09-17, v68): 12 attempts ke baad bhi koi candidate
+      // play nahi ho paya — pehle yahan loop chup-chaap khatam ho jaata
+      // tha, `_loading` (jo har failed `_playCandidate` call ke andar
+      // `true` set hua tha) kabhi reset nahi hota — same "button ghumta
+      // rehta hai" bug, is baar Next se trigger.
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = '12 gaane try kiye, koi play nahi ho paya. Retry karein.';
+        });
+      }
     } finally {
       _transitioning = false;
     }
@@ -735,38 +776,85 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
           padding: EdgeInsets.fromLTRB(20, compact ? 2 : 8, 20, 6),
           child: Column(
             children: [
-              SizedBox(height: 48, child: _topBar()),
-              SizedBox(height: compact ? 14 : 24),
-              Text(current.language.toUpperCase(), style: AppText.bodyS(color: Colors.white70)),
-              const SizedBox(height: 6),
-              Text(
-                current.song.title,
-                textAlign: TextAlign.center,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: AppText.displayL(color: Colors.white),
-              ),
-              const SizedBox(height: 5),
-              Text(
-                current.song.artist,
-                textAlign: TextAlign.center,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: AppText.bodyM(color: Colors.white70),
-              ),
-              const SizedBox(height: 4),
+              // NEW (2026-09-17, v68 — user report: "slide se next/
+              // previous kaam nahi karta"): pehle koi swipe-gesture tha hi
+              // nahi is screen pe. Ab left/right horizontal swipe se bhi
+              // Next/Previous chalta hai — SIRF title/artwork/lyrics area
+              // pe (topBar se lyrics tak), taaki neeche wali seekbar
+              // (`RadioPlayerProgress`, jo khud horizontal-drag se scrub
+              // hoti hai) ka gesture kabhi is se conflict/compete na kare
+              // — seekbar apni jagah bilkul normal kaam karti rehti hai.
               Expanded(
-                child: Center(
-                  child: SizedBox(
-                    height: lyricHeight,
-                    width: double.infinity,
-                    child: IgnorePointer(
-                      child: RadioLyrics(
-                        key: ValueKey('lyrics-${current.song.id}'),
-                        result: _lyrics,
-                        loading: _lyricsLoading,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onHorizontalDragEnd: (details) {
+                    final v = details.primaryVelocity ?? 0;
+                    // Chhota accidental-drag threshold — sirf ek clear/
+                    // intentional swipe pe hi trigger ho.
+                    if (v.abs() < 200) return;
+                    if (v < 0) {
+                      _advance(auto: false); // left swipe → agla gaana
+                    } else {
+                      _previous(); // right swipe → pichla gaana
+                    }
+                  },
+                  child: Column(
+                    children: [
+                      SizedBox(height: 48, child: _topBar()),
+                      SizedBox(height: compact ? 14 : 24),
+                      Text(current.language.toUpperCase(), style: AppText.bodyS(color: Colors.white70)),
+                      const SizedBox(height: 6),
+                      Text(
+                        current.song.title,
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: AppText.displayL(color: Colors.white),
                       ),
-                    ),
+                      const SizedBox(height: 5),
+                      ValueListenableBuilder<PlaybackPhase>(
+                        valueListenable: audioHandler.phase,
+                        builder: (context, phase, _) {
+                          String subtitle = current.song.artist;
+                          if (phase != PlaybackPhase.playing &&
+                              phase != PlaybackPhase.paused &&
+                              phase != PlaybackPhase.idle) {
+                            subtitle = audioHandler.phaseMessage.value ??
+                                switch (phase) {
+                                  PlaybackPhase.resolving => 'Resolving...',
+                                  PlaybackPhase.verifying => 'Verifying...',
+                                  PlaybackPhase.buffering => 'Buffering...',
+                                  PlaybackPhase.retrying => 'Retrying...',
+                                  PlaybackPhase.error => 'Playback error',
+                                  _ => subtitle,
+                                };
+                          }
+                          return Text(
+                            subtitle,
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppText.bodyM(color: Colors.white70),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 4),
+                      Expanded(
+                        child: Center(
+                          child: SizedBox(
+                            height: lyricHeight,
+                            width: double.infinity,
+                            child: IgnorePointer(
+                              child: RadioLyrics(
+                                key: ValueKey('lyrics-${current.song.id}'),
+                                result: _lyrics,
+                                loading: _lyricsLoading,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
