@@ -60,9 +60,9 @@ class _LyricsScreenState extends State<LyricsScreen> {
     // ab load ka result (synced / plain / kuch nahi) explicitly log hota
     // hai, taaki agar lyrics-related dikkat ho to log se pata chal sake ki
     // kya mila tha.
-    final kind = (result.synced?.isNotEmpty ?? false)
-        ? 'synced (${result.synced!.length} lines)'
-        : ((result.plain?.trim().isNotEmpty ?? false) ? 'plain-only' : 'none');
+    final kind = (result?.synced?.isNotEmpty ?? false)
+        ? 'synced (${result!.synced!.length} lines)'
+        : ((result?.plain?.trim().isNotEmpty ?? false) ? 'plain-only' : 'none');
     AppLogger.instance.log(
       '[LYRICS] loaded for "${song.title}" (${song.id}) — result: $kind',
     );
