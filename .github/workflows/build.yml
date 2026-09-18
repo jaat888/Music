@@ -6,7 +6,40 @@ on:
   workflow_dispatch:
 
 jobs:
+  # NEW: test job — build job (neeche) isko `needs: test` se depend karta
+  # hai, isliye agar koi test fail ho jaye to APK build shuru hi nahi
+  # hota (dono matrix legs, debug aur release, dono block ho jaate hain).
+  # Alag job isliye rakha (matrix step ke andar nahi) taaki test sirf
+  # EK baar chale, debug+release dono ke liye duplicate na ho — aur
+  # isliye bhi ki isme Java/Gradle/Android scaffold ki zaroorat nahi
+  # (flutter test pure Dart level chalta hai), isliye ye job build job
+  # se kaafi tez khatam ho jata hai.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.1'
+          channel: 'stable'
+
+      - name: Cache Flutter
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: ${{ runner.os }}-flutter-test-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-flutter-test-
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Run tests
+        run: flutter test
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       # matrix: debug aur release dono jobs ek saath (parallel) chalenge —
