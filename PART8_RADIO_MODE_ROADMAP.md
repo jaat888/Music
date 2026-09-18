@@ -336,3 +336,57 @@ The original implementation roadmap ends at Phase 10; after implementation, a so
 6. **Stale cache rows:** missing cache files are removed from CacheDB during lookup.
 
 These are hardening fixes; the protected playback/resolve/CDN pipeline remains otherwise unchanged.
+
+## Radio — v78 Bug-Fix Batch (2026-09-18, user-reported)
+
+Three separate user-confirmed bugs, all in `radio_player_screen.dart`:
+
+1. **Skip/Previous button stuck disabled after the 1st transition.**
+   `_advance()` and `_previous()` both flip a `_transitioning` bool to
+   control the skip button's enabled/disabled + color state. Setting it
+   to `true` self-corrected visually (a `setState()` happened moments
+   later for an unrelated reason), but setting it back to `false` inside
+   each function's `finally` block was a bare field assignment with NO
+   `setState()` call anywhere after it in that code path. Result: from
+   the 2nd song onward, the skip button rendered permanently grey/
+   disabled even though the underlying flag was already `false` and a
+   skip would have worked if the button could be tapped. Fixed by
+   wrapping all four `_transitioning` assignments in `setState()`
+   (guarded with `mounted` checks in the `finally` blocks, since the
+   screen could be disposed mid-transition).
+
+2. **Vertical swipe (next/previous) only worked over the title/lyrics
+   area, not over the seekbar or buttons.** The `GestureDetector` for
+   swipe-up/down was previously scoped to a single `Expanded` region
+   inside `_buildContent()` (topBar through lyrics) — deliberately
+   excluding the progress bar and control-button row so the seekbar's
+   own horizontal drag wouldn't compete with it. Per user feedback, the
+   caption/lyrics area is purely decorative ("dekhne ka hai, kaam ka
+   nahi") and the swipe should work across the *entire* screen instead.
+   Moved the `GestureDetector` up to wrap the whole `Stack` in `build()`
+   (artwork + content + controls, all of it). Vertical-drag and the
+   seekbar's horizontal-drag are different gesture axes and don't
+   compete in Flutter's gesture arena, so this doesn't affect seeking or
+   button taps.
+
+3. **Lyrics sync lagged up to ~1 second behind the normal (non-Radio)
+   Lyrics screen.** `RadioLyrics` used a 1-second repeating
+   `AnimationController` as a polling ticker to decide which lyric line
+   should be highlighted — so a line change could be visible up to a
+   full second late. The regular `lyrics_screen.dart` instead reacts
+   directly to `player.positionStream` (updates on every emitted
+   position, no polling delay). Switched `RadioLyrics` to the same
+   approach: subscribes to `positionStream` directly and dropped the
+   `AnimationController`/`SingleTickerProviderStateMixin` entirely. Sync
+   should now feel as immediate as the normal Lyrics screen.
+
+**Still not done in this batch (flagged, not fixed):** the one visible
+on-screen button (tooltip "Next song", positioned to the left of Play)
+is still labeled/positioned in a way that looks like "Previous" but
+behaves as "Next" — left as-is since navigation is now swipe-driven per
+user direction and they did not ask for this button to be touched.
+
+**Not verified on-device** (no Flutter toolchain/network in this
+environment) — brace/paren balance and structural review done by hand,
+but an actual `flutter build`/on-device swipe + skip-button + lyrics
+test is still needed.

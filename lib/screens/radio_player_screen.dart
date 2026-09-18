@@ -531,7 +531,19 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
 
   Future<void> _advance({required bool auto, String? failedSongId}) async {
     if (_current == null || _transitioning) return;
-    _transitioning = true;
+    // FIX (user report: "2 number gaane se skip button disable dikhta
+    // hai"): pehle `_transitioning = true;` ek plain field-assignment tha,
+    // koi setState() nahi tha. Jab transition SHURU hoti thi, jald hi
+    // niche `setState(() { _loading = true; })` chalne se button turant
+    // disabled dikh jaata tha (uspe koi asar nahi tha). Lekin jab transition
+    // KHATAM hoti thi (`finally` block me `_transitioning = false;`), uske
+    // BAAD koi setState() nahi hota tha — flag internally false ho jaata
+    // (skip technically ready hota), lekin screen kabhi refresh nahi hoti,
+    // isliye button HAMESHA disabled/grey hi dikhta reh jaata, jab tak
+    // kisi AUR wajah se (jaise heart button dabane se) screen refresh na
+    // ho. Ab dono jagah setState() ke andar hain — button turant sahi
+    // enable/disable state dikhata hai.
+    setState(() => _transitioning = true);
     AppLogger.instance.log(
       '[RADIO] _advance(auto=$auto, failedSongId=$failedSongId) called — current: "${_current!.song.title}"',
     );
@@ -635,13 +647,16 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         });
       }
     } finally {
-      _transitioning = false;
+      // FIX: dekho _advance() ke shuru me comment — `finally` yahan bhi
+      // pehle bina setState() ke tha, isliye transition khatam hone ke
+      // baad bhi button disabled hi dikhta rehta tha.
+      if (mounted) setState(() => _transitioning = false);
     }
   }
 
   Future<void> _previous() async {
     if (_playedStack.isEmpty || _transitioning) return;
-    _transitioning = true;
+    setState(() => _transitioning = true); // FIX: dekho _advance() comment
     final previous = _playedStack.last;
     AppLogger.instance.log('[RADIO] _previous() called — jaa rahe hain: "${previous.song.title}"');
     try {
@@ -655,7 +670,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         AppLogger.instance.log('[RADIO] _previous() TASK COMPLETE — "${previousCandidate.song.title}" pe move hua.');
       }
     } finally {
-      _transitioning = false;
+      if (mounted) setState(() => _transitioning = false); // FIX: dekho upar
     }
   }
 
@@ -761,15 +776,41 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         backgroundColor: Colors.black,
         body: current == null
             ? _loadingBody()
-            : Stack(
-                fit: StackFit.expand,
-                children: [
-                  _buildArtwork(current),
-                  Container(color: Colors.black.withOpacity(.55)),
-                  SafeArea(
-                    child: _buildContent(current),
-                  ),
-                ],
+            // FIX (user report: "swipe up/down poori screen pe kaam kare,
+            // caption/lyrics wala chhota area tak limited na ho"): pehle
+            // ye GestureDetector sirf andar `_buildContent()` ke ek
+            // `Expanded` (topBar se lyrics tak) ke around tha — neeche
+            // wali seekbar aur Next/Play/Favorite buttons wala poora
+            // hissa iske BAHAR tha, isliye wahan swipe kaam hi nahi karta
+            // tha. Ab poori Stack (poori screen) ke around hai — Slider
+            // (seekbar) horizontal-drag use karta hai aur buttons tap use
+            // karte hain, dono is VERTICAL-only drag detector se conflict
+            // nahi karte (Flutter alag-alag gesture-axis independently
+            // handle karta hai), isliye seekbar scrub aur button taps
+            // bilkul pehle jaise hi kaam karte rahenge.
+            : GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onVerticalDragEnd: (details) {
+                  final v = details.primaryVelocity ?? 0;
+                  if (v.abs() < 200) return;
+                  if (v < 0) {
+                    _swipedUp = true;
+                    _advance(auto: false); // swipe up → agla gaana
+                  } else {
+                    _swipedUp = false;
+                    _previous(); // swipe down → pichla gaana
+                  }
+                },
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    _buildArtwork(current),
+                    Container(color: Colors.black.withOpacity(.55)),
+                    SafeArea(
+                      child: _buildContent(current),
+                    ),
+                  ],
+                ),
               ),
       ),
     );
@@ -808,41 +849,17 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
           padding: EdgeInsets.fromLTRB(20, compact ? 2 : 8, 20, 6),
           child: Column(
             children: [
-              // NEW (2026-09-17, v68 — user report: "slide se next/
-              // previous kaam nahi karta"): is screen pe swipe-gesture
-              // (title/artwork/lyrics area pe, topBar se lyrics tak) —
-              // neeche wali seekbar (`RadioPlayerProgress`, jo khud
-              // horizontal-drag se scrub hoti hai) ka gesture kabhi is se
-              // conflict/compete na kare, isliye seekbar bahar hai.
+              // FIX: swipe-gesture ab poore screen (upar build() me) pe
+              // hai — yahan sirf plain layout hai, koi alag GestureDetector
+              // nahi (pehle yahan ek dusra tha jo sirf isi Expanded tak
+              // limited tha, ab hata diya gaya hai).
               Expanded(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  // BUG FIX (2026-09-18, user report: "radio me swipe up/
-                  // down nahi hota, aur koi animation nahi hai jaisa
-                  // Instagram Reels me hota"): pehle sirf LEFT/RIGHT
-                  // (horizontal) swipe tha, koi animation nahi thi — bas
-                  // content turant snap ho jaata tha. Ab VERTICAL swipe
-                  // hai (Reels jaisa hi convention): swipe UP = agla gaana,
-                  // swipe DOWN = pichla gaana — aur content slide+fade
-                  // animation ke saath badalta hai (neeche AnimatedSwitcher
-                  // dekho). Chhota accidental-drag threshold same rakha.
-                  onVerticalDragEnd: (details) {
-                    final v = details.primaryVelocity ?? 0;
-                    if (v.abs() < 200) return;
-                    if (v < 0) {
-                      _swipedUp = true;
-                      _advance(auto: false); // swipe up → agla gaana
-                    } else {
-                      _swipedUp = false;
-                      _previous(); // swipe down → pichla gaana
-                    }
-                  },
-                  child: Column(
-                    children: [
-                      SizedBox(height: 48, child: _topBar()),
-                      SizedBox(height: compact ? 14 : 24),
-                      Expanded(
-                        child: AnimatedSwitcher(
+                child: Column(
+                  children: [
+                    SizedBox(height: 48, child: _topBar()),
+                    SizedBox(height: compact ? 14 : 24),
+                    Expanded(
+                      child: AnimatedSwitcher(
                           duration: const Duration(milliseconds: 280),
                           switchInCurve: Curves.easeOut,
                           switchOutCurve: Curves.easeIn,
@@ -922,9 +939,8 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
                             ],
                           ),
                         ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
               // Timeline is deliberately the last content block so its
@@ -1222,10 +1238,9 @@ class RadioLyrics extends StatefulWidget {
   State<RadioLyrics> createState() => _RadioLyricsState();
 }
 
-class _RadioLyricsState extends State<RadioLyrics>
-    with SingleTickerProviderStateMixin {
+class _RadioLyricsState extends State<RadioLyrics> {
   final ScrollController _scrollController = ScrollController();
-  late final AnimationController _ticker;
+  StreamSubscription<Duration>? _positionSub;
   int _activeIndex = -1;
   List<LyricLine> _lines = const [];
 
@@ -1233,10 +1248,16 @@ class _RadioLyricsState extends State<RadioLyrics>
   void initState() {
     super.initState();
     _lines = widget.result?.synced ?? const [];
-    _ticker = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 1),
-    )..addListener(_syncActiveLine)..repeat();
+    // FIX (user report: "Radio ki lyrics normal player se lag/late lagti
+    // hain"): pehle ek 1-second wala repeating `AnimationController`
+    // (`_ticker`) tha jo sirf HAR SECOND ek baar check karta tha "abhi
+    // konsi line active honi chahiye" — matlab agli line kabhi 1 second
+    // tak DER se highlight hoti thi. Normal (Radio ke bahar wali)
+    // `lyrics_screen.dart` seedha player ke `positionStream` pe react
+    // karti hai — har position-update pe TURANT. Ab yahan bhi wahi tarika
+    // hai, isliye Radio ki lyrics ab utni hi turant/smooth sync hoti hain
+    // jitni normal player me hoti hain.
+    _positionSub = audioHandler.player.positionStream.listen(_syncActiveLine);
   }
 
   @override
@@ -1256,9 +1277,7 @@ class _RadioLyricsState extends State<RadioLyrics>
 
   @override
   void dispose() {
-    _ticker
-      ..removeListener(_syncActiveLine)
-      ..dispose();
+    _positionSub?.cancel();
     _scrollController.dispose();
     super.dispose();
   }
@@ -1275,9 +1294,8 @@ class _RadioLyricsState extends State<RadioLyrics>
     return index;
   }
 
-  void _syncActiveLine() {
+  void _syncActiveLine(Duration pos) {
     if (!mounted || _lines.isEmpty) return;
-    final pos = widgetPlayerPosition;
     final next = _findActive(pos);
     if (next == _activeIndex) return;
     setState(() => _activeIndex = next);
@@ -1294,8 +1312,6 @@ class _RadioLyricsState extends State<RadioLyrics>
     }
     _centerActive(next);
   }
-
-  Duration get widgetPlayerPosition => audioHandler.player.position;
 
   void _centerActive(int index) {
     if (index < 0 || !_scrollController.hasClients) return;

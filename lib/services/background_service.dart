@@ -170,6 +170,38 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // chaap return ho jaata hai, kuch bhi overwrite nahi karta.
   int _playToken = 0;
 
+  // BUG FIX (2026-09-18 — user report: "notification pe Play dabao to URL
+  // dobara request hoti hai, loop ban jaata hai"): jab tak naya gaana
+  // resolve/buffer/retry ho raha hai, `player` object abhi kisi
+  // ADHOORI/transitional state me hota hai — kabhi purana source paused
+  // pada hota hai (setUrl abhi hua hi nahi), kabhi `setUrl()`/
+  // `setAudioSource()` khud abhi await pe hoti hai. Is poore window me
+  // agar KAHIN SE BHI (notification/lock-screen/Bluetooth/full-player —
+  // sab isi `play()` override se guzarte hain) `player.play()` dobara call
+  // ho jaaye, do cheezein ho sakti hain: (a) purana (abhi bhi loaded)
+  // source resume ho jaaye, ya (b) in-flight `setUrl()` ke saath race karke
+  // just_audio ek spurious error `playbackEventStream`'s `onError` pe bhej
+  // de — jise humara apna CDN-stream-drop-recovery code (`_handleStreamDrop`,
+  // dekho upar) genuine drop samajh ke FRESH URL nikaal ke retry kar deta
+  // hai. Agar user (ya koi bhi repeat-tap) isi loading window me dobara
+  // Play dabaye, yahi cheez baar-baar hoti hai — isi wajah se "URL
+  // dobara-dobara request hoti hai, loop ban jaata hai" jaisa dikhta hai.
+  //
+  // Fix: `_setPhase()` (neeche) is flag ko khud maintain karta hai — jab
+  // bhi phase resolving/verifying/buffering/retrying in se kisi me ho,
+  // `_resolving = true`; playing/paused/error/idle pe `false`. Is dauraan
+  // `play()` ko yahan hi chup-chaap ignore kar dete hain — jo resolve
+  // already chal raha hai wahi khud playing state pe le jayega.
+  //
+  // Ek chhoti additional window bhi hai: `playWithRetry()`/`playFromFile()`
+  // shuru hote hi (purana gaana pause karne se pehle hi) turant
+  // `_resolving = true` set karte hain — kyunki `_setPhase(resolving)`
+  // khud thodi der baad (~300ms debounce ke baad) aata hai, us debounce
+  // ke dauraan bhi (jab purana gaana already pause ho chuka hota hai)
+  // Play dabana purane gaane ko resume kar sakta tha — ye bhi isi se cover
+  // ho jaata hai.
+  bool _resolving = false;
+
   // NEW (2026-09-17) — PlaybackPhase state machine.
   //
   // Upar wala `_playToken` mechanism sahi hai (cancellation ka asli
@@ -204,6 +236,16 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     if (token != _playToken) return;
     phase.value = p;
     phaseMessage.value = message;
+
+    // BUG FIX (2026-09-18): dekho `_resolving` field ka poora comment —
+    // resolve "in-progress" phases (resolving/verifying/buffering/
+    // retrying) me true, baaki (idle/playing/paused/error — sab
+    // terminal/stable states) me false. `play()` isi flag se guard hota
+    // hai.
+    _resolving = p == PlaybackPhase.resolving ||
+        p == PlaybackPhase.verifying ||
+        p == PlaybackPhase.buffering ||
+        p == PlaybackPhase.retrying;
 
     // NEW (Phase 2, 2026-09-17): notification/lock-screen bhi phase-aware
     // — resolving/retrying/buffering/error ke dauraan status message
@@ -741,6 +783,14 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> play() {
     _logCtl('play() called');
+    // BUG FIX (2026-09-18 — dekho `_resolving` field ka poora comment):
+    // resolve/buffer/retry in-progress ho to play() ko yahin chup-chaap
+    // ignore karo — warna purana source resume ho sakta hai ya
+    // spurious-error se ek fresh URL-request loop trigger ho sakta hai.
+    if (_resolving) {
+      _logCtl('play() IGNORED — resolve already in-progress (phase=${phase.value})');
+      return Future.value();
+    }
     // BUG FIX (2026-09-18, v59): resume ke saath hi "user paused" flag
     // saaf karo — is se agla genuine stream drop (agar aaye) fir se normal
     // tarike se retry/recover hoga.
@@ -1182,6 +1232,12 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> playWithRetry(Song song) async {
     final token = ++_playToken;
     _activePlaybackSong = song;
+    // BUG FIX (2026-09-18): dekho `_resolving` ka comment — ye yahan turant
+    // (purana gaana pause karne se bhi PEHLE) set karte hain, taaki
+    // 300ms-debounce window ke dauraan bhi (jab purana gaana already
+    // pause ho chuka hai lekin `_setPhase(resolving)` abhi aaya nahi) Play
+    // dabana galti se purana gaana resume na kar de.
+    _resolving = true;
     // BUG FIX (2026-09-18, v59): naya song select karna kabhi bhi "user
     // paused" state nahi hota — varna agar theek pehle wale gaane ko pause
     // kiya gaya tha, naya gaana bhi silently us stale flag ki wajah se
