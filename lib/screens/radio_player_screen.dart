@@ -70,6 +70,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   // down-swipe → upar se aaye). Default true (up) taaki pehla load bhi
   // consistent lage.
   bool _swipedUp = true;
+  double _verticalSwipeDelta = 0;
   String? _recoveringSongId;
   Future<bool>? _recoveryFuture;
   final Map<String, int> _recentLanguageCounts = <String, int>{};
@@ -893,15 +894,31 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
             // bilkul pehle jaise hi kaam karte rahenge.
             : GestureDetector(
                 behavior: HitTestBehavior.translucent,
+                // Radio navigation is intentionally swipe-only: UP = next,
+                // DOWN = previous. Track distance as well as velocity so a
+                // normal deliberate swipe works even when it is slow.
+                onVerticalDragStart: (_) => _verticalSwipeDelta = 0,
+                onVerticalDragUpdate: (details) {
+                  _verticalSwipeDelta += details.primaryDelta ?? 0;
+                },
                 onVerticalDragEnd: (details) {
-                  final v = details.primaryVelocity ?? 0;
-                  if (v.abs() < 200) return;
-                  if (v < 0) {
+                  final distance = _verticalSwipeDelta;
+                  final velocity = details.primaryVelocity ?? 0;
+                  _verticalSwipeDelta = 0;
+
+                  // Require a meaningful vertical gesture. Either a clear
+                  // swipe distance or a fast fling is enough.
+                  final isSwipe = distance.abs() >= 55 || velocity.abs() >= 350;
+                  if (!isSwipe) return;
+
+                  final goingUp = distance < -20 ||
+                      (distance.abs() < 20 && velocity < 0);
+                  if (goingUp) {
                     _swipedUp = true;
-                    _advance(auto: false); // swipe up → agla gaana
+                    unawaited(_advance(auto: false)); // swipe up → next
                   } else {
                     _swipedUp = false;
-                    _previous(); // swipe down → pichla gaana
+                    unawaited(_previous()); // swipe down → previous
                   }
                 },
                 child: Stack(
@@ -1105,69 +1122,44 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        IconButton(
-          tooltip: 'Next song',
-          iconSize: 34,
-          color: _transitioning ? Colors.white38 : Colors.white,
-          onPressed: _transitioning ? null : () => _advance(auto: false),
-          icon: const Icon(Icons.skip_next_rounded),
-        ),
-        const SizedBox(width: 14),
-        StreamBuilder<PlayerState>(
-          stream: audioHandler.player.playerStateStream,
-          builder: (_, snapshot) {
-            final state = snapshot.data;
-            final playing = state?.playing ?? audioHandler.player.playing;
-            final processing = state?.processingState ?? audioHandler.player.processingState;
-            // BUG FIX ("next dabao to bahut der tak kuch dikhta nahi,
-            // jaise kaam hi nahi kiya" — v58): ye spinner pehle SIRF
-            // just_audio ke apne processingState pe depend karta tha. Ek
-            // Radio transition ka sabse pehla aur sabse lamba step (naye
-            // gaane ka URL network se resolve karna) us player state ke
-            // BADLE se pehle hi ho raha hota hai — `setUrl()`/`play()`
-            // tabhi call hota hai jab URL mil chuka ho. Us poore intezaar
-            // ke dauraan UI me koi spinner ya feedback nahi dikhta tha —
-            // Next button bhi disabled ho jaane ke baad bhi hamesha safed
-            // (enabled jaisa) hi dikhta tha (neeche dekho) — isliye tap
-            // "kaam nahi kiya" jaisa lagta tha, jab tak (kabhi kaafi der
-            // baad) gaana achanak badal na jaaye. Ab screen ka apna
-            // `_loading`/`_transitioning` state bhi turant is spinner ko
-            // trigger karta hai, chahe just_audio abhi tak apna internal
-            // loading state dikha raha ho ya nahi.
-            final buffering = _loading ||
-                _transitioning ||
+        // Navigation is swipe-only in Radio: swipe UP for next and DOWN for
+        // previous. No skip icon is shown here.
+        StreamBuilder<bool>(
+          stream: audioHandler.player.playingStream,
+          initialData: audioHandler.player.playing,
+          builder: (_, playingSnapshot) {
+            // just_audio's player.playingStream is the source of truth for
+            // the on-screen Play/Pause icon. The background AudioHandler
+            // intentionally broadcasts a temporary `playing:false` loading
+            // state when switching Radio tracks; listening directly to the
+            // player avoids leaving the button on Play while audio is already
+            // audible.
+            final playing = playingSnapshot.data ?? audioHandler.player.playing;
+            final processing = audioHandler.player.processingState;
+            final resolving = _loading || _transitioning ||
                 processing == ProcessingState.loading ||
                 processing == ProcessingState.buffering;
+
             return Semantics(
               button: true,
-              label: buffering ? 'Buffering' : (playing ? 'Pause' : 'Play'),
+              label: resolving ? 'Buffering' : (playing ? 'Pause' : 'Play'),
               child: InkResponse(
-                // BUG FIX (v80, #3/#7 — user-verified: "transition ke waqt
-                // Play/Pause command hi register nahi hoti"): pehle yahan
-                // `onTap: null` hota tha jab tak buffering/transitioning
-                // chalti rehti — is poori window mein tap ka bilkul koi
-                // asar nahi hota tha. Ab tap register hoti hai — turant
-                // execute karne ke bajaye "pending intent" set kar dete
-                // hain (opposite of jo abhi dikh raha hai, taaki icon ka
-                // matlab wahi rahe jo user ne dekha), jo transition khatam
-                // hote hi (`_drainPendingRadioCommand()`) apply ho jaata
-                // hai.
-                onTap: (_transitioning || buffering)
-                    ? () {
-                        // Agar pehle se ek pending intent hai (user ne isi
-                        // transition ke dauraan pehle bhi tap kiya tha), us
-                        // intent ko hi toggle karo — abhi ke `playing`
-                        // (jo abhi tak change hi nahi hua) ko dobara base
-                        // maan ke wahi purana intent repeat nahi karna.
-                        final wantsPlay =
-                            _pendingPlayIntent != null ? !_pendingPlayIntent! : !playing;
-                        setState(() => _pendingPlayIntent = wantsPlay);
-                        AppLogger.instance.log(
-                          '[RADIO] Play/Pause tapped during transition/buffering — queued intent: '
-                          '${wantsPlay ? "play" : "pause"}',
-                        );
-                      }
-                    : _togglePlay,
+                // Do not disable the control during a Radio transition. A
+                // tap is either executed immediately or queued as the latest
+                // play/pause intent and drained when the transition finishes.
+                onTap: () {
+                  if (_transitioning || _loading) {
+                    final wantsPlay = _pendingPlayIntent != null
+                        ? !_pendingPlayIntent!
+                        : !playing;
+                    setState(() => _pendingPlayIntent = wantsPlay);
+                    AppLogger.instance.log(
+                      '[RADIO] Play/Pause tapped during transition/loading — queued: ${wantsPlay ? "play" : "pause"}',
+                    );
+                    return;
+                  }
+                  unawaited(_togglePlay());
+                },
                 radius: 40,
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 180),
@@ -1180,12 +1172,12 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
                     boxShadow: [
                       BoxShadow(
                         color: kGreen.withOpacity(.28),
-                        blurRadius: buffering ? 18 : 10,
-                        spreadRadius: buffering ? 2 : 0,
+                        blurRadius: resolving ? 18 : 10,
+                        spreadRadius: resolving ? 2 : 0,
                       ),
                     ],
                   ),
-                  child: buffering
+                  child: resolving
                       ? const SizedBox(
                           width: 28,
                           height: 28,

@@ -2788,3 +2788,10 @@ gaye, kahin alag se kuch chhedne ki zaroorat nahi padi.
 
 STATUS: is dev-environment mein compile-test nahi ho paaya — real device pe
 confirm karna, khaaskar low-bandwidth/CDN-stall scenario reproduce karke.
+
+
+## v83 Radio swipe navigation
+- Radio track navigation is swipe-only: swipe up = next, swipe down = previous.
+- Removed the skip-next button from the Radio controls.
+- Swipe detection uses both drag distance and velocity so slow swipes work reliably.
+- v82 buffering/owner-lock/play-pause fixes are retained.
