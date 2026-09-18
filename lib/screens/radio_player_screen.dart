@@ -49,6 +49,21 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   int _sessionGeneration = 0;
   int _candidateGeneration = 0;
   bool _transitioning = false;
+
+  // BUG FIX (v80 — user-verified list, #1/#3/#4: "Next/Previous/Play-Pause
+  // command transition ke dauraan drop ho jaati hai"): pehle
+  // `_transitioning==true` hone par Next/Previous seedha `return` kar
+  // dete the, aur Play/Pause button `onTap: null` ho jaata tha — dono
+  // cases mein user ka tap/swipe bilkul chup-chaap discard ho jaata tha,
+  // koi effect nahi hota tha jab tak transition khud khatam na ho jaaye.
+  // Fix: is dauraan aayi command yahan "pending" register hoti hai —
+  // transition ke `finally` block ke turant baad (`_drainPendingRadioCommand()`)
+  // ye khud-ba-khud apply ho jaati hai. Sirf AAKHRI nav-intent (next ya
+  // previous) rakha jaata hai — rapid taps ek hi resolve-chain mein
+  // multiple songs skip nahi karenge (jaanbujhkar coalesce, spam-proof).
+  String? _pendingNav; // 'next' | 'previous' | null
+  bool? _pendingPlayIntent; // true=resume chahiye, false=pause chahiye, null=koi pending intent nahi
+
   // Reels-jaisa swipe animation ke liye — kis taraf se swipe hua, taaki
   // naya content sahi direction se slide-in ho (up-swipe → neeche se aaye,
   // down-swipe → upar se aaye). Default true (up) taaki pehla load bhi
@@ -530,7 +545,18 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   }
 
   Future<void> _advance({required bool auto, String? failedSongId}) async {
-    if (_current == null || _transitioning) return;
+    if (_current == null) return;
+    // BUG FIX (v80, #1 — dekho `_pendingNav` field ka poora comment): pehle
+    // yahan `_transitioning` hone par bhi seedha `return` hota tha — command
+    // chup-chaap discard. Ab queue kar dete hain, transition khatam hote hi
+    // `_drainPendingRadioCommand()` khud isse chala dega.
+    if (_transitioning) {
+      _pendingNav = 'next';
+      AppLogger.instance.log(
+        '[RADIO] _advance(auto=$auto) — transition already in-progress, "next" queued for after.',
+      );
+      return;
+    }
     // FIX (user report: "2 number gaane se skip button disable dikhta
     // hai"): pehle `_transitioning = true;` ek plain field-assignment tha,
     // koi setState() nahi tha. Jab transition SHURU hoti thi, jald hi
@@ -651,11 +677,42 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       // pehle bina setState() ke tha, isliye transition khatam hone ke
       // baad bhi button disabled hi dikhta rehta tha.
       if (mounted) setState(() => _transitioning = false);
+      // BUG FIX (v80, #1/#3/#4): transition abhi-abhi khatam hui — agar
+      // is dauraan koi Next/Previous/Play-Pause command queue hui thi,
+      // usse ab apply karo.
+      _drainPendingRadioCommand();
     }
   }
 
   Future<void> _previous() async {
-    if (_playedStack.isEmpty || _transitioning) return;
+    // BUG FIX (v80, #1 — dekho `_pendingNav` field ka poora comment):
+    // transition chal rahi ho to pehle seedha discard hota tha, ab queue
+    // karte hain.
+    if (_transitioning) {
+      _pendingNav = 'previous';
+      AppLogger.instance.log(
+        '[RADIO] _previous() — transition already in-progress, "previous" queued for after.',
+      );
+      return;
+    }
+    // BUG FIX (v80, #5 — user-verified: "history empty ho to tap ka koi
+    // feedback nahi"): pehle yahan bhi chup-chaap `return` hota tha, user
+    // ko pata hi nahi chalta tha ki Previous kaam kyun nahi kar raha
+    // (button khud disabled nahi hota — dekho niche _controls() — isliye
+    // ye genuinely "dead tap" jaisa lagta tha). Ab ek chhota SnackBar
+    // bata deta hai ki ye pehla gaana hai.
+    if (_playedStack.isEmpty) {
+      AppLogger.instance.log('[RADIO] _previous() — _playedStack khaali hai, ye pehla gaana hai.');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Ye is session ka pehla gaana hai'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
     setState(() => _transitioning = true); // FIX: dekho _advance() comment
     final previous = _playedStack.last;
     AppLogger.instance.log('[RADIO] _previous() called — jaa rahe hain: "${previous.song.title}"');
@@ -671,6 +728,9 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       }
     } finally {
       if (mounted) setState(() => _transitioning = false); // FIX: dekho upar
+      // BUG FIX (v80, #1/#3/#4): dekho _advance()'s finally ka comment —
+      // yahan bhi wahi drain zaroori hai.
+      _drainPendingRadioCommand();
     }
   }
 
@@ -682,6 +742,46 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     } else {
       await audioHandler.play();
       if (mounted) setState(() => _paused = false);
+    }
+  }
+
+  // BUG FIX (v80 — dekho `_pendingNav`/`_pendingPlayIntent` field comment
+  // upar): har `_advance()`/`_previous()` ke `finally` block ke turant
+  // baad call hota hai — us waqt tak `_transitioning` already `false` ho
+  // chuka hota hai. Agar is transition ke DAURAAN koi Next/Previous/
+  // Play-Pause command aayi thi, wo yahan apply hoti hai.
+  //
+  // Order: pehle pending NAV (agar hai) — kyunki wahi zyada "current
+  // intent" hai (user ne song hi badalna chaha). Agar nav thi to uska
+  // apna `_advance()`/`_previous()` call khud apne `finally` ke through
+  // isi function ko dobara call karega — is se play-intent bhi us CHAIN
+  // ke aakhri transition ke baad hi apply hoga (jaisa hona chahiye —
+  // beech wale gaano pe pause lagane ka koi matlab nahi).
+  //
+  // Agar koi nav pending nahi thi, sirf play/pause intent bacha hai to
+  // wahi seedha apply ho jaata hai.
+  void _drainPendingRadioCommand() {
+    final pendingNav = _pendingNav;
+    if (pendingNav != null) {
+      _pendingNav = null;
+      AppLogger.instance.log('[RADIO] draining pending nav command: $pendingNav');
+      if (pendingNav == 'next') {
+        unawaited(_advance(auto: false));
+      } else {
+        unawaited(_previous());
+      }
+      return;
+    }
+    final pendingPlay = _pendingPlayIntent;
+    if (pendingPlay != null) {
+      _pendingPlayIntent = null;
+      AppLogger.instance.log('[RADIO] draining pending play-intent: $pendingPlay');
+      if (pendingPlay) {
+        unawaited(audioHandler.play());
+      } else {
+        unawaited(audioHandler.pause());
+      }
+      if (mounted) setState(() => _paused = !pendingPlay);
     }
   }
 
@@ -948,6 +1048,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
               RadioPlayerProgress(
                 key: ValueKey('progress-${current.song.id}'),
                 player: audioHandler.player,
+                enabled: !_loading && !_transitioning,
               ),
               const SizedBox(height: 4),
               _controls(),
@@ -1038,7 +1139,32 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
               button: true,
               label: buffering ? 'Buffering' : (playing ? 'Pause' : 'Play'),
               child: InkResponse(
-                onTap: (_transitioning || buffering) ? null : _togglePlay,
+                // BUG FIX (v80, #3/#7 — user-verified: "transition ke waqt
+                // Play/Pause command hi register nahi hoti"): pehle yahan
+                // `onTap: null` hota tha jab tak buffering/transitioning
+                // chalti rehti — is poori window mein tap ka bilkul koi
+                // asar nahi hota tha. Ab tap register hoti hai — turant
+                // execute karne ke bajaye "pending intent" set kar dete
+                // hain (opposite of jo abhi dikh raha hai, taaki icon ka
+                // matlab wahi rahe jo user ne dekha), jo transition khatam
+                // hote hi (`_drainPendingRadioCommand()`) apply ho jaata
+                // hai.
+                onTap: (_transitioning || buffering)
+                    ? () {
+                        // Agar pehle se ek pending intent hai (user ne isi
+                        // transition ke dauraan pehle bhi tap kiya tha), us
+                        // intent ko hi toggle karo — abhi ke `playing`
+                        // (jo abhi tak change hi nahi hua) ko dobara base
+                        // maan ke wahi purana intent repeat nahi karna.
+                        final wantsPlay =
+                            _pendingPlayIntent != null ? !_pendingPlayIntent! : !playing;
+                        setState(() => _pendingPlayIntent = wantsPlay);
+                        AppLogger.instance.log(
+                          '[RADIO] Play/Pause tapped during transition/buffering — queued intent: '
+                          '${wantsPlay ? "play" : "pause"}',
+                        );
+                      }
+                    : _togglePlay,
                 radius: 40,
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 180),
@@ -1120,7 +1246,18 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
 
 class RadioPlayerProgress extends StatefulWidget {
   final AudioPlayer player;
-  const RadioPlayerProgress({super.key, required this.player});
+  // BUG FIX (seekbar-loading-guard): Next/Prev button ka existing
+  // `_transitioning`/loading guard yahan bhi — jab tak naya gaana
+  // resolve/ready na ho jaaye, seekbar drag/tap ignore karta hai (warna
+  // ek gaana chalte transition ke beech-me hi purani position pe seek()
+  // call ho sakta tha, jo either kaam nahi karta ya galat gaane pe seek
+  // kar deta).
+  final bool enabled;
+  const RadioPlayerProgress({
+    super.key,
+    required this.player,
+    this.enabled = true,
+  });
 
   @override
   State<RadioPlayerProgress> createState() => _RadioPlayerProgressState();
@@ -1181,6 +1318,15 @@ class _RadioPlayerProgressState extends State<RadioPlayerProgress>
         : widget.player.position;
     final maxMs = mathMax(1, duration.inMilliseconds);
     final valueMs = position.inMilliseconds.clamp(0, maxMs).toDouble();
+    // Player abhi naya URL resolve/load kar raha ho (buffering ka blip
+    // playing ke dauraan ignore — mini_player.dart ka wahi glitch-fix
+    // pattern), YA parent screen transition/loading me ho, dono cases me
+    // seekbar disabled.
+    final playerLoading = widget.player.processingState ==
+            ProcessingState.loading ||
+        (widget.player.processingState == ProcessingState.buffering &&
+            !widget.player.playing);
+    final interactive = widget.enabled && !playerLoading;
 
     return Row(
       children: [
@@ -1192,6 +1338,8 @@ class _RadioPlayerProgressState extends State<RadioPlayerProgress>
           child: SliderTheme(
             data: SliderTheme.of(context).copyWith(
               trackHeight: 2.5,
+              activeTrackColor: interactive ? kGreen : Colors.white24,
+              thumbColor: interactive ? kGreen : Colors.white38,
               thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
               overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
             ),
@@ -1199,22 +1347,29 @@ class _RadioPlayerProgressState extends State<RadioPlayerProgress>
               min: 0,
               max: maxMs.toDouble(),
               value: valueMs,
-              onChangeStart: (value) {
-                setState(() {
-                  _dragging = true;
-                  _dragMs = value;
-                });
-              },
-              onChanged: (value) {
-                setState(() => _dragMs = value);
-              },
-              onChangeEnd: (value) async {
-                setState(() {
-                  _dragging = false;
-                  _dragMs = value;
-                });
-                await widget.player.seek(Duration(milliseconds: value.round()));
-              },
+              onChangeStart: !interactive
+                  ? null
+                  : (value) {
+                      setState(() {
+                        _dragging = true;
+                        _dragMs = value;
+                      });
+                    },
+              onChanged: !interactive
+                  ? null
+                  : (value) {
+                      setState(() => _dragMs = value);
+                    },
+              onChangeEnd: !interactive
+                  ? null
+                  : (value) async {
+                      setState(() {
+                        _dragging = false;
+                        _dragMs = value;
+                      });
+                      await widget.player
+                          .seek(Duration(milliseconds: value.round()));
+                    },
             ),
           ),
         ),

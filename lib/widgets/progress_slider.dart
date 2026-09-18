@@ -28,6 +28,14 @@ class ProgressSlider extends StatefulWidget {
   final ValueChanged<Duration> onSeek;
   final Color activeColor;
   final Duration? bufferedPosition;
+  // BUG FIX (seekbar-loading-guard): jaisa play/pause button pe loading ke
+  // dauraan taps guard kiye gaye the (dekho full_player_screen.dart ka
+  // `isLoading` + LoadingRing), waisa hi ab seekbar ke saath bhi — jab
+  // gaana abhi load/resolve ho raha ho, drag/tap se seek() call karna
+  // galat/stale position pe seek kar sakta hai ya bilkul kaam nahi karega.
+  // `enabled=false` hone par slider visually dim ho jaata hai aur
+  // drag/tap dono ignore hote hain (thumb hilta hi nahi).
+  final bool enabled;
 
   const ProgressSlider({
     super.key,
@@ -36,6 +44,7 @@ class ProgressSlider extends StatefulWidget {
     required this.onSeek,
     this.activeColor = kGreen,
     this.bufferedPosition,
+    this.enabled = true,
   });
 
   @override
@@ -68,6 +77,9 @@ class _ProgressSliderState extends State<ProgressSlider> {
     final bufferedFraction = hasDuration && widget.bufferedPosition != null
         ? (widget.bufferedPosition!.inMilliseconds / maxMs).clamp(0.0, 1.0)
         : 0.0;
+    // Loading ke dauraan drag allow hi nahi karte — `hasDuration` ke saath
+    // AND karte hain taaki dono guards ek saath respect ho.
+    final interactive = hasDuration && widget.enabled;
 
     return Column(
       children: [
@@ -95,13 +107,16 @@ class _ProgressSliderState extends State<ProgressSlider> {
               ),
             SliderTheme(
               data: SliderTheme.of(context).copyWith(
-                activeTrackColor: widget.activeColor,
+                // Loading ke dauraan track bhi dim dikhta hai (play/pause
+                // button ke spinner-disabled look jaisa hi consistent).
+                activeTrackColor:
+                    widget.enabled ? widget.activeColor : Colors.white24,
                 // Buffered bar upar se dikhta rahe — is track ka apna
                 // "inactive" hissa transparent rakha, warna buffered bar
                 // ko dhak dega.
                 inactiveTrackColor:
                     bufferedFraction > 0 ? Colors.transparent : Colors.white24,
-                thumbColor: widget.activeColor,
+                thumbColor: widget.enabled ? widget.activeColor : Colors.white38,
                 trackHeight: 3,
                 overlayShape: SliderComponentShape.noOverlay,
                 thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
@@ -109,7 +124,7 @@ class _ProgressSliderState extends State<ProgressSlider> {
               child: Slider(
                 value: displayMs,
                 max: hasDuration ? maxMs.toDouble() : 1.0,
-                onChangeStart: hasDuration
+                onChangeStart: interactive
                     ? (value) => setState(() {
                           _dragging = true;
                           _dragMs = value;
@@ -117,11 +132,11 @@ class _ProgressSliderState extends State<ProgressSlider> {
                     : null,
                 // Drag ke dauraan SIRF local UI update — koi network seek
                 // nahi (yehi asli fix hai).
-                onChanged: hasDuration
+                onChanged: interactive
                     ? (value) => setState(() => _dragMs = value)
                     : null,
                 // Asli seek SIRF yahan, finger uthane par, ek hi baar.
-                onChangeEnd: hasDuration
+                onChangeEnd: interactive
                     ? (value) {
                         setState(() => _dragging = false);
                         widget.onSeek(Duration(milliseconds: value.round()));

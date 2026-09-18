@@ -842,6 +842,33 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> seek(Duration position) {
+    // BUG FIX (seekbar-loading-guard, v3 — user ne log dobara dikhaya):
+    // v2 ka `phase.value != playing && != paused` check TOO STRICT nikla
+    // — same log mein aise legit seeks bhi hain jahan gaana GENUINELY
+    // (playing=true, processingState=ready) baj raha tha lekin `phase`
+    // khud `idle` par ATKA tha (queue khatam hone ke baad wale ek alag,
+    // is fix ke scope se bahar wale flow mein — kahin `_setPhase()` call
+    // hi nahi hota) — us check se ye BILKUL THEEK seeks bhi block ho
+    // jaate (false positive), naya bug create kar dete.
+    //
+    // Sahi signal jo already maujood hai: `_resolving` (upar dekho,
+    // `_setPhase()` khud maintain karta hai) — SIRF resolving/verifying/
+    // buffering/retrying (matlab "naya URL abhi tak player ko mila hi
+    // nahi") mein true hota hai, aur exactly wahi window hai jisme seek
+    // genuinely galat/no-op hai (log line: `seek() called ... processing
+    // State=ready [STALE, purane gaane ka], phase=resolving`). Us upar
+    // wale "phase=idle par atka" flow mein `_resolving` kabhi true hua
+    // hi nahi tha (kyunki `_setPhase()` kabhi call hi nahi hua), isliye
+    // wahan false-positive nahi aata.
+    final blocked =
+        _resolving || player.processingState == ProcessingState.loading;
+    if (blocked) {
+      _logCtl(
+        'seek() IGNORED — abhi resolve/load ho raha hai (resolving=$_resolving, processingState=${player.processingState}), position:',
+        '${position.inMilliseconds}ms',
+      );
+      return Future.value();
+    }
     _logCtl('seek() called', 'to ${position.inMilliseconds}ms');
     return player.seek(position);
   }

@@ -513,48 +513,107 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                       // jab tak player khud apna duration
                                       // resolve na kar le — isse "0:00"
                                       // flash bhi nahi hota.
-                                      child: StreamBuilder<Duration?>(
-                                        key: ValueKey('duration-${song.id}'),
-                                        stream:
-                                            audioHandler.player.durationStream,
-                                        initialData: mediaItem?.duration,
-                                        builder: (context, durSnap) {
-                                          final total = durSnap.data ??
-                                              mediaItem?.duration ??
-                                              Duration.zero;
-                                          return StreamBuilder<Duration>(
-                                            key: ValueKey('position-${song.id}'),
-                                            stream: audioHandler
-                                                .player.positionStream,
-                                            initialData: Duration.zero,
-                                            builder: (context, posSnap) {
-                                              final pos = posSnap.data ??
+                                      // BUG FIX (seekbar-loading-guard):
+                                      // play/pause button pe pehle se hai
+                                      // (dekho neeche `isLoading` — usi
+                                      // `AudioProcessingState.loading ||
+                                      // .buffering` check ka reuse) — ab
+                                      // seekbar bhi loading/buffering ke
+                                      // dauraan disabled/dim rehta hai,
+                                      // taaki user stale/purani track pe
+                                      // seek na kar paaye jab tak naya
+                                      // gaana genuinely ready na ho.
+                                      child: AnimatedBuilder(
+                                        // `phase` alag se badal sakta hai
+                                        // (StreamBuilder ke playbackState
+                                        // event ke bina bhi) — isliye isko
+                                        // bhi ek listenable ke roop me le
+                                        // rahe hain taaki koi bhi change
+                                        // miss na ho.
+                                        animation: audioHandler.phase,
+                                        builder: (context, _) =>
+                                            StreamBuilder<PlaybackState>(
+                                          stream: audioHandler.playbackState,
+                                          builder: (context, pbSnap) {
+                                          final processingState =
+                                              pbSnap.data?.processingState;
+                                          // BUG FIX (v2 — user ne log
+                                          // dikhaya): sirf `processingState`
+                                          // (jo notification ko bhi jaata
+                                          // hai) kaafi nahi hai — log mein
+                                          // ek window dikhi jahan naya gaana
+                                          // RESOLVE ho raha tha (naya URL
+                                          // dhoonda ja raha tha) lekin
+                                          // `processingState` abhi bhi
+                                          // PURANE gaane ka "ready" hi
+                                          // dikha raha tha (naya setUrl()
+                                          // abhi tak call hi nahi hua tha)
+                                          // — is beech seek() bilkul galat/
+                                          // no-op hota. `audioHandler.phase`
+                                          // (resolving/verifying/buffering/
+                                          // retrying) yahi window extra
+                                          // pakadta hai jo processingState
+                                          // akela miss kar jaata hai.
+                                          final resolvingPhase = const {
+                                            PlaybackPhase.resolving,
+                                            PlaybackPhase.verifying,
+                                            PlaybackPhase.buffering,
+                                            PlaybackPhase.retrying,
+                                          }.contains(audioHandler.phase.value);
+                                          final seekbarLoading =
+                                              processingState ==
+                                                      AudioProcessingState
+                                                          .loading ||
+                                                  processingState ==
+                                                      AudioProcessingState
+                                                          .buffering ||
+                                                  resolvingPhase;
+                                          return StreamBuilder<Duration?>(
+                                            key: ValueKey('duration-${song.id}'),
+                                            stream:
+                                                audioHandler.player.durationStream,
+                                            initialData: mediaItem?.duration,
+                                            builder: (context, durSnap) {
+                                              final total = durSnap.data ??
+                                                  mediaItem?.duration ??
                                                   Duration.zero;
-                                              // NEW: buffered-progress —
-                                              // chunked streaming me
-                                              // "kitna load ho chuka hai"
-                                              // dikhane ke liye (dekho
-                                              // progress_slider.dart).
                                               return StreamBuilder<Duration>(
-                                                key: ValueKey(
-                                                    'buffered-${song.id}'),
+                                                key: ValueKey('position-${song.id}'),
                                                 stream: audioHandler
-                                                    .player.bufferedPositionStream,
+                                                    .player.positionStream,
                                                 initialData: Duration.zero,
-                                                builder: (context, bufSnap) {
-                                                  return ProgressSlider(
-                                                    position: pos,
-                                                    total: total,
-                                                    bufferedPosition:
-                                                        bufSnap.data,
-                                                    onSeek: (d) =>
-                                                        audioHandler.seek(d),
+                                                builder: (context, posSnap) {
+                                                  final pos = posSnap.data ??
+                                                      Duration.zero;
+                                                  // NEW: buffered-progress —
+                                                  // chunked streaming me
+                                                  // "kitna load ho chuka hai"
+                                                  // dikhane ke liye (dekho
+                                                  // progress_slider.dart).
+                                                  return StreamBuilder<Duration>(
+                                                    key: ValueKey(
+                                                        'buffered-${song.id}'),
+                                                    stream: audioHandler
+                                                        .player.bufferedPositionStream,
+                                                    initialData: Duration.zero,
+                                                    builder: (context, bufSnap) {
+                                                      return ProgressSlider(
+                                                        position: pos,
+                                                        total: total,
+                                                        bufferedPosition:
+                                                            bufSnap.data,
+                                                        enabled: !seekbarLoading,
+                                                        onSeek: (d) =>
+                                                            audioHandler.seek(d),
+                                                      );
+                                                    },
                                                   );
                                                 },
                                               );
                                             },
                                           );
                                         },
+                                      ),
                                       ),
                                     ),
                                     const SizedBox(height: 20),
