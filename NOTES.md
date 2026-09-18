@@ -1,5 +1,48 @@
 # SurSathi — Notes / Known Issues
 
+## Post-v75 Batch (2026-09-18) — Caching consolidation + subtitle-listener fix + first tests
+
+User ne poochha tha "caching 3 alag paths me hai, overlap/conflict ka
+risk" aur "koi automated test nahi hai" — dono confirm hue, aur teeno
+fix kiye:
+
+1. **Caching consolidation:** `DownloadDB.getFilePath(id) ??
+   CacheDB.getFilePath(id)` priority-check pehle **7 alag jagah**
+   copy-paste tha (background_service.dart x3, recently_played_screen,
+   mood_playlist_screen, smart_playlist_screen). Naya
+   `lib/services/local_media_resolver.dart` (`LocalMediaResolver`) ab
+   single source-of-truth hai — sab 5 jagah (`duplicate_songs_screen.dart`
+   jaanbujhke chhoda, wo independent delete-both logic hai) ab isi ko
+   call karte hain. Koi behavior change nahi, sirf ek jagah consolidate.
+2. **Real race condition mili aur fix hui:** `_autoCacheInBackground()`
+   2+ jagah se (prefetch + actual play) SAME song ke liye overlap ho
+   sakta tha — dono `file.exists()==false` dekh ke ek saath download+write
+   shuru kar dete, ek hi file pe do parallel writes se corruption ho
+   sakta tha. Fix: per-songId in-flight `Future` registry — dusra caller
+   pehle wale ka hi Future await karta hai, naya download nahi shuru
+   karta.
+3. **Subtitle bug (chhota, saath me mila):** `mini_player.dart` +
+   `full_player_screen.dart` sirf `audioHandler.phase`
+   (`ValueListenableBuilder<PlaybackPhase>`) pe listen karte the,
+   `phaseMessage` pe nahi. Retry-loops SAME phase (`retrying`) ko naya
+   message ("Try 1/3..." → "Try 2/3...") ke saath repeat karte hain —
+   `ValueNotifier` same-enum-value pe notify nahi karta, isliye text
+   pehle attempt ke message pe frozen reh jaata tha. Fix: dono widgets ab
+   `AnimatedBuilder` + `Listenable.merge([phase, phaseMessage])` use
+   karte hain.
+4. **`pause()` ka symmetric gap fix kiya** — dekho play()/stop() ka
+   comment neeche same file me; `pause()` ka guard bhi pehle sirf
+   `playing→paused` handle karta tha, ab kisi bhi frozen phase se
+   `paused` pe reset ho jaata hai.
+5. **Pehla test likha:** `test/local_media_resolver_test.dart` —
+   `LocalMediaResolver` ki Download>Cache priority logic test karta hai
+   (fake lookup-functions se, koi real DB/mocking-package nahi chahiye).
+   `flutter test` se chalta hai. **Poore codebase ka pehla aur abhi tak
+   ka EKLAUTA test hai** — playback state-machine (`phase`/`_playToken`)
+   jaisi cheezein abhi bhi untested hain, unke liye just_audio/
+   audio_service ka proper mocking harness chahiye hoga (bada, alag
+   task) — abhi scope me nahi kiya, bataya hai taaki pata rahe.
+
 > ⚠️ **PADHO ISSE PEHLE KUCH BHI CHHEDNE SE (naya Claude instance bhi):**
 > 1. **Streaming/resolve pipeline** (`youtube_service.dart`, `innertube_client.dart`,
 >    `background_service.dart` ke `_resolveAndPlay`/`playSong`/CDN headers wale
@@ -20,6 +63,46 @@
 > 3. **CDN headers aur download icon states** (Batch 24 se) — download/radio/
 >    sleep-timer icon ab actual state (on/off) reflect karte hain. Inhe wapas
 >    static grey icon mat banao — user ne specifically iski request ki thi.
+
+## Post-v75 Fix (2026-09-18) — "Buffering..." hamesha ke liye stuck (real-device log, v71 se ALAG bug)
+
+User ne 2 screenshot + poora app log bheja: audio bilkul sahi baj raha tha
+(pause-icon, position badh rahi thi) lekin subtitle text hamesha "Buffering..."
+pe atka reh gaya — v71 fix (`playFromFile()`) laga hone ke baad bhi. Root
+cause alag nikla, is baar streaming (network) path me.
+
+**Root cause:** `phase` sirf `_playSong()` (buffering→playing) aur `play()`
+control (`paused→playing`) se set hota tha. `stop()` (background_service.dart)
+`phase` ko **kabhi touch hi nahi karta tha** — sirf `player.stop()` +
+`_playToken` bump karta tha. Log se confirm hua: Radio screen se bahar aane
+pe (`dispose()` → `setRadioPlaybackOwned(false)` + `stop()`) `stop()` theek
+us waqt aaya jab ek naya gaana `buffering` phase me tha. `_playToken` bump
+hone se us gaane ka pending `_setPhase(playing)` call stale-token guard se
+silently drop ho gaya — `phase` `buffering` pe FROZEN reh gaya. User ne
+dobara Play dabaya (full player se, resume — naya resolve nahi), lekin
+purana `play()` guard sirf `paused→playing` handle karta tha, `buffering`
+wali stuck state ko nahi — isliye text hamesha atka raha, chahe audio
+genuinely `playing=true, ready` ho.
+
+**Fix (`background_service.dart`):**
+1. `stop()` ab `player.stop()` ke baad explicit `_setPhase(_playToken,
+   PlaybackPhase.idle)` karta hai — ab kabhi bhi resolve-ke-beech `phase`
+   frozen nahi rahega, `stop()` definitive reset karta hai.
+2. `play()` ka guard `paused`-only se broaden karke unconditional kar diya
+   — jab bhi `player.play()` genuinely successful ho aur `phase` already
+   `playing` na ho, use `playing` set kar do. Isse koi bhi frozen state
+   (buffering/resolving/retrying/error/idle) resume pe hamesha clear ho
+   jaati hai, chahe wo kaise bhi aayi ho.
+
+**In dono methods (`play()`/`stop()`) ko is fix ke alawa touch mat karo** —
+poore file ka streaming-adjacent hissa hai (dekho upar ka warning #1).
+
+**Bonus (fix NAHI kiya, sirf note kiya):** log ke aakhir me ek video-ID ke
+liye sainkdo concurrent resolve-requests (YT explode + saare Piped mirrors
++ NewPipe) ek saath fire ho rahe the — YT rate-limit (429) aur Piped
+mirrors ka down hona isi wajah se aur bura ho raha lagta hai. Ye alag
+issue hai (dedup missing lagta hai resolve pipeline me) — user se confirm
+kiye bina isse touch nahi kiya (upar ka warning #1 wahi kehta hai).
 
 ## Post-v69 Addition (2026-09-18) — Detailed logging (buttons, notification, Radio)
 

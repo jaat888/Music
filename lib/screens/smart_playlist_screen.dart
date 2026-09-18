@@ -15,6 +15,7 @@ import '../db/play_history_db.dart';
 import '../models/song.dart';
 import '../services/background_service.dart';
 import '../services/like_service.dart';
+import '../services/local_media_resolver.dart';
 import '../services/queue_service.dart';
 import '../services/download_queue_service.dart';
 import '../services/youtube_service.dart';
@@ -129,8 +130,8 @@ class _SmartPlaylistScreenState extends State<SmartPlaylistScreen> {
   Future<void> _playFrom(int index) async {
     context.read<QueueService>().setQueue(_songs, startIndex: index);
     final song = _songs[index];
-    final localPath = await DownloadDB.instance.getFilePath(song.id) ??
-        await CacheDB.instance.getFilePath(song.id);
+    // (2026-09-18: consolidated — dekho local_media_resolver.dart)
+    final localPath = await LocalMediaResolver.instance.getPath(song.id);
     if (localPath != null) {
       await audioHandler.playFromFile(song, localPath);
     } else {

@@ -152,9 +152,25 @@ class _MiniPlayerState extends State<MiniPlayer> {
                         // "Playback error") — jab phase "playing" ke alawa
                         // kuch ho, artist ki jagah ye dikhta hai (subtitle
                         // hamesha ek hi line hai, extra space nahi lagti).
-                        ValueListenableBuilder<PlaybackPhase>(
-                          valueListenable: audioHandler.phase,
-                          builder: (context, phase, _) {
+                        //
+                        // BUG FIX (2026-09-18): pehle sirf `audioHandler.phase`
+                        // pe listen hota tha — `phaseMessage` sirf inline
+                        // `.value` se padha jaata tha, uspe koi listener nahi
+                        // tha. `_setPhase()` retry-loops me BAAR-BAAR SAME
+                        // phase (jaise `retrying`) ko naya message ("Try
+                        // 1/3..." -> "Try 2/3..." -> "Try 3/3...") ke saath
+                        // set karta hai — `ValueNotifier.value = sameEnum`
+                        // par Flutter listeners ko notify NAHI karta (value
+                        // unchanged), isliye text hamesha PEHLE hi attempt ke
+                        // message pe frozen reh jaata, chahe phaseMessage
+                        // khud update ho chuka ho. Fix: `Listenable.merge`
+                        // se dono notifiers pe ek saath listen karte hain,
+                        // isliye sirf message badalne pe bhi rebuild hota hai.
+                        AnimatedBuilder(
+                          animation: Listenable.merge(
+                              [audioHandler.phase, audioHandler.phaseMessage]),
+                          builder: (context, _) {
+                            final phase = audioHandler.phase.value;
                             String subtitle = item.artist ?? '';
                             if (phase != PlaybackPhase.playing &&
                                 phase != PlaybackPhase.paused &&

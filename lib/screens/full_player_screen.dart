@@ -438,9 +438,23 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           // `audioHandler.phase` se dikhाते
                                           // hain, koi implicit/accidental
                                           // dependency nahi).
-                                          ValueListenableBuilder<PlaybackPhase>(
-                                            valueListenable: audioHandler.phase,
-                                            builder: (context, phase, _) {
+                                          //
+                                          // BUG FIX (2026-09-18): dekho
+                                          // mini_player.dart ka isi jagah ka
+                                          // comment — sirf `phase` pe listen
+                                          // karna kaafi nahi tha, retry-loops
+                                          // SAME phase ko naya message ke
+                                          // saath repeat karte hain aur wo
+                                          // silently miss ho jaata tha. Ab
+                                          // dono notifiers merge kiye hain.
+                                          AnimatedBuilder(
+                                            animation: Listenable.merge([
+                                              audioHandler.phase,
+                                              audioHandler.phaseMessage,
+                                            ]),
+                                            builder: (context, _) {
+                                              final phase =
+                                                  audioHandler.phase.value;
                                               String subtitle = song.artist;
                                               if (phase != PlaybackPhase.playing &&
                                                   phase != PlaybackPhase.paused &&

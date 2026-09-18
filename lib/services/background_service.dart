@@ -24,6 +24,7 @@ import 'chunked_audio_source.dart';
 import 'download_queue_service.dart';
 import 'equalizer_presets.dart';
 import 'like_service.dart';
+import 'local_media_resolver.dart';
 import 'queue_service.dart';
 import 'youtube_service.dart';
 
@@ -265,8 +266,8 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       try {
         // Pehle se download ya cache me hai to kuch karne ki zaroorat
         // nahi — koi duplicate network/disk call nahi.
-        final already = await DownloadDB.instance.getFilePath(next.id) ??
-            await CacheDB.instance.getFilePath(next.id);
+        // (2026-09-18: consolidated — dekho local_media_resolver.dart)
+        final already = await LocalMediaResolver.instance.getPath(next.id);
         if (already != null) return;
 
         final resolved = await YoutubeService.instance
@@ -744,8 +745,30 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // saaf karo — is se agla genuine stream drop (agar aaye) fir se normal
     // tarike se retry/recover hoga.
     _userPaused = false;
-    if (phase.value == PlaybackPhase.paused) phase.value = PlaybackPhase.playing;
-    return player.play().then((_) => _logCtl('play() DONE'));
+    // BUG FIX (2026-09-18 — real-device log: "Buffering..." hamesha ke liye
+    // stuck, audio khud bilkul theek baj raha tha): pehle yahan SIRF
+    // `paused -> playing` handle hota tha. Lekin `stop()` (neeche dekho)
+    // `phase` ko kabhi touch nahi karta tha — agar `stop()` kisi BEECH-KE
+    // resolve ke dauraan aa jaata (jaise Radio screen `dispose()` se, jab
+    // user Radio se bahar aata theek us waqt jab naya gaana `buffering`
+    // phase me tha), phase wahi FROZEN reh jaata (`buffering`/`resolving`/
+    // `retrying`/`error`) — aur ye purana `paused`-only guard us frozen
+    // state ko kabhi clear nahi karta tha jab user dobara Play dabata
+    // (kyunki ye SIRF resume hai, naya resolve nahi — naya resolve hamesha
+    // `playWithRetry()`/`_resolveAndPlay()` se aata hai, jo khud phase set
+    // karte hain, is path se nahi). Result: audio perfectly play hota
+    // rehta (`playing=true`, `processingState=ready`), lekin subtitle text
+    // hamesha "Buffering..." dikhata rehta jab tak koi bilkul naya
+    // song-change na ho jaaye. Fix: jab bhi resume genuinely successful ho
+    // (neeche `player.play()` error nahi deta), phase ko unconditionally
+    // `playing` kar do — sirf `paused` check hata diya, taaki koi bhi
+    // stuck-frozen state (chahe kaise bhi aayi ho) hamesha clear ho jaaye.
+    return player.play().then((_) {
+      if (phase.value != PlaybackPhase.playing) {
+        _setPhase(_playToken, PlaybackPhase.playing);
+      }
+      _logCtl('play() DONE');
+    });
   }
 
   @override
@@ -755,7 +778,15 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // notification/lock-screen ka — dono isi handler se guzarte hain, is
     // liye ek hi jagah flag set karne se dono cases cover ho jaate hain.
     _userPaused = true;
-    if (phase.value == PlaybackPhase.playing) phase.value = PlaybackPhase.paused;
+    // BUG FIX (2026-09-18): dekho play()/stop() ka comment — yahi symmetric
+    // gap tha. Pehle sirf `playing -> paused` handle hota tha; agar phase
+    // kisi frozen state (buffering/resolving/retrying/error) me atka ho aur
+    // user Pause dabaye, ye guard silently kuch nahi karta tha — audio
+    // genuinely pause ho jaata (`player.pause()` khud unconditional hai),
+    // lekin subtitle purani frozen state hi dikhata rehta.
+    if (phase.value != PlaybackPhase.paused) {
+      _setPhase(_playToken, PlaybackPhase.paused);
+    }
     return player.pause().then((_) => _logCtl('pause() DONE'));
   }
 
@@ -771,6 +802,15 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     _playToken++; // koi bhi pending stale resolve ab kuch overwrite nahi karega
     _skipDebounce?.cancel();
     await player.stop();
+    // BUG FIX (2026-09-18): dekho play() ka poora comment — `stop()` pehle
+    // `phase` ko bilkul touch nahi karta tha, isliye agar ye kisi beech-ke
+    // resolve (buffering/resolving/retrying) ke dauraan aata, phase wahi
+    // FROZEN reh jaata, permanently, chahe baad me kuch bhi ho. `stop()`
+    // ek definitive/terminal action hai, isliye ab explicit `idle` pe reset
+    // karte hain — `_playToken` abhi-abhi bump hua hai, isliye ye `_setPhase`
+    // call guard se guzar jaata hai (token match) aur status message bhi
+    // saath hi clear ho jaata hai.
+    _setPhase(_playToken, PlaybackPhase.idle);
     await super.stop();
     _logCtl('stop() DONE');
   }
@@ -850,8 +890,8 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     _prefetchingIds.add(song.id);
     () async {
       try {
-        final already = await DownloadDB.instance.getFilePath(song.id) ??
-            await CacheDB.instance.getFilePath(song.id);
+        // (2026-09-18: consolidated — dekho local_media_resolver.dart)
+        final already = await LocalMediaResolver.instance.getPath(song.id);
         if (already != null) return;
         final resolved = await YoutubeService.instance
             .getAudioUrlAndFormat(song.id, title: song.title, author: song.artist)
@@ -1274,8 +1314,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // pehle check karo — wahi asli "offline bhi chale, dobara network na
     // lage" wala intent hai. `_urlCache` (network URL) ab sirf ek fallback
     // hai jab disk pe abhi tak kuch nahi bana.
-    final localPath = await DownloadDB.instance.getFilePath(song.id) ??
-        await CacheDB.instance.getFilePath(song.id);
+    // (2026-09-18: consolidated — dekho local_media_resolver.dart, ye
+    // exact same priority-order jo upar ke comment me describe hui hai)
+    final localPath = await LocalMediaResolver.instance.getPath(song.id);
     if (localPath != null) {
       if (token != _playToken) return;
       try {
@@ -1508,7 +1549,31 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // Stream ho raha song ko chupke se cache folder me download karke DB me
   // register karo — agli baar bina internet ke bhi bajega. Playback isse
   // block nahi hota, isliye caller isko await nahi karta.
+  // BUG FIX (2026-09-18 — caching-paths audit): ye function 2+ jagah se
+  // (`_prefetchOne`/`_prefetchRadioOne` ka background prefetch, AUR
+  // `_playSong` khud jab gaana actually chalta hai) SAME song ke liye
+  // overlap ho sakta tha — dono `file.exists()` check ko fail dekh ke
+  // (abhi tak koi nahi likha) EK SAATH download+write shuru kar dete,
+  // aur ek hi disk file pe do parallel writes corrupt/truncated result de
+  // sakte the. Fix: per-songId in-flight registry — dusra caller naya
+  // download shuru nahi karta, PEHLE wale ka hi Future await kar leta hai.
+  final Map<String, Future<void>> _autoCacheInFlight = {};
+
   Future<void> _autoCacheInBackground(
+    Song song,
+    String streamUrl, {
+    required bool markAsPlayed,
+  }) {
+    final existing = _autoCacheInFlight[song.id];
+    if (existing != null) return existing;
+    final future = _autoCacheInBackgroundImpl(song, streamUrl,
+            markAsPlayed: markAsPlayed)
+        .whenComplete(() => _autoCacheInFlight.remove(song.id));
+    _autoCacheInFlight[song.id] = future;
+    return future;
+  }
+
+  Future<void> _autoCacheInBackgroundImpl(
     Song song,
     String streamUrl, {
     required bool markAsPlayed,
