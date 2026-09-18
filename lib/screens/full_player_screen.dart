@@ -564,7 +564,8 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           // audio is already audible. Keep the seekbar live in that
                                           // case; only lock it when the track has NOT started yet.
                                           final actualPlaying =
-                                              audioHandler.player.playing;
+                                              audioHandler.player.playing ||
+                                                  audioHandler.playbackStarted;
                                           final seekbarLoading = !actualPlaying &&
                                               (processingState ==
                                                       AudioProcessingState

@@ -1192,83 +1192,81 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
           stream: audioHandler.player.playingStream,
           initialData: audioHandler.player.playing,
           builder: (_, playingSnapshot) {
-            // just_audio's player.playingStream is the source of truth for
-            // the on-screen Play/Pause icon. The background AudioHandler
-            // intentionally broadcasts a temporary `playing:false` loading
-            // state when switching Radio tracks; listening directly to the
-            // player avoids leaving the button on Play while audio is already
-            // audible.
-            // v90: raw `playing=false` can lag behind a READY source whose
-            // position is already advancing. The handler's effective signal
-            // keeps the Pause icon stable through that tiny publication gap.
-            final rawPlaying = playingSnapshot.data ?? audioHandler.player.playing;
-            final playing = rawPlaying ||
-                (audioHandler.phase.value == PlaybackPhase.playing &&
-                    audioHandler.player.processingState == ProcessingState.ready);
-            final processing = audioHandler.player.processingState;
-            // just_audio is authoritative, with the handler's started-phase
-            // fallback for the brief ExoPlayer state-publication gap. A tiny
-            // buffering/loading transition while audio is already audible
-            // must never replace the Pause icon with a spinner.
-            final resolving = !playing &&
-                (_loading ||
-                    _transitioning ||
-                    processing == ProcessingState.loading ||
-                    processing == ProcessingState.buffering);
+            return StreamBuilder<Duration>(
+              stream: audioHandler.player.positionStream,
+              initialData: audioHandler.player.position,
+              builder: (_, positionSnapshot) {
+                final rawPlaying =
+                    playingSnapshot.data ?? audioHandler.player.playing;
+                final position = positionSnapshot.data ?? Duration.zero;
+                final processing = audioHandler.player.processingState;
+                final playing = rawPlaying ||
+                    audioHandler.playbackStarted ||
+                    (processing == ProcessingState.ready &&
+                        position > const Duration(milliseconds: 250));
+                final resolving = !playing &&
+                    (_loading ||
+                        _transitioning ||
+                        processing == ProcessingState.loading ||
+                        processing == ProcessingState.buffering);
 
-            return Semantics(
-              button: true,
-              label: resolving ? 'Buffering' : (playing ? 'Pause' : 'Play'),
-              child: InkResponse(
-                // Do not disable the control during a Radio transition. A
-                // tap is either executed immediately or queued as the latest
-                // play/pause intent and drained when the transition finishes.
-                onTap: () {
-                  if (_transitioning || _loading) {
-                    final wantsPlay = _pendingPlayIntent != null
-                        ? !_pendingPlayIntent!
-                        : !playing;
-                    setState(() => _pendingPlayIntent = wantsPlay);
-                    AppLogger.instance.log(
-                      '[RADIO] Play/Pause tapped during transition/loading — queued: ${wantsPlay ? "play" : "pause"}',
-                    );
-                    return;
-                  }
-                  unawaited(_togglePlay());
-                },
-                radius: 40,
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  curve: Curves.easeOut,
-                  width: 72,
-                  height: 72,
-                  decoration: BoxDecoration(
-                    color: kGreen,
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                        color: kGreen.withOpacity(.28),
-                        blurRadius: resolving ? 18 : 10,
-                        spreadRadius: resolving ? 2 : 0,
-                      ),
-                    ],
-                  ),
-                  child: resolving
-                      ? const SizedBox(
-                          width: 28,
-                          height: 28,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 3,
-                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                return Semantics(
+                  button: true,
+                  label: resolving ? 'Buffering' : (playing ? 'Pause' : 'Play'),
+                  child: InkResponse(
+                    // Pause is always immediate once audio has started. A
+                    // stale transition/loading flag must never block it.
+                    onTap: () {
+                      if (playing) {
+                        unawaited(_togglePlay());
+                        return;
+                      }
+                      if (_transitioning || _loading) {
+                        setState(() => _pendingPlayIntent = true);
+                        AppLogger.instance.log(
+                          '[RADIO] Play/Pause tapped during transition/loading — queued: play',
+                        );
+                        return;
+                      }
+                      unawaited(_togglePlay());
+                    },
+                    radius: 40,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      curve: Curves.easeOut,
+                      width: 72,
+                      height: 72,
+                      decoration: BoxDecoration(
+                        color: kGreen,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: kGreen.withOpacity(.28),
+                            blurRadius: resolving ? 18 : 10,
+                            spreadRadius: resolving ? 2 : 0,
                           ),
-                        )
-                      : Icon(
-                          playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                          size: 40,
-                          color: Colors.white,
-                        ),
-                ),
-              ),
+                        ],
+                      ),
+                      child: resolving
+                          ? const SizedBox(
+                              width: 28,
+                              height: 28,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 3,
+                                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                              ),
+                            )
+                          : Icon(
+                              playing
+                                  ? Icons.pause_rounded
+                                  : Icons.play_arrow_rounded,
+                              size: 40,
+                              color: Colors.white,
+                            ),
+                    ),
+                  ),
+                );
+              },
             );
           },
         ),

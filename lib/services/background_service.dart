@@ -234,11 +234,17 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // ExoPlayer hand-off it can briefly emit false even though the new source
   // is already READY and its position is advancing. UI/notification code
   // must not turn that tiny state publication gap into a fake spinner.
+  // REAL PLAYBACK LATCH (v92): once this play request genuinely starts,
+  // keep that fact for this token. ExoPlayer may briefly publish playing=false
+  // during a READY/BUFFERING hand-off; that must not turn a working Pause
+  // button into a fake spinner or make Radio reject a valid candidate.
+  int? _playbackStartedToken;
+
   bool get playbackStarted =>
       player.playing ||
-      (phase.value == PlaybackPhase.playing &&
-          player.processingState == ProcessingState.ready &&
-          !_userPaused);
+      (_playbackStartedToken == _playToken && !_userPaused &&
+          player.processingState != ProcessingState.idle &&
+          player.processingState != ProcessingState.completed);
 
   void _setPhase(int token, PlaybackPhase p, [String? message]) {
     // Stale request kabhi phase overwrite na kare — wahi `_playToken`
@@ -626,10 +632,12 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           '$_maxStreamErrorRetries (fresh URL nikaal ke).');
       // Loading state dikhao — user ko "kuch hua hi nahi" na lage jab
       // background me retry chal raha ho.
+      final alreadyStarted =
+          _playbackStartedToken == token && !_userPaused;
       playbackState.add(
         playbackState.value.copyWith(
           processingState: AudioProcessingState.loading,
-          playing: false,
+          playing: alreadyStarted,
         ),
       );
       // BUG FIX (2026-09-18 — user report: "buffer beech mein hi stuck ho
@@ -810,26 +818,29 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<bool> _waitUntilPlaying({Duration timeout = const Duration(seconds: 6)}) async {
-    // `playingStream` is authoritative when it arrives, but do not rely on
-    // that single boolean alone. On some ExoPlayer transitions the audio can
-    // already be audible / advancing while the boolean publication briefly
-    // remains false. Confirm either signal OR real position movement.
-    if (player.playing) return true;
+    final token = _playToken;
     final startedAt = player.position;
     final deadline = DateTime.now().add(timeout);
     while (DateTime.now().isBefore(deadline)) {
-      if (player.playing) return true;
-      if (player.processingState == ProcessingState.ready &&
-          player.position > startedAt + const Duration(milliseconds: 150)) {
-        AppLogger.instance.log(
-          '[PLAY] playback-start confirmed by position advance — '
-          'position=${player.position.inMilliseconds}ms while playing flag was delayed.',
-        );
+      if (player.playing) {
+        _playbackStartedToken = token;
+        AppLogger.instance.log('[PLAY] playback-start confirmed by player.playing=true — token=$token');
         return true;
       }
-      await Future.delayed(const Duration(milliseconds: 150));
+      if (token == _playToken &&
+          player.processingState == ProcessingState.ready &&
+          player.position > startedAt + const Duration(milliseconds: 150)) {
+        _playbackStartedToken = token;
+        AppLogger.instance.log('[PLAY] playback-start confirmed by position advance — position=${player.position.inMilliseconds}ms');
+        return true;
+      }
+      await Future.delayed(const Duration(milliseconds: 100));
     }
-    return player.playing;
+    if (player.playing) {
+      _playbackStartedToken = token;
+      return true;
+    }
+    return false;
   }
 
   @override
@@ -876,6 +887,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   @override
   Future<void> pause() {
     _logCtl('pause() called');
+    _playbackStartedToken = null;
     // BUG FIX (2026-09-18, v59): full-screen ka pause button ho ya
     // notification/lock-screen ka — dono isi handler se guzarte hain, is
     // liye ek hi jagah flag set karne se dono cases cover ho jaate hain.
@@ -929,6 +941,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> stop() async {
     _logCtl('stop() called');
     _playToken++; // koi bhi pending stale resolve ab kuch overwrite nahi karega
+    _playbackStartedToken = null;
     _skipDebounce?.cancel();
     await player.stop();
     // BUG FIX (2026-09-18): dekho play() ka poora comment — `stop()` pehle
@@ -1009,6 +1022,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
     // Invalidate stale resolve/recovery work from the previous Radio owner.
     _playToken++;
+    _playbackStartedToken = null;
     _streamErrorRetries = 0;
     return ownerId;
   }
@@ -1034,6 +1048,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // so a new Radio screen can claim ownership first; in that case this old
     // release must NOT stop the new owner's source.
     _playToken++;
+    _playbackStartedToken = null;
     _streamErrorRetries = 0;
     final sequenceAtRelease = _radioOwnerSequence;
     await Future<void>.delayed(Duration.zero);
@@ -1076,7 +1091,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> prefetchRadioSongs(Iterable<Song> songs) async {
     final list = songs
         .where((song) => song.id != _activePlaybackSong?.id)
-        .take(2)
+        // One warm URL is enough to make the immediate next swipe smooth.
+        // More concurrent extraction requests increase YouTube rate limiting.
+        .take(1)
         .toList();
     AppLogger.instance.log(
       '[RADIO] prefetchRadioSongs() called — ${list.length} candidates: '
@@ -1287,14 +1304,19 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         await player.seek(Duration.zero);
       } catch (_) {}
       if (token != _playToken) return;
-      await player.play();
+      // IMPORTANT: just_audio's `play()` Future is NOT a "started" signal.
+      // Its Future completes when playback later finishes/pauses/stops.
+      // Awaiting it here keeps our phase stuck at Buffering for the whole
+      // song, even though audio is already playing. That was the exact
+      // reason the UI could show a spinner at 0:18 while the song was
+      // perfectly smooth. Fire the command without awaiting completion,
+      // then wait only for the actual player-start signal below.
+      unawaited(player.play());
 
-      // IMPORTANT (v84): just_audio's `play()` Future may complete before
-      // ExoPlayer publishes `playing=true`. The old code immediately marked
-      // the Radio phase as playing, and the Radio screen immediately sampled
-      // `player.playing`; that race produced false "play nahi hua" messages
-      // and unnecessary candidate skips. Wait for the authoritative stream
-      // signal, but fail fast if the player never starts.
+      // just_audio publishes playing=true as soon as the player has accepted
+      // the play command (and keeps it true during normal buffering). We wait
+      // for that signal, with a small position-advance fallback for devices
+      // where the state publication is delayed.
       if (!await _waitUntilPlaying()) {
         throw StateError(
           'player.play() ke baad playback-start confirm nahi hua '
@@ -1398,6 +1420,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // dikhe aur spinner/loading state UI me nazar aaye.
   Future<void> playWithRetry(Song song) async {
     final token = ++_playToken;
+    _playbackStartedToken = null;
     _activePlaybackSong = song;
     // BUG FIX (2026-09-18): dekho `_resolving` ka comment — ye yahan turant
     // (purana gaana pause karne se bhi PEHLE) set karte hain, taaki
@@ -1551,7 +1574,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           await player.seek(Duration.zero);
         } catch (_) {}
         if (token != _playToken) return;
-        await player.play();
+        // Do not await play(): its Future completes when playback ends/pauses.
+        // We only need the immediate command plus a start-state confirmation.
+        unawaited(player.play());
         if (!await _waitUntilPlaying()) {
           throw StateError('local file play() ke baad playing=true nahi hua');
         }
@@ -1694,6 +1719,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // success pe playing, fail pe error — taaki `phase` kabhi stale na rahe.
   Future<void> playFromFile(Song song, String filePath) async {
     final token = ++_playToken;
+    _playbackStartedToken = null;
     _activePlaybackSong = song;
     // BUG FIX (2026-09-18, v59): dekho playWithRetry() ka same comment.
     _userPaused = false;
@@ -1702,7 +1728,8 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     try {
       await player.setFilePath(filePath);
       if (token != _playToken) return; // dauraan koi naya tap aa gaya
-      await player.play();
+      // Do not await play(): its Future completes when playback ends/pauses.
+      unawaited(player.play());
       if (!await _waitUntilPlaying()) {
         throw StateError('file play() ke baad playing=true nahi hua');
       }
