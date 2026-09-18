@@ -1128,22 +1128,50 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         'YT PLAY ATTEMPT: "${song.title}" — headers: ${useHeaders ? "WITH cdnHeaders (desktop UA)" : "WITHOUT headers (raw URL, native-client jaisa)"}'
         '${useChunking ? " — CHUNKED (speed-fix)" : ""}',
       );
+      // BUG FIX (2026-09-18 — "buffer hamesha ke liye stuck, Radio ek baar
+      // fail hone ke baad permanent band"): asli root cause yahi thi —
+      // `player.setUrl()`/`setAudioSource()` ke upar KOI timeout nahi tha.
+      // `getAudioUrlAndFormat()` (URL resolve) ka apna 60s timeout hai, aur
+      // stream-drop retry (`_handleStreamDrop`/`_retryAfterStreamDrop`) ka
+      // poora "fresh URL nikaal ke retry karo" mechanism already maujood
+      // hai — lekin dono sirf tab trigger hote hain jab koi Future actually
+      // throw kare. Jab URL mil chuka ho (naya ya `_urlCache` se cached)
+      // lekin just_audio ka setUrl khud CDN pe silently stall ho jaaye (na
+      // error, na completion), ye `await` hamesha ke liye latka reh jaata
+      // tha — kabhi na throw karta, na complete. Isi wajah se: (1) neeche
+      // ka `catch` kabhi nahi chalta, `_handleStreamDrop()` kabhi call hi
+      // nahi hota, koi naya URL kabhi try nahi hota (chicken-egg — purana
+      // chain kabhi free nahi hota); (2) `_playCandidate`/`playWithRetry`
+      // ko await karne wale saare callers (Radio ka `_advance()`/
+      // `_previous()`) bhi hamesha ke liye latak jaate, isliye unka
+      // `_transitioning` flag kabhi `false` nahi hota — Next/Previous
+      // button disabled + spinner permanently stuck, aur swipe gesture
+      // (jo `_transitioning` check nahi karta) sirf queue hoke reh jaata,
+      // kabhi drain nahi hota. Fix: is stall ko bhi ek explicit timeout se
+      // "fail" bana do — taaki wahi already-existing catch → stream-drop
+      // → fresh-URL-retry chain fire ho, aur uske through `_transitioning`/
+      // `finally` blocks bhi normally unwind ho jaayein.
+      const setUrlTimeout = Duration(seconds: 20);
       if (useChunking) {
         // SPEED FIX: chunked HTTP Range source — dekho
         // chunked_audio_source.dart ka top comment (poora root-cause +
         // fix explanation).
-        await player.setAudioSource(
-          ChunkedYoutubeAudioSource(
-            url,
-            headers: useHeaders ? YoutubeService.cdnHeaders : null,
-            expectedFormat: format,
-          ),
-        );
+        await player
+            .setAudioSource(
+              ChunkedYoutubeAudioSource(
+                url,
+                headers: useHeaders ? YoutubeService.cdnHeaders : null,
+                expectedFormat: format,
+              ),
+            )
+            .timeout(setUrlTimeout);
       } else {
-        await player.setUrl(
-          url,
-          headers: useHeaders ? YoutubeService.cdnHeaders : null,
-        );
+        await player
+            .setUrl(
+              url,
+              headers: useHeaders ? YoutubeService.cdnHeaders : null,
+            )
+            .timeout(setUrlTimeout);
       }
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       // BUG FIX (2026-09-18 — user report: "next/previous kaam nahi karta

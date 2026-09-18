@@ -2755,3 +2755,36 @@ STATUS: is dev-environment mein compile-test nahi ho paaya.
 STATUS: is dev-environment mein compile-test nahi ho paaya — khaaskar
 swipe-gesture ka scoping (Expanded ke andar GestureDetector) real device
 pe zaroor test karna, layout-wise koi chhota gap na aaye.
+
+## 2026-09-18 (v81) — Radio: permanent buffering-stuck / dead skip fixed (root cause)
+
+1. **"Buffering... hamesha ke liye stuck, ek baar fail hone ke baad Radio
+   permanent band ho jaata hai" — ROOT CAUSE mila aur FIXED.** `_playSong()`
+   (background_service.dart) ke andar `player.setUrl()`/`setAudioSource()`
+   ke upar koi timeout nahi tha. Jab is CDN call ka network stall ho jaata
+   (na error, na completion), ye `await` hamesha ke liye latka reh jaata
+   tha — kabhi throw nahi karta, isliye already-existing
+   `catch → _handleStreamDrop() → fresh-URL-retry` chain (jo "purana URL na
+   dekho, naya regenerate karke retry karo" wala exact mechanism hai) kabhi
+   trigger hi nahi hota tha. Fix: `setUrl()`/`setAudioSource()` ko explicit
+   20s `.timeout()` diya — stall ab bhi "fail" maana jaata hai, isliye
+   stream-drop handler turant fresh URL leke retry karta hai (max 3
+   attempts, jaisa pehle se tha).
+2. **Next/Previous button + swipe "permanently disabled/queued reh jaata
+   hai" — same root cause, isi fix se resolve.** `RadioPlayerScreen`'s
+   `_advance()`/`_previous()` `_playCandidate()` → `playWithRetry()` →
+   `_playSong()` ki poori chain ko `await` karte hain; jab tak andar wala
+   `setUrl()` latka rehta, `finally` block (jo `_transitioning = false`
+   karta hai) kabhi nahi chalta — button hamesha disabled/grey rehta,
+   swipe-se-aayi command hamesha queue hoke reh jaati (`_drainPendingRadioCommand`
+   ko kabhi kuch drain karne ko na milta). Ab jab andar ka stall bhi timeout
+   se "fail" ban jaata hai, poori await-chain normally unwind hoti hai, aur
+   `_transitioning` properly reset hota hai — button aur swipe dono wapas
+   normal.
+
+Dono symptom (permanent-stuck buffering, aur dead Next/Previous/swipe) ek
+hi missing-timeout se aa rahe the — ek hi jagah fix karne se dono theek ho
+gaye, kahin alag se kuch chhedne ki zaroorat nahi padi.
+
+STATUS: is dev-environment mein compile-test nahi ho paaya — real device pe
+confirm karna, khaaskar low-bandwidth/CDN-stall scenario reproduce karke.
