@@ -280,76 +280,58 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     });
     unawaited(_preloadArtworkAndMetadata());
 
-    // BUG FIX (2026-09-18 — user report: "Buffering... hamesha atka rehta
-    // hai", "play/pause button kaam nahi karta jab tak gaana khud khatam
-    // na ho"): ROOT CAUSE — `_loading = true` (upar) ke baad, agar is call
-    // ko koi NAYA candidate supersede kar de (`token != _candidateGeneration`
-    // ho jaaye) YA beech mein kahin exception aa jaaye, to niche wale reset
-    // points (`_loading = false`) tak kabhi pahunchte hi nahi the — na
-    // `try/finally` tha (sirf `_advance()`/`_previous()` ke `_transitioning`
-    // ke liye tha, is andar wale `_loading` ke liye nahi), na exception-safe
-    // tha. `_loading` (jo play/pause button ke "Buffering" spinner +
-    // disabled state, aur `phase`-based "Buffering..." subtitle text, DONO
-    // ko drive karta hai) hamesha ke liye `true` atka reh jaata — button
-    // disabled dikhta, text "Buffering..." pe freeze ho jaata, chahe gaana
-    // asal mein bilkul theek baj raha ho (jaisa log ki underlying
-    // playbackState confirm karta hai). Sirf gaana khud khatam hona
-    // (`_advance(auto:true)`, jo button-tap se nahi guzarta) is stuck state
-    // ko "accidentally" clear karta tha — isliye "skip/prev tabhi kaam
-    // karta hai jab gaana khud khatam ho" jaisa lagta tha.
-    //
-    // Fix: poora body ab try/finally mein hai, aur finally sirf TABHI
-    // `_loading` reset karta hai jab hum abhi bhi "current" (non-stale)
-    // call hain — stale (superseded) call kabhi bhi ek naye candidate ka
-    // loading-state overwrite nahi karega, aur current call ka reset kabhi
-    // miss nahi hoga (exception ho ya early-return, dono me guaranteed).
-    try {
-      final started = await _playWithRecovery(candidate, token);
-      if (!mounted || token != _candidateGeneration) return false;
+    final started = await _playWithRecovery(candidate, token);
+    if (!mounted || token != _candidateGeneration) return false;
 
-      if (!started) {
-        _engine.markFailed(candidate.song.id);
-        _upcoming.removeWhere((item) => item.song.id == candidate.song.id);
-        _lyrics = null;
-        _lyricsLoading = false;
-        return false;
-      }
-
-      _recentLanguageCounts[candidate.language.toLowerCase()] =
-          (_recentLanguageCounts[candidate.language.toLowerCase()] ?? 0) + 1;
-      _engine.markPlayed(candidate.song.id);
-
-      if (addToHistory) {
-        // BUG FIX (2026-09-17, v68): pehle ye `await` hota tha — matlab
-        // `_playCandidate()` ka Future tab tak complete NAHI hota tha jab
-        // tak ye DB write poora na ho jaaye. `_advance()`/`_previous()` ka
-        // `_transitioning=false` (jo Next/Prev button ka spinner control
-        // karta hai) `finally` block mein hai, jo sirf tab chalta hai jab
-        // poora `_advance()`/`_previous()` Future resolve ho — matlab AUDIO
-        // already baj raha hota (kyunki `_loading=false` upar hi ho chuka
-        // hai), lekin button abhi bhi "loading" dikhata rehta jab tak ye
-        // history-log DB write (jo user ko kuch dikhta bhi nahi) khatam na
-        // ho jaaye. Fire-and-forget — history save hoti rahegi, bas ab
-        // button ko block nahi karti.
-        unawaited(RadioHistoryStore.instance.record(
-          songId: candidate.song.id,
-          title: candidate.song.title,
-          tags: candidate.tags,
-          language: candidate.language,
-          artist: candidate.song.artist,
-          duration: candidate.song.duration,
-          wasSkipped: false,
-        ));
-      }
-
-      unawaited(_loadLyrics(candidate, token));
-      unawaited(_fillUpcoming());
-      return true;
-    } finally {
-      if (mounted && token == _candidateGeneration) {
-        setState(() => _loading = false);
-      }
+    if (!started) {
+      _engine.markFailed(candidate.song.id);
+      _upcoming.removeWhere((item) => item.song.id == candidate.song.id);
+      _lyrics = null;
+      _lyricsLoading = false;
+      // BUG FIX (2026-09-17, v68 — user report: "play/pause button ghumta
+      // hi rehta hai"): ROOT CAUSE mila — `_loading` upar `true` set hota
+      // hai (line ~258), lekin is FAILURE branch mein kabhi wapas `false`
+      // nahi hota tha. `_previous()` sirf EK hi `_playCandidate()` call
+      // karta hai (koi retry-loop nahi) — agar wahi ek candidate fail ho
+      // jaaye (network hiccup, dead video, etc.), `_loading` hamesha ke
+      // liye `true` atka reh jaata — play/pause button (jo `_loading ||
+      // _transitioning || ...` dekh ke spinner dikhata hai) permanently
+      // ghumta reh jaata, chahe player actually kuch bhi na kar raha ho.
+      if (mounted) setState(() => _loading = false);
+      return false;
     }
+
+    _recentLanguageCounts[candidate.language.toLowerCase()] =
+        (_recentLanguageCounts[candidate.language.toLowerCase()] ?? 0) + 1;
+    _engine.markPlayed(candidate.song.id);
+    setState(() => _loading = false);
+
+    if (addToHistory) {
+      // BUG FIX (2026-09-17, v68): pehle ye `await` hota tha — matlab
+      // `_playCandidate()` ka Future tab tak complete NAHI hota tha jab
+      // tak ye DB write poora na ho jaaye. `_advance()`/`_previous()` ka
+      // `_transitioning=false` (jo Next/Prev button ka spinner control
+      // karta hai) `finally` block mein hai, jo sirf tab chalta hai jab
+      // poora `_advance()`/`_previous()` Future resolve ho — matlab AUDIO
+      // already baj raha hota (kyunki `_loading=false` upar hi ho chuka
+      // hai), lekin button abhi bhi "loading" dikhata rehta jab tak ye
+      // history-log DB write (jo user ko kuch dikhta bhi nahi) khatam na
+      // ho jaaye. Fire-and-forget — history save hoti rahegi, bas ab
+      // button ko block nahi karti.
+      unawaited(RadioHistoryStore.instance.record(
+        songId: candidate.song.id,
+        title: candidate.song.title,
+        tags: candidate.tags,
+        language: candidate.language,
+        artist: candidate.song.artist,
+        duration: candidate.song.duration,
+        wasSkipped: false,
+      ));
+    }
+
+    unawaited(_loadLyrics(candidate, token));
+    unawaited(_fillUpcoming());
+    return true;
   }
 
   Future<bool> _playWithRecovery(RadioCandidate candidate, int token) async {
