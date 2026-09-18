@@ -18,7 +18,6 @@ import '../db/download_db.dart';
 import '../db/play_history_db.dart';
 import '../models/song.dart';
 import 'cache_service.dart';
-import 'chunked_audio_source.dart';
 import 'download_queue_service.dart';
 import 'equalizer_presets.dart';
 import 'like_service.dart';
@@ -802,19 +801,21 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       print(
         'YT PLAY ATTEMPT: "${song.title}" — headers: ${useHeaders ? "WITH cdnHeaders (desktop UA)" : "WITHOUT headers (raw URL, native-client jaisa)"}',
       );
-      // SPEED FIX (2026-09-18): pehle `player.setUrl(url)` seedha use hota
-      // tha — ExoPlayer isse ek single continuous connection banata hai,
-      // jise YouTube ka CDN throttle kar deta hai (roughly realtime
-      // playback speed tak) — isi wajah se "ek-ek chunk jaisa slow load"
-      // hota tha. Ab `ChunkedYoutubeAudioSource` bade (10MB) discrete
-      // HTTP Range chunks me maangta hai (yt-dlp/NewPipe jaisa hi
-      // tarika) — CDN har naye range-request ko full network speed pe
-      // serve karta hai.
-      await player.setAudioSource(
-        ChunkedYoutubeAudioSource(
-          url,
-          headers: useHeaders ? YoutubeService.cdnHeaders : null,
-        ),
+      // REVERT (2026-09-18): `ChunkedYoutubeAudioSource` (custom
+      // StreamAudioSource, HTTP Range-chunked streaming) real device pe
+      // test kiya to SAARE gaane turant "Source error" de rahe the
+      // (dekho sursathi_app_log.txt — pehle se bhi bura, ab kaam hi nahi
+      // kar raha, pehle sirf "slow" tha). Iska exact root cause (local
+      // just_audio HTTP-proxy ko diya gaya declared contentLength ACTUAL
+      // stream se mismatch ho sakta hai — googlevideo CDN maanga gaya
+      // poora range hamesha na de) bina real-device debug ke pin karna
+      // risky hai. Isliye WAPAS last-known-WORKING state (plain
+      // `setUrl()`, koi custom chunking nahi) — reliability > speed.
+      // Speed improvement baad me alag se, chhote-chhote verified steps
+      // me, real-device logs dekh ke karenge.
+      await player.setUrl(
+        url,
+        headers: useHeaders ? YoutubeService.cdnHeaders : null,
       );
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       await player.play();
