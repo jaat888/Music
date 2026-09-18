@@ -21,7 +21,133 @@
 >    sleep-timer icon ab actual state (on/off) reflect karte hain. Inhe wapas
 >    static grey icon mat banao — user ne specifically iski request ki thi.
 
-## Batch 30 (2026-09-17) — Batch 29 ke 2 fixes properly redo (user ne reject kiya)
+## Post-v69 Addition (2026-09-18) — Detailed logging (buttons, notification, Radio)
+
+User ne demand ki: log me sirf "YT PLAY OK/FAIL" jaisi high-level lines ke
+alawa ye bhi chahiye — kaunsa button (play/pause/seek/stop/skip/shuffle/
+repeat) kab dabaya gaya aur uska response kya raha, notification kis
+state me kab/kaise dikh rahi thi, aur Radio mode ka poora flow (start/
+advance/previous/error-recovery) alag se saaf-saaf trace ho sake — kyunki
+abhi tak in sab ke liye koi log hi nahi tha, isliye bug reproduce karna
+mushkil ho raha tha.
+
+**Kya add hua:**
+1. `background_service.dart` — `_logCtl()` helper: `play()`, `pause()`,
+   `seek()`, `stop()`, `skipToNext()`, `skipToPrevious()`,
+   `setShuffleMode()`, `setRepeatMode()` — sab `[CTL]` tag ke saath
+   "called"/"DONE" log karte hain, saath me us waqt ka playing/
+   processingState/phase bhi. **Important:** audio_service ye methods
+   full-player/mini-player UI KE BUTTONS aur notification/lock-screen KE
+   CONTROLS — dono jagah se EK hi shared handler ke through call karta
+   hai, isliye ye ek jagah ka instrumentation dono cover karta hai (alag
+   se har UI widget me lagane ki zaroorat nahi thi).
+2. `_broadcastState()` — pehle kuch log nahi tha (aur har playback-event
+   pe fire hota hai, isliye har baar log karna file flood kar deta) — ab
+   sirf jab `playing` ya `processingState` actually BADALTA hai, tab
+   `[NOTIF]` tag se poori state (controls/compactIndices/position) log
+   hoti hai — ab "notification kaise/kab badli" poori trace me dikhta hai.
+3. `setRadioPlaybackOwned()` / `prefetchRadioSongs()` (background_service.dart)
+   aur `radio_player_screen.dart` (`_start`, `_fetchCandidates` ka flow,
+   `_advance`, `_previous`, `_togglePlay`, `_onRadioPlaybackError`,
+   `_ensureRecovery` ka retry-loop) — sab `[RADIO]` tag se, har step
+   ("called", "attempt N/M", "TASK COMPLETE", "FAILED") explicit log hote
+   hain. Pehle is 1368-line file me EK bhi log line nahi thi.
+
+**Grep tips (naya log file dekhte waqt):** `[CTL]` = button/control taps,
+`[NOTIF]` = notification state changes, `[RADIO]` = Radio mode ka poora
+flow. Baaki purane `YT PLAY/DOWNLOAD/...` prefixed lines waise hi hain.
+
+**Build marker:** `NEWPIPE-NATIVE-2026-09-16-v14`.
+
+## Post-v70 Fix (2026-09-18) — Log me millisecond-difference add kiya
+
+User ne bola time samajhna mushkil hai — do log lines ke beech kitna gap
+tha ye manually calculate karna padta tha. `app_logger.dart` ka `log()`
+ab har line ke saath pichli line se guzra hua time bhi likhta hai:
+`[2026-09-18T...][+123ms][INFO] message` — ab kisi bhi do steps ke beech
+ka exact gap ek nazar me dikh jaata hai (line se pehli hi line hamesha
+`+0ms` hoti hai).
+
+**Build marker:** `NEWPIPE-NATIVE-2026-09-16-v15`.
+
+## Post-v71 Fix (2026-09-18) — Screenshot: "Buffering..." stuck + [ART] log
+
+User ne screenshot bheja: "White Brown Black" ka Pause icon dikha raha tha
+(matlab ASAL me bilkul theek chal raha tha), lekin subtitle "Buffering..."
+pe atka hua tha, aur neeche ek DUSRE gaane ("Galat Baat Hai") ka purana
+error toast bhi dikh raha tha — matlab UI ke do hisse (play/pause icon vs
+status text) sync me nahi the.
+
+**Root cause (`playFromFile()`, downloaded/cached songs ke liye):** ye
+function `player.play()` call karta tha (jo turant play/pause ICON sahi
+kar deta hai, kyunki wo seedha `_broadcastState()`/`playbackState` se
+aata hai) — lekin `phase` (alag ValueNotifier jo subtitle TEXT drive karta
+hai) ko kabhi `PlaybackPhase.playing` set hi nahi karta tha. Isliye agar
+`phase` pehle se kisi PURANE (dusre) gaane ke fail/buffering attempt se
+stuck tha, aur user ek DOWNLOADED gaana tap karta (playFromFile() path —
+Downloads/Library/Recently Played/Mood/Smart Playlist, sab yahi function
+use karte hain) — audio turant sahi bajta, lekin text hamesha ke liye
+purani stuck state dikhata rehta, jab tak koi aur unrelated phase-change
+na ho.
+
+**Fix:** `playFromFile()` me bhi doosre play-methods jaisa hi explicit
+`_setPhase()` lagaya — shuru me buffering, success pe playing, fail pe
+error. Ab `phase` kabhi bhi stale nahi rahega chahe playback kisi bhi
+source (stream/local-file) se aaya ho.
+
+**Bonus (user ne ye bhi maanga — "agle gaane ki photo kaisi/kitni load
+hui, minimum detail"):** `_toMediaItem()` ab har naye song-change pe
+`[ART]` tag se log karta hai ki us gaane ka thumb URL kya tha (ya missing
+tha) — audio_service ka asli artwork-download native-side hota hai isliye
+uska progress track nahi ho sakta, ye sirf itna confirm karta hai ki
+sahi/khaali thumb bheja gaya tha ya nahi.
+
+**Build marker:** `NEWPIPE-NATIVE-2026-09-16-v16`.
+
+## Post-v68 Fix (2026-09-18) — CHUNKED playback 100% fail (galat MIME-type guess)
+
+User ne fresh `sursathi_app_log.txt` bheja (v68 build). Pattern bilkul saaf
+tha: **HAR EK** `"CHUNKED (speed-fix)"` wala attempt turant (~100-300ms
+mein) `PlatformException(0, Source error, {index: 0}, null)` deta tha;
+usi gaane ka agla retry (bina CHUNKED tag ke, plain `setUrl()`) kuch der
+baad theek chal jaata tha. Matlab bug specifically chunked path me tha,
+random CDN-drop nahi.
+
+**Root cause (`chunked_audio_source.dart`):** HTTP Range (206 partial)
+response me `Content-Type` header googlevideo hamesha nahi bhejta. Jab
+missing hota, code `_contentType` (agar pehle mila ho) ya hardcoded
+`'audio/mp4'` pe fallback karta tha. Is app me resolve hone wala format
+LAGBHAG HAMESHA "webm" hota hai (log confirm karta hai) — matlab fallback
+ka guess (`audio/mp4`) practically hamesha GALAT hota tha. just_audio/
+ExoPlayer ko explicit (galat) MIME diya jaaye to wo content-sniffing skip
+karke seedha usi type ka extractor force karta hai — Mp4Extractor ko
+WEBM/EBML bytes diye jaayein to wo turant fail hota hai. Non-chunked
+`setUrl()` isse isliye bachta tha kyunki wahan koi forced MIME nahi diya
+jaata (ExoPlayer khud sniff karta hai).
+
+**Fix:**
+1. `youtube_service.dart`: naya `getAudioUrlAndFormat()` — URL ke saath
+   resolve-time-known asli format ("webm"/"mp4"/"m4a") bhi return karta hai
+   (pehle `getAudioUrl()` sirf URL deta tha, format discard ho jaata tha).
+   `getAudioUrl()` ab isi ka thin wrapper hai (backward-compat, jahan
+   format ki zaroorat nahi — jaise debug_screen.dart, `_retryAfterStreamDrop`
+   jo hamesha non-chunked hi rehta hai).
+2. `background_service.dart`: `_urlCache` (prefetch cache) ab
+   `{url, format}` record store karta hai; `playSong()`/`_playSong()`/
+   `playWithRetry()` ke poore chain me format thread kiya gaya — jahan
+   bhi `useChunking: true` hai, wahan format bhi resolve-time se seedha
+   `ChunkedYoutubeAudioSource` tak jaata hai.
+3. `chunked_audio_source.dart`: naya `expectedFormat` param — `_mimeForFormat()`
+   ise definitive MIME me convert karke **priority #1** banata hai (HTTP
+   header/hardcoded-guess ab sirf format na milne par hi last-resort
+   fallback).
+
+**Build marker:** `NEWPIPE-NATIVE-2026-09-16-v13`.
+**Test on real device:** kai alag-alag gaane chalao, Debug screen ka naya
+app-log ("Load + Share" jaisa) se confirm karo ki "CHUNKED (speed-fix)"
+attempts ab bhi "Source error" nahi de rahe.
+
+ (2026-09-17) — Batch 29 ke 2 fixes properly redo (user ne reject kiya)
 
 User ne Batch 29 ke 2 changes pe feedback diya ki wo galat approach the:
 

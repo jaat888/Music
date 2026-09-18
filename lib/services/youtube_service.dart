@@ -1675,6 +1675,40 @@ class YoutubeService {
     String? title,
     String? author,
   }) async {
+    final stream = await getAudioUrlAndFormat(
+      videoId,
+      onProgress: onProgress,
+      title: title,
+      author: author,
+    );
+    return stream?.url;
+  }
+
+  // BUG FIX (2026-09-18 — real-device log se confirm kiya, dekho
+  // chunked_audio_source.dart ka top comment): `getAudioUrl()` sirf URL
+  // string return karta tha, `_AudioStream.format` ("webm" ya "mp4")
+  // yahin discard ho jaata tha. Non-chunked `player.setUrl()` path ke liye
+  // ye theek tha (ExoPlayer khud ba khud content-sniffing kar leta hai jab
+  // MIME type nahi diya jaata) — lekin CHUNKED path (`ChunkedYoutubeAudioSource`)
+  // ko HAR HTTP Range-response me `Content-Type` header nahi milta (kai
+  // baar googlevideo partial/206 response pe ye header hi nahi bhejta),
+  // aur us case me code hardcoded `audio/mp4` fallback use kar leta tha —
+  // jabki asli stream WEBM hota (jo ki iss app me RESOLVE hone wala format
+  // hi hamesha hota hai, log confirm karta hai) — ExoPlayer ko galat MIME
+  // type do to wo seedha (galat) extractor force kar deta hai, jo WEBM
+  // bytes ko MP4 box-structure maan ke parse karne ki koshish karta hai
+  // aur turant fail ho jaata hai ("Source error", exactly jo log me
+  // CHUNKED attempts ke saath 100% consistently dikha, non-chunked attempts
+  // kabhi is tarah fail nahi hue). Fix: format bhi saath me return karo,
+  // taaki caller (background_service.dart) ise `ChunkedYoutubeAudioSource`
+  // tak explicitly pass kar sake — asli extraction-time-known format ko
+  // "last resort" guess ke bajaye source-of-truth banaya gaya hai.
+  Future<({String url, String format})?> getAudioUrlAndFormat(
+    String videoId, {
+    void Function(String status)? onProgress,
+    String? title,
+    String? author,
+  }) async {
     final stream = await _resolveAudioStream(
       videoId,
       onProgress: onProgress,
@@ -1693,11 +1727,11 @@ class YoutubeService {
     if (stream == null) {
       print('YT PLAY FAIL: $videoId ($title) — koi bhi source (NewPipe/'
           'explode/Piped) audio stream nahi de paaya.');
-    } else {
-      print('YT PLAY OK: $videoId ($title) — stream mil gaya '
-          '(${stream.format}).');
+      return null;
     }
-    return stream?.url;
+    print('YT PLAY OK: $videoId ($title) — stream mil gaya '
+        '(${stream.format}).');
+    return (url: stream.url, format: stream.format);
   }
 
   // Preload/skipToNext ke liye — url ke saath player-ready headers bhi.

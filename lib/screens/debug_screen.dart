@@ -20,7 +20,7 @@ import '../db/app_database.dart';
 // bheja gaya hai, to confirm ho jaata hai ki NAYA code hi build/run ho
 // raha hai. Agar purana marker dikhe (ya ye poori section hi missing ho),
 // to matlab build abhi bhi purane source se ban raha hai.
-const String kBuildMarker = 'NEWPIPE-NATIVE-2026-09-16-v12';
+const String kBuildMarker = 'NEWPIPE-NATIVE-2026-09-16-v16';
 
 class DebugScreen extends StatefulWidget {
   const DebugScreen({super.key});

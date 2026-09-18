@@ -70,17 +70,67 @@
 // CHUNK ki response se hi nikalte hain (jo `Content-Range: .../TOTAL`
 // header waise bhi bhejta hai) — koi extra request nahi, sirf jo
 // already ho rahi thi usi se info nikaal lete hain.
+// ===================== ATTEMPT #4 (current) — wrong-MIME-type bug fix
+// (2026-09-18, real-device log confirm) =====================
+// User ne fresh app log bheja: HAR "CHUNKED (speed-fix)" attempt turant
+// (~100-300ms mein hi) "Source error" deta tha, jabki wahi gaana turant
+// baad non-chunked `setUrl()` se (retry pe) sahi chal jaata tha — sirf
+// chunked path 100% consistently fail ho raha tha, random nahi.
+//
+// ROOT CAUSE: neeche `contentType` field ke liye teen priorities the:
+//   1. Is response ka `content-type` header
+//   2. `_contentType` (pehli successful response se yaad rakha hua)
+//   3. Hardcoded fallback: `'audio/mp4'`
+// Google ka CDN (googlevideo) HTTP Range (206 partial) response pe
+// `Content-Type` header hamesha NAHI bhejta (bahut se CDNs sirf pehle
+// poore-200-response pe hi ye header dete hain) — is app me resolve hone
+// wala format LAGBHAG HAMESHA "webm" hota hai (log confirm karta hai),
+// isliye jab header missing hota, code chup-chaap `audio/mp4` bol deta
+// tha. `just_audio`/ExoPlayer explicit MIME-type diye jaane par
+// content-sniffing SKIP kar deta hai aur SEEDHA usi type ka extractor
+// (Mp4Extractor) use karta hai — WEBM/EBML bytes ko MP4 box-structure
+// samajh ke parse karne ki koshish turant fail ho jaati hai. Yahi
+// "Source error" tha, HAR baar, kyunki fallback hamesha galat hota tha.
+// (Non-chunked `setUrl()` isse isliye bachta hai kyunki ExoPlayer ko wahan
+// koi forced MIME nahi diya jaata — wo khud extractor-sniffing kar leta
+// hai.)
+//
+// FIX: caller (background_service.dart) ab resolve-time-known asli format
+// ("webm"/"mp4"/"m4a" — youtube_service.dart ki `_AudioStream.format` se)
+// explicitly pass karta hai — ise PRIMARY source-of-truth banaya gaya hai,
+// HTTP header/hardcoded-guess ab sirf tab use hote hain jab caller format
+// hi na de (backward-compat safety net).
 import 'dart:async';
 
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 
 class ChunkedYoutubeAudioSource extends StreamAudioSource {
-  ChunkedYoutubeAudioSource(this.url, {this.headers, super.tag});
+  ChunkedYoutubeAudioSource(this.url, {this.headers, this.expectedFormat, super.tag});
 
   final String url;
   final Map<String, String>? headers;
+  // youtube_service.dart se resolve-time-known asli format ("webm"/"mp4"/
+  // "m4a") — dekho upar wala "ATTEMPT #4" comment. Iske bina (null) purana
+  // header-sniff-ya-guess wala fallback chalta hai.
+  final String? expectedFormat;
   final http.Client _client = http.Client();
+
+  // Extension/format string ko ek definitive MIME type me convert karta
+  // hai jo ExoPlayer ka extractor selection force kar sake. Anjaan/unknown
+  // format ke liye null — us case me caller header/guess pe fallback
+  // karega, kabhi galat MIME force nahi karta.
+  static String? _mimeForFormat(String? format) {
+    switch (format?.toLowerCase()) {
+      case 'webm':
+        return 'audio/webm';
+      case 'mp4':
+      case 'm4a':
+        return 'audio/mp4';
+      default:
+        return null;
+    }
+  }
 
   // Pehla chunk CHHOTA rakha hai — 512KB, 128kbps audio ka ~32 second —
   // taaki slow network pe bhi playback jaldi shuru ho jaaye. Baad ke
@@ -181,7 +231,20 @@ class ChunkedYoutubeAudioSource extends StreamAudioSource {
       contentLength: servedLength,
       offset: rangeStart,
       stream: res.stream,
-      contentType: res.headers['content-type'] ?? _contentType ?? 'audio/mp4',
+      // *** ASLI FIX (ATTEMPT #4): `expectedFormat` (caller-supplied,
+      // resolve-time-known asli format) hamesha PEHLE try karo — response
+      // header/hardcoded-guess sirf tab jab caller ne format hi na diya
+      // ho. Pehle yahan seedha
+      // `res.headers['content-type'] ?? _contentType ?? 'audio/mp4'` tha,
+      // jo Range-response me header missing hone par HAMESHA galat
+      // 'audio/mp4' bol deta tha (asli stream ~hamesha webm hota hai) —
+      // ExoPlayer ko galat MIME milne par wo galat extractor force karta
+      // hai aur turant fail hota hai. Ab caller-format ko sabse upar
+      // priority di gayi hai.
+      contentType: _mimeForFormat(expectedFormat) ??
+          res.headers['content-type'] ??
+          _contentType ??
+          'audio/mp4',
     );
   }
 }

@@ -10,6 +10,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
+import '../services/app_logger.dart';
 import '../services/background_service.dart';
 import '../services/like_service.dart';
 import '../services/lyrics_service.dart';
@@ -119,6 +120,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
 
   Future<void> _start() async {
     final generation = ++_sessionGeneration;
+    AppLogger.instance.log('[RADIO] _start() — session #$generation shuru.');
     await RadioHistoryStore.instance.init();
     _engine.clearFailed();
     _candidates.clear();
@@ -144,9 +146,11 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       var started = false;
       final last = await _loadLastRadioCandidate();
       if (last != null) {
+        AppLogger.instance.log('[RADIO] _start() — last session ka "${last.song.title}" resume try kar rahe hain.');
         _candidates.add(last);
         started = await _playCandidate(last, addToHistory: false);
         if (!started) {
+          AppLogger.instance.log('[RADIO] _start() — resume fail hua ("${last.song.title}"), fresh candidates dhoondenge.');
           _engine.markFailed(last.song.id);
           _candidates.removeWhere((c) => c.song.id == last.song.id);
         }
@@ -159,13 +163,16 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         for (var attempt = 0; attempt < 12 && !started; attempt++) {
           final candidate = _pickNext(excludeIds: const <String>{});
           if (candidate == null) break;
+          AppLogger.instance.log('[RADIO] _start() — attempt ${attempt + 1}/12: "${candidate.song.title}" try kar rahe hain.');
           started = await _playCandidate(candidate, addToHistory: true);
           if (!started) _engine.markFailed(candidate.song.id);
         }
       }
       if (!started) throw StateError('No playable radio candidate');
+      AppLogger.instance.log('[RADIO] _start() TASK COMPLETE — session #$generation shuru ho gaya.');
       unawaited(_fillUpcoming());
-    } catch (_) {
+    } catch (e) {
+      AppLogger.instance.log('[RADIO] _start() FAILED — koi bhi candidate play nahi ho paya: $e', level: 'ERROR');
       if (!mounted || generation != _sessionGeneration) return;
       setState(() {
         _loading = false;
@@ -335,6 +342,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   }
 
   Future<void> _onRadioPlaybackError(Song song) async {
+    AppLogger.instance.log('[RADIO] _onRadioPlaybackError("${song.title}") called — background_service se error mila.');
     if (!mounted || _current?.song.id != song.id) return;
     final token = _candidateGeneration;
     final candidate = _current!;
@@ -343,6 +351,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       token,
       autoAdvanceOnFailure: true,
     );
+    AppLogger.instance.log('[RADIO] _onRadioPlaybackError("${song.title}") — recovered=$recovered.');
     if (!recovered && mounted && _current?.song.id == song.id) {
       // _ensureRecovery owns the final failure state and has already skipped
       // the failed candidate when this callback is the background path.
@@ -371,19 +380,23 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
           if (!mounted ||
               token != _candidateGeneration ||
               _current?.song.id != candidate.song.id) {
+            AppLogger.instance.log('[RADIO] _ensureRecovery("${candidate.song.title}") — beech me hi cancel (naya candidate aa gaya ya screen band ho gayi).');
             break;
           }
+          AppLogger.instance.log('[RADIO] _ensureRecovery("${candidate.song.title}") — retry $retry/8 (playWithRetry() call kar rahe hain).');
           try {
             await audioHandler.playWithRetry(candidate.song);
           } catch (_) {}
           if (audioHandler.player.playing) {
             recovered = true;
+            AppLogger.instance.log('[RADIO] _ensureRecovery("${candidate.song.title}") TASK COMPLETE — retry $retry pe recover ho gaya.');
             if (mounted) setState(() => _loading = false);
             break;
           }
         }
 
         if (!recovered && mounted && _current?.song.id == candidate.song.id) {
+          AppLogger.instance.log('[RADIO] _ensureRecovery("${candidate.song.title}") FAILED — 8 retries ke baad bhi nahi bajaya, agle candidate pe jaa rahe hain.', level: 'ERROR');
           _engine.markFailed(candidate.song.id);
           _upcoming.removeWhere((item) => item.song.id == candidate.song.id);
           if (autoAdvanceOnFailure) {
@@ -514,6 +527,9 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   Future<void> _advance({required bool auto, String? failedSongId}) async {
     if (_current == null || _transitioning) return;
     _transitioning = true;
+    AppLogger.instance.log(
+      '[RADIO] _advance(auto=$auto, failedSongId=$failedSongId) called — current: "${_current!.song.title}"',
+    );
     try {
       final old = _current!;
       if (failedSongId == old.song.id) {
@@ -593,7 +609,11 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         }
 
         final ok = await _playCandidate(next, addToHistory: true);
-        if (ok) return;
+        if (ok) {
+          AppLogger.instance.log('[RADIO] _advance() TASK COMPLETE — "${next.song.title}" pe move hua (attempt ${attempt + 1}).');
+          return;
+        }
+        AppLogger.instance.log('[RADIO] _advance() — "${next.song.title}" play nahi hua, agla candidate try karenge (attempt ${attempt + 1}/12).');
         _engine.markFailed(next.song.id);
         _upcoming.removeWhere((item) => item.song.id == next!.song.id);
       }
@@ -602,6 +622,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       // tha, `_loading` (jo har failed `_playCandidate` call ke andar
       // `true` set hua tha) kabhi reset nahi hota — same "button ghumta
       // rehta hai" bug, is baar Next se trigger.
+      AppLogger.instance.log('[RADIO] _advance() FAILED — 12 attempts, koi candidate play nahi hua.', level: 'ERROR');
       if (mounted) {
         setState(() {
           _loading = false;
@@ -616,12 +637,17 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   Future<void> _previous() async {
     if (_playedStack.isEmpty || _transitioning) return;
     _transitioning = true;
+    final previous = _playedStack.last;
+    AppLogger.instance.log('[RADIO] _previous() called — jaa rahe hain: "${previous.song.title}"');
     try {
-      final previous = _playedStack.removeLast();
+      final previousCandidate = _playedStack.removeLast();
       final current = _current;
       if (current != null) _upcoming.insert(0, current);
-      if (!await _playCandidate(previous, addToHistory: false)) {
-        _engine.markFailed(previous.song.id);
+      if (!await _playCandidate(previousCandidate, addToHistory: false)) {
+        AppLogger.instance.log('[RADIO] _previous() FAILED — "${previousCandidate.song.title}" play nahi hua.', level: 'ERROR');
+        _engine.markFailed(previousCandidate.song.id);
+      } else {
+        AppLogger.instance.log('[RADIO] _previous() TASK COMPLETE — "${previousCandidate.song.title}" pe move hua.');
       }
     } finally {
       _transitioning = false;
@@ -629,6 +655,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   }
 
   Future<void> _togglePlay() async {
+    AppLogger.instance.log('[RADIO] _togglePlay() called — abhi playing=${audioHandler.player.playing}');
     if (audioHandler.player.playing) {
       await audioHandler.pause();
       if (mounted) setState(() => _paused = true);

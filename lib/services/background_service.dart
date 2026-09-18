@@ -18,6 +18,7 @@ import '../db/cache_db.dart';
 import '../db/download_db.dart';
 import '../db/play_history_db.dart';
 import '../models/song.dart';
+import 'app_logger.dart';
 import 'cache_service.dart';
 import 'chunked_audio_source.dart';
 import 'download_queue_service.dart';
@@ -235,7 +236,12 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // tha. Ab current gaana play hote hi agla gaana background me chup-
   // chaap resolve karke yahan cache ho jaata hai — skipToNext() aate hi
   // seedha ye URL use hota hai (instant), koi naya network call nahi.
-  final Map<String, String> _urlCache = {};
+  // BUG FIX (2026-09-18 — dekho youtube_service.dart getAudioUrlAndFormat()
+  // ka comment aur chunked_audio_source.dart ka "ATTEMPT #4" comment):
+  // pehle sirf URL string cache hoti thi, format discard ho jaata tha —
+  // isi wajah se chunked playback ko format pata hi nahi chalta tha aur
+  // wo galat MIME-type guess kar leta tha. Ab dono saath cache hote hain.
+  final Map<String, ({String url, String format})> _urlCache = {};
   final Set<String> _prefetchingIds = {};
 
   // FIX (user request, 2026-09-17): pehle sirf agle 2 gaane prefetch hote
@@ -263,11 +269,11 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
             await CacheDB.instance.getFilePath(next.id);
         if (already != null) return;
 
-        final url = await YoutubeService.instance
-            .getAudioUrl(next.id, title: next.title, author: next.artist);
-        if (url == null) return;
-        _urlCache[next.id] = url; // turant-skip ke liye fallback
-        await _autoCacheInBackground(next, url, markAsPlayed: false); // disk pe bhi utaar do
+        final resolved = await YoutubeService.instance
+            .getAudioUrlAndFormat(next.id, title: next.title, author: next.artist);
+        if (resolved == null) return;
+        _urlCache[next.id] = resolved; // turant-skip ke liye fallback
+        await _autoCacheInBackground(next, resolved.url, markAsPlayed: false); // disk pe bhi utaar do
       } catch (_) {
         // Prefetch fail hone se playback pe koi asar nahi — normal
         // resolve chain skip/play time pe apne aap fallback ban jaati hai.
@@ -630,8 +636,37 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
   // ---------------- State broadcast ----------------
 
+  // BUG FIX (user request, 2026-09-18 — "Notification kaise aa rahe the sab
+  // kuch log ho"): `_broadcastState` har playback event (position tick,
+  // buffering %, waghera) pe fire hota hai — HAR baar poora log likhna
+  // file ko seconds me hi flood kar deta (2MB cap turant hit ho jaata,
+  // asli useful log purana ho ke trim ho jaata). Isliye sirf TRANSITIONS
+  // (playing flip, ya processingState badle) log hote hain — wahi
+  // notification ka "kya dikh raha hai" actually badalta hai jab.
+  bool? _lastLoggedPlaying;
+  AudioProcessingState? _lastLoggedProcessingState;
+
   void _broadcastState(PlaybackEvent event) {
     final playing = player.playing;
+    final processingState = const {
+      ProcessingState.idle: AudioProcessingState.idle,
+      ProcessingState.loading: AudioProcessingState.loading,
+      ProcessingState.buffering: AudioProcessingState.buffering,
+      ProcessingState.ready: AudioProcessingState.ready,
+      ProcessingState.completed: AudioProcessingState.completed,
+    }[player.processingState]!;
+
+    if (playing != _lastLoggedPlaying ||
+        processingState != _lastLoggedProcessingState) {
+      AppLogger.instance.log(
+        '[NOTIF] state -> playing=$playing, processingState=$processingState, '
+        'controls=[prev, ${playing ? "pause" : "play"}, stop, next], '
+        'compactIndices=[0,1,3], position=${player.position.inMilliseconds}ms',
+      );
+      _lastLoggedPlaying = playing;
+      _lastLoggedProcessingState = processingState;
+    }
+
     playbackState.add(
       playbackState.value.copyWith(
         controls: [
@@ -646,13 +681,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           MediaAction.seekBackward,
         },
         androidCompactActionIndices: const [0, 1, 3],
-        processingState: const {
-          ProcessingState.idle: AudioProcessingState.idle,
-          ProcessingState.loading: AudioProcessingState.loading,
-          ProcessingState.buffering: AudioProcessingState.buffering,
-          ProcessingState.ready: AudioProcessingState.ready,
-          ProcessingState.completed: AudioProcessingState.completed,
-        }[player.processingState]!,
+        processingState: processingState,
         playing: playing,
         updatePosition: player.position,
         bufferedPosition: event.bufferedPosition,
@@ -663,36 +692,63 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   // ---------------- Base controls ----------------
+  //
+  // BUG FIX (user request, 2026-09-18 — "detailed log chahiye, kaunsa button
+  // dabaya kab, kya response mila, notification kaise aa rahi thi"):
+  // in sab methods (play/pause/seek/stop/skipToNext/skipToPrevious/
+  // setShuffleMode/setRepeatMode) ko audio_service BOTH full-player/mini-
+  // player ke UI buttons SE, AUR notification/lock-screen ke media
+  // controls SE — dono jagah se seedha call karta hai (ek hi shared
+  // handler, source jo bhi ho). Isliye yahan ek jagah "[CTL] <action>
+  // called — before: ... / after: ..." jaisa log lagane se "us waqt kaunsa
+  // button, kaisa response de raha tha" (UI ho ya notification, dono)
+  // automatically cover ho jaata hai — har button ke liye alag se instrument
+  // karne ki zaroorat nahi.
+  void _logCtl(String action, [String? extra]) {
+    AppLogger.instance.log(
+      '[CTL] $action'
+      '${extra != null ? " ($extra)" : ""}'
+      ' — playing=${player.playing}, processingState=${player.processingState}, '
+      'phase=${phase.value}, radioOwned=$_radioPlaybackOwned',
+    );
+  }
 
   @override
   Future<void> play() {
+    _logCtl('play() called');
     // BUG FIX (2026-09-18, v59): resume ke saath hi "user paused" flag
     // saaf karo — is se agla genuine stream drop (agar aaye) fir se normal
     // tarike se retry/recover hoga.
     _userPaused = false;
     if (phase.value == PlaybackPhase.paused) phase.value = PlaybackPhase.playing;
-    return player.play();
+    return player.play().then((_) => _logCtl('play() DONE'));
   }
 
   @override
   Future<void> pause() {
+    _logCtl('pause() called');
     // BUG FIX (2026-09-18, v59): full-screen ka pause button ho ya
     // notification/lock-screen ka — dono isi handler se guzarte hain, is
     // liye ek hi jagah flag set karne se dono cases cover ho jaate hain.
     _userPaused = true;
     if (phase.value == PlaybackPhase.playing) phase.value = PlaybackPhase.paused;
-    return player.pause();
+    return player.pause().then((_) => _logCtl('pause() DONE'));
   }
 
   @override
-  Future<void> seek(Duration position) => player.seek(position);
+  Future<void> seek(Duration position) {
+    _logCtl('seek() called', 'to ${position.inMilliseconds}ms');
+    return player.seek(position);
+  }
 
   @override
   Future<void> stop() async {
+    _logCtl('stop() called');
     _playToken++; // koi bhi pending stale resolve ab kuch overwrite nahi karega
     _skipDebounce?.cancel();
     await player.stop();
     await super.stop();
+    _logCtl('stop() DONE');
   }
 
   // BUG FIX (2026-09-16, v16, EXTENDED v20): "bahut baar tap karo (next ho
@@ -739,6 +795,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     Future<void> Function()? onPrevious,
     Future<void> Function(Song song)? onError,
   }) {
+    AppLogger.instance.log(
+      '[RADIO] setRadioPlaybackOwned($owned) — Radio mode ${owned ? "ON (ab Radio screen playback control karega)" : "OFF (wapas normal Queue control me)"}',
+    );
     _radioPlaybackOwned = owned;
     _radioNextHandler = owned ? onNext : null;
     _radioPreviousHandler = owned ? onPrevious : null;
@@ -750,7 +809,12 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   /// validated cache path as normal playback.
   // BUG FIX (v56): 2 → 5 — dekho radio_player_screen.dart ka comment.
   Future<void> prefetchRadioSongs(Iterable<Song> songs) async {
-    for (final song in songs.take(5)) {
+    final list = songs.take(5).toList();
+    AppLogger.instance.log(
+      '[RADIO] prefetchRadioSongs() called — ${list.length} candidates: '
+      '${list.map((s) => s.title).join(", ")}',
+    );
+    for (final song in list) {
       _prefetchRadioOne(song);
     }
   }
@@ -765,14 +829,14 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         final already = await DownloadDB.instance.getFilePath(song.id) ??
             await CacheDB.instance.getFilePath(song.id);
         if (already != null) return;
-        final url = await YoutubeService.instance
-            .getAudioUrl(song.id, title: song.title, author: song.artist)
+        final resolved = await YoutubeService.instance
+            .getAudioUrlAndFormat(song.id, title: song.title, author: song.artist)
             .timeout(const Duration(seconds: 20));
-        if (url == null) return;
-        _urlCache[song.id] = url;
+        if (resolved == null) return;
+        _urlCache[song.id] = resolved;
         // Keep the in-flight marker until the cache write completes so a
         // second Radio preload cannot start a duplicate download.
-        await _autoCacheInBackground(song, url, markAsPlayed: false);
+        await _autoCacheInBackground(song, resolved.url, markAsPlayed: false);
       } catch (_) {
         // Radio preload is best-effort and must never affect playback.
       } finally {
@@ -794,7 +858,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> skipToNext() async {
+    _logCtl('skipToNext() called');
     if (_radioPlaybackOwned && _radioNextHandler != null) {
+      AppLogger.instance.log('[RADIO] skipToNext() — Radio-owned, delegating to Radio next handler.');
       await _radioNextHandler!();
       return;
     }
@@ -816,6 +882,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         q.repeat == SurRepeatMode.off && q.currentIndex == q.queue.length - 1;
     q.next();
     if (wasLastWithNoRepeat) {
+      AppLogger.instance.log('[CTL] skipToNext() — queue ka aakhri gaana tha, repeat OFF — stop() kiya, replay nahi.');
       await stop();
       return;
     }
@@ -824,7 +891,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> skipToPrevious() async {
+    _logCtl('skipToPrevious() called');
     if (_radioPlaybackOwned && _radioPreviousHandler != null) {
+      AppLogger.instance.log('[RADIO] skipToPrevious() — Radio-owned, delegating to Radio previous handler.');
       await _radioPreviousHandler!();
       return;
     }
@@ -834,6 +903,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> setShuffleMode(AudioServiceShuffleMode shuffleMode) async {
+    _logCtl('setShuffleMode() called', '$shuffleMode');
     final on = shuffleMode != AudioServiceShuffleMode.none;
     QueueService.instance.setShuffle(on);
     playbackState.add(playbackState.value.copyWith(shuffleMode: shuffleMode));
@@ -841,6 +911,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> setRepeatMode(AudioServiceRepeatMode repeatMode) async {
+    _logCtl('setRepeatMode() called', '$repeatMode');
     switch (repeatMode) {
       case AudioServiceRepeatMode.none:
         QueueService.instance.setRepeat(SurRepeatMode.off);
@@ -859,11 +930,12 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // ---------------- Custom playback methods ----------------
 
   // Streaming URL se seedha play karo (YouTube stream)
-  Future<void> playSong(Song song, String url) {
+  Future<void> playSong(Song song, String url, {String? format}) {
     _activePlaybackSong = song;
     // BUG FIX (2026-09-18, v59): dekho playWithRetry() ka same comment.
     _userPaused = false;
-    return _playSong(song, url, ++_playToken, useHeaders: false, useChunking: true);
+    return _playSong(song, url, ++_playToken,
+        useHeaders: false, useChunking: true, format: format);
   }
 
   // BUG FIX (2026-09-17, Attempt #5 RESULT — real-device log confirm
@@ -890,6 +962,11 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // pehle (v61) tha (bas ek extra retry lagega), best case gaana fast
     // load hoga bina kisi retry ke.
     bool useChunking = false,
+    // BUG FIX (2026-09-18): dekho chunked_audio_source.dart "ATTEMPT #4" —
+    // resolve-time-known asli format ("webm"/"mp4"/"m4a"), chunked path ko
+    // sahi MIME-type force karne ke liye chahiye. `useChunking: false` ke
+    // liye irrelevant (setUrl khud sniff karta hai).
+    String? format,
   }) async {
     if (token != _playToken) return; // ek naya request already aa chuka hai
     mediaItem.add(_toMediaItem(song));
@@ -907,6 +984,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           ChunkedYoutubeAudioSource(
             url,
             headers: useHeaders ? YoutubeService.cdnHeaders : null,
+            expectedFormat: format,
           ),
         );
       } else {
@@ -1175,7 +1253,14 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // resolve nahi, isliye "next" ab bhi instant hai.
     final cached = _urlCache.remove(song.id);
     if (cached != null) {
-      await _playSong(song, cached, token, useHeaders: false, useChunking: true);
+      await _playSong(
+        song,
+        cached.url,
+        token,
+        useHeaders: false,
+        useChunking: true,
+        format: cached.format,
+      );
       return;
     }
 
@@ -1204,17 +1289,27 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       // tha. Ab title/author bhi pass karte hain taaki asli app me bhi
       // wahi self-heal chale jo Termux test me pass hota tha.
       String? url;
+      String? format;
       try {
-        url = await YoutubeService.instance
-            .getAudioUrl(song.id, title: song.title, author: song.artist)
+        final resolved = await YoutubeService.instance
+            .getAudioUrlAndFormat(song.id, title: song.title, author: song.artist)
             .timeout(const Duration(seconds: 60));
+        url = resolved?.url;
+        format = resolved?.format;
       } on TimeoutException {
         print('playWithRetry: attempt $attempt timed out after 60s');
         url = null;
       }
       if (token != _playToken) return; // resolve hone tak user aage badh chuka
       if (url != null) {
-        await _playSong(song, url, token, useHeaders: false, useChunking: true);
+        await _playSong(
+          song,
+          url,
+          token,
+          useHeaders: false,
+          useChunking: true,
+          format: format,
+        );
         return;
       }
       if (attempt < 3) {
@@ -1234,20 +1329,42 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   // Local file se play karo — downloaded ya already-cached songs ke liye
+  //
+  // BUG FIX (user screenshot, 2026-09-18 — "White Brown Black bajta hai
+  // [pause icon = actually playing], lekin upar 'Buffering...' atka hua
+  // dikhata hai, saath me ek DUSRE gaane ka purana error bhi neeche dikh
+  // raha hai"): ye function pehle kabhi `phase` (custom ValueNotifier jo
+  // subtitle text drive karta hai — dekho full_player_screen.dart) ko
+  // `PlaybackPhase.playing` set hi nahi karta tha — sirf `player.play()`
+  // call hota tha. `player.play()` khud `playbackState`
+  // (`_broadcastState()` ke through) ko turant update kar deta hai, isliye
+  // PLAY/PAUSE ICON turant sahi dikhta hai — lekin subtitle text (`phase`)
+  // jo bhi PICHLI value pe tha (jaise koi pehle wala gaana stream-resolve
+  // karte waqt "Buffering..."/"Error" pe atka tha) wahi hamesha ke liye
+  // reh jaata tha, kyunki isko RESET karne wala koi call hi missing tha.
+  // Isi wajah se "downloaded gaana tap karo (jo playFromFile() use karta
+  // hai) turant baja bhi de, phir bhi text purani stuck state dikhata
+  // rahe" — exactly jaisa screenshot me dikha. Fix: doosri saari
+  // play-methods (`_playSong`, `_resolveAndPlay` ka local-path) ki tarah
+  // yahan bhi explicit `_setPhase()` calls add kiye — start pe buffering,
+  // success pe playing, fail pe error — taaki `phase` kabhi stale na rahe.
   Future<void> playFromFile(Song song, String filePath) async {
     final token = ++_playToken;
     _activePlaybackSong = song;
     // BUG FIX (2026-09-18, v59): dekho playWithRetry() ka same comment.
     _userPaused = false;
     mediaItem.add(_toMediaItem(song.copyWith(filePath: filePath)));
+    _setPhase(token, PlaybackPhase.buffering, 'Buffering...');
     try {
       await player.setFilePath(filePath);
       if (token != _playToken) return; // dauraan koi naya tap aa gaya
       await player.play();
+      _setPhase(token, PlaybackPhase.playing);
       // Part 3 (Library smarts): playFromFile bhi ek "real" play hai.
       unawaited(PlayHistoryDB.instance.recordPlay(song));
     } catch (e) {
       if (token != _playToken) return;
+      _setPhase(token, PlaybackPhase.error, 'File corrupt/missing');
       playbackState.add(
         playbackState.value.copyWith(
           processingState: AudioProcessingState.error,
@@ -1285,6 +1402,19 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> retryCurrent() => _playCurrentFromQueue();
 
   MediaItem _toMediaItem(Song song, {String? statusOverride}) {
+    // BUG FIX (user request, 2026-09-18 — "agle gaane ki photo kitna/kaise
+    // load hui, minimum se minimum detail bhi chahiye"): audio_service ka
+    // asli artwork-download (`preloadArtwork: true`) native side pe hota
+    // hai, Dart se uska progress track nahi ho sakta — isliye yahan sirf
+    // itna minimum-detail log kiya hai ki HAR naye mediaItem ke liye
+    // artUri kya tha (khaali/missing thumb bhi turant pata chal jaaye,
+    // "photo load nahi hui" jaisi shikayat debug karne ke liye).
+    if (statusOverride == null) {
+      AppLogger.instance.log(
+        '[ART] mediaItem: "${song.title}" — thumb: '
+        '${song.thumb.isNotEmpty ? song.thumb : "(khaali/missing)"}',
+      );
+    }
     return MediaItem(
       id: song.id,
       title: song.title,

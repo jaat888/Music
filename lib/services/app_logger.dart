@@ -109,9 +109,24 @@ class AppLogger {
   /// `print()`/`debugPrint()` calls automatically yahan pahunchte hain
   /// (dekho main.dart ka ZoneSpecification.print override) — unhe badalne
   /// ki zaroorat nahi.
+  //
+  // BUG FIX (user request, 2026-09-18 — "time nahi dikha raha, milli-sec
+  // ka difference dikhao"): sirf absolute ISO timestamp se do lines ke
+  // beech kitna time laga ye samajhna mushkil tha (dimaag me subtract
+  // karna padta tha). Ab har line ke saath, PICHLI line se kitne
+  // milliseconds beete, wo bhi `(+123ms)` jaisa saath me likha jaata hai —
+  // taaki "ye do steps ke beech itna gap kyun hai" turant dikhe, bina
+  // do timestamps manually ghata ke.
+  DateTime? _lastLogTime;
+
   void log(String message, {String level = 'INFO'}) {
-    final ts = DateTime.now().toIso8601String();
-    final line = '[$ts][$level] $message';
+    final now = DateTime.now();
+    final last = _lastLogTime;
+    final deltaMs = last != null ? now.difference(last).inMilliseconds : 0;
+    _lastLogTime = now;
+    final ts = now.toIso8601String();
+    final deltaStr = last == null ? '(+0ms)' : '(+${deltaMs}ms)';
+    final line = '[$ts]$deltaStr[$level] $message';
 
     _memoryBuffer.add(line);
     if (_memoryBuffer.length > _memoryBufferCap) {
