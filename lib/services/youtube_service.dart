@@ -1589,41 +1589,52 @@ class YoutubeService {
       return null;
     }
     var resolvedId = videoId;
-    try {
-      final yt = await _getYt();
-      resolvedId = await _resolvePlayableVideoId(
-        yt,
-        videoId,
-        title,
-        author,
-        onProgress: onProgress,
-      );
-    } catch (e) {
-      print('YT id-check: skip kiya, error: $e');
-    }
-    // ORDER CHANGE (2026-09-16, Batch 22 — Option C, native plugin): Batch
-    // 21 me order jaanbujhke `_audioViaExplode()` PEHLE kiya gaya tha, aur
-    // NewPipeExtractor (us waqt WebView-based `newpipeextractor_dart`) sirf
-    // fallback tha — kyunki us WebView layer ka ek single (non-overlapping)
-    // call bhi kuch specific videos pe native process-level crash kar sakta
-    // tha (Dart try/catch se na pakड़ me aane wala), isliye jitna kam usse
-    // guzarein utna accha tha.
-    // Ab (upar `_audioViaNewPipe()` dekho) wo WebView layer hi hata di gayi
-    // hai — native Kotlin plugin NewPipeExtractor ko DIRECTLY (Mozilla
-    // Rhino, pure JVM, koi Android View nahi) use karta hai, isliye wo
-    // crash-class ab exist hi nahi karti. Chunki NewPipeExtractor pehle se
-    // hi document tha ki explode se BEHTAR bypass-rate deta hai (dekho
-    // file-header comment) — ab jab crash-risk khatam ho chuka hai, order
-    // wapas NewPipeExtractor-first kar diya gaya hai taaki us behtar
-    // bypass-rate ka fayda mile. `_audioViaExplode()` (pure Dart) ab
-    // fallback hai — agar native NewPipeExtractor kisi wajah se fail ho.
-    final viaNewPipe =
+    // SPEED FIX (2026-09-18): pehle yahan HAR play ke shuru me
+    // `_resolvePlayableVideoId()` unconditionally chalta tha — matlab ek
+    // poora extra network round-trip (`yt.videos.get()`) sirf ID valid hai
+    // ya nahi ye check karne ke liye, chahe 99% waqt ID pehle se hi sahi ho
+    // (bug sirf dart_ytmusic_api ke kuch corrupt results tak limited hai).
+    // Isi wajah se har gaana load hone me eksaath ek extra RTT lagta tha —
+    // "speed slow" complaint ka sabse bada single contributor. Ab original
+    // ID se SEEDHA NewPipe/explode try karte hain (agar ID galat hoga, ye
+    // layers khud bhi fail honge — utna hi fast jitna valid ID pe hota).
+    // ID-repair (extra network call) AB SIRF tab hota hai jab dono asli
+    // layers original ID se fail ho chuke hon — matlab sirf us rare/buggy
+    // case me hi extra latency lagti hai, common/happy path bilkul free hai.
+    final viaNewPipeOrig =
         await _audioViaNewPipe(resolvedId, onProgress: onProgress, quality: q);
-    if (viaNewPipe != null) return viaNewPipe;
+    if (viaNewPipeOrig != null) return viaNewPipeOrig;
 
-    final viaExplode =
+    final viaExplodeOrig =
         await _audioViaExplode(resolvedId, onProgress: onProgress, quality: q);
-    if (viaExplode != null) return viaExplode;
+    if (viaExplodeOrig != null) return viaExplodeOrig;
+
+    // Dono original-ID se fail — ab check karo kahin ID hi corrupt to nahi
+    // thi (YT Music search bug); agar haan, corrected ID se EK retry.
+    if (title != null && title.isNotEmpty) {
+      try {
+        final yt = await _getYt();
+        final healedId = await _resolvePlayableVideoId(
+          yt,
+          videoId,
+          title,
+          author,
+          onProgress: onProgress,
+        );
+        if (healedId != resolvedId) {
+          resolvedId = healedId;
+          onProgress?.call('Original ID fail hua, corrected ID se retry...');
+          final retryNewPipe = await _audioViaNewPipe(resolvedId,
+              onProgress: onProgress, quality: q);
+          if (retryNewPipe != null) return retryNewPipe;
+          final retryExplode = await _audioViaExplode(resolvedId,
+              onProgress: onProgress, quality: q);
+          if (retryExplode != null) return retryExplode;
+        }
+      } catch (e) {
+        print('YT id-check (post-fail retry): skip kiya, error: $e');
+      }
+    }
 
     return _audioViaPipedBackup(resolvedId, onProgress: onProgress, quality: q);
   }

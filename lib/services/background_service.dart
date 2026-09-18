@@ -18,6 +18,7 @@ import '../db/download_db.dart';
 import '../db/play_history_db.dart';
 import '../models/song.dart';
 import 'cache_service.dart';
+import 'chunked_audio_source.dart';
 import 'download_queue_service.dart';
 import 'equalizer_presets.dart';
 import 'like_service.dart';
@@ -801,9 +802,19 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       print(
         'YT PLAY ATTEMPT: "${song.title}" — headers: ${useHeaders ? "WITH cdnHeaders (desktop UA)" : "WITHOUT headers (raw URL, native-client jaisa)"}',
       );
-      await player.setUrl(
-        url,
-        headers: useHeaders ? YoutubeService.cdnHeaders : null,
+      // SPEED FIX (2026-09-18): pehle `player.setUrl(url)` seedha use hota
+      // tha — ExoPlayer isse ek single continuous connection banata hai,
+      // jise YouTube ka CDN throttle kar deta hai (roughly realtime
+      // playback speed tak) — isi wajah se "ek-ek chunk jaisa slow load"
+      // hota tha. Ab `ChunkedYoutubeAudioSource` bade (10MB) discrete
+      // HTTP Range chunks me maangta hai (yt-dlp/NewPipe jaisa hi
+      // tarika) — CDN har naye range-request ko full network speed pe
+      // serve karta hai.
+      await player.setAudioSource(
+        ChunkedYoutubeAudioSource(
+          url,
+          headers: useHeaders ? YoutubeService.cdnHeaders : null,
+        ),
       );
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       await player.play();
