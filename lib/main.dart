@@ -79,8 +79,19 @@ void main() {
       try {
         await initAudioHandler();
         audioHandler.onError = (message) {
+          // BUG FIX (2026-09-18 — user report: "error wala message action-
+          // buttons (Like/Download/Radio/...) ke bilkul chipak ke aata
+          // hai, ganda lagta hai"): pehle ye default (fixed, full-width,
+          // screen ke bilkul bottom se chipka) SnackBar tha — full player
+          // screen pe wo action-row ke bilkul upar/uske saath overlap-jaisa
+          // dikhta tha. Ab floating + margin, taaki hamesha thoda gap ho.
           scaffoldMessengerKey.currentState?.showSnackBar(
-            SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
+            SnackBar(
+              content: Text(message),
+              duration: const Duration(seconds: 4),
+              behavior: SnackBarBehavior.floating,
+              margin: const EdgeInsets.only(left: 16, right: 16, bottom: 96),
+            ),
           );
         };
         // PART 2 (Sleep timer): "song khatam hone tak" mode fire hone par
@@ -102,23 +113,15 @@ void main() {
       // gap ke) sahi theme choose kar sake (dekho theme_service.dart).
       await ThemeService.instance.init();
 
-      // BUG FIX (v37 — download progress/completion kahin dikhta nahi tha):
-      // global fallback listener — jab bhi koi download poora ho (chahe
-      // kisi bhi screen se enqueue hua ho), ek SnackBar dikha do. Individual
-      // screens apna alag listener add kar sakte hain (list-based hai,
-      // isliye ek-doosre ko overwrite nahi karte — dekho
-      // download_queue_service.dart).
-      DownloadQueueService.instance.addFinishListener((song, success) {
-        scaffoldMessengerKey.currentState?.showSnackBar(
-          SnackBar(
-            content: Text(
-              success
-                  ? '"${song.title}" download ho gaya'
-                  : '"${song.title}" download fail ho gaya',
-            ),
-          ),
-        );
-      });
+      // REMOVED (2026-09-18 — user report: "notification baar-baar neeche
+      // se aati rehti hai, bekar hai"): pehle yahan ek GLOBAL listener tha
+      // jo HAR single song ke download complete hone par ek SnackBar
+      // dikhata tha — bulk queue (jaise "Downloads" screen se 5-10 gaane
+      // ek saath download) me ye har gaane ke liye alag-alag baar-baar
+      // popup hota rehta tha, aur Downloads screen already har gaane ka
+      // progress/status inline dikhati hai, isliye ye pura redundant/
+      // annoying tha. Ab silently hata diya — koi functionality nahi
+      // ghati, sirf ye spam-y global toast hataya hai.
     } catch (e, st) {
       _startupError = 'Startup failed: $e';
       AppLogger.instance.logError('Startup failed', e, st);

@@ -13,6 +13,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
 import '../models/song.dart';
+import '../services/app_logger.dart';
 import '../services/background_service.dart';
 import '../services/lyrics_service.dart';
 
@@ -55,6 +56,16 @@ class _LyricsScreenState extends State<LyricsScreen> {
       durationSeconds: song.duration,
     );
     if (!mounted) return;
+    // NEW (2026-09-18 — user report: "subtitle ka sab log nahi aata"):
+    // ab load ka result (synced / plain / kuch nahi) explicitly log hota
+    // hai, taaki agar lyrics-related dikkat ho to log se pata chal sake ki
+    // kya mila tha.
+    final kind = (result.synced?.isNotEmpty ?? false)
+        ? 'synced (${result.synced!.length} lines)'
+        : ((result.plain?.trim().isNotEmpty ?? false) ? 'plain-only' : 'none');
+    AppLogger.instance.log(
+      '[LYRICS] loaded for "${song.title}" (${song.id}) — result: $kind',
+    );
     setState(() {
       _result = result;
       _loading = false;
@@ -73,9 +84,23 @@ class _LyricsScreenState extends State<LyricsScreen> {
     return idx;
   }
 
-  void _maybeAutoScroll(int index) {
-    if (index == _lastActiveIndex || !_scrollController.hasClients) return;
+  void _maybeAutoScroll(int index, Duration position, List<LyricLine> lines) {
+    if (index == _lastActiveIndex) return;
     _lastActiveIndex = index;
+    // NEW (2026-09-18 — user report: "subtitle screen pe kab aaya, gaane
+    // ke beech mein ya baad mein, exact time ke saath log ho"): har line-
+    // change ko uske exact playback position (mm:ss.mmm) ke saath log
+    // karte hain — chahe scroll na bhi ho (index -1 ya no clients).
+    if (index >= 0 && index < lines.length) {
+      final pos = position;
+      final mm = pos.inMinutes.remainder(60).toString().padLeft(2, '0');
+      final ss = pos.inSeconds.remainder(60).toString().padLeft(2, '0');
+      final ms = pos.inMilliseconds.remainder(1000).toString().padLeft(3, '0');
+      AppLogger.instance.log(
+        '[LYRICS] line #$index active at $mm:$ss.$ms — "${lines[index].text}"',
+      );
+    }
+    if (!_scrollController.hasClients) return;
     final target = (index * _lineHeight) -
         (_scrollController.position.viewportDimension / 2) +
         (_lineHeight / 2);
@@ -102,7 +127,7 @@ class _LyricsScreenState extends State<LyricsScreen> {
         final pos = snap.data ?? Duration.zero;
         final activeIndex = _activeIndexFor(pos, lines);
         WidgetsBinding.instance
-            .addPostFrameCallback((_) => _maybeAutoScroll(activeIndex));
+            .addPostFrameCallback((_) => _maybeAutoScroll(activeIndex, pos, lines));
         return ListView.builder(
           controller: _scrollController,
           padding: EdgeInsets.symmetric(
@@ -112,17 +137,32 @@ class _LyricsScreenState extends State<LyricsScreen> {
           itemCount: lines.length,
           itemBuilder: (context, i) {
             final isActive = i == activeIndex;
+            // BUG FIX (2026-09-18 — user report: "bahut badi subtitle hain,
+            // unko bhi thik karo"): pehle yahan ek FIXED height (52) wale
+            // Container me plain Text tha, bina maxLines/overflow ke — ek
+            // genuinely lambi lyric line yahan overflow karke agli/pichli
+            // line ke upar clip/overlap ho jaati thi. FittedBox(scaleDown)
+            // + maxLines:2 guarantee karta hai ki chahe line kitni bhi badi
+            // ho, wo hamesha apne fixed box ke andar hi fit hoga (font
+            // thoda chhota ho jayega, kabhi overflow/clip nahi hoga) — scroll
+            // math (_lineHeight based) bhi isi wajah se bilkul waisa hi
+            // rehta hai, kuch aur nahi badla.
             return Container(
               height: _lineHeight,
               alignment: Alignment.center,
-              child: Text(
-                lines[i].text,
-                textAlign: TextAlign.center,
-                style: AppText.bodyL(
-                  color: isActive ? kGreen : kTextDim,
-                ).copyWith(
-                  fontSize: isActive ? 20 : 16,
-                  fontWeight: isActive ? FontWeight.w700 : FontWeight.w400,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  lines[i].text,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppText.bodyL(
+                    color: isActive ? kGreen : kTextDim,
+                  ).copyWith(
+                    fontSize: isActive ? 20 : 16,
+                    fontWeight: isActive ? FontWeight.w700 : FontWeight.w400,
+                  ),
                 ),
               ),
             );

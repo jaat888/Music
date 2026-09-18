@@ -576,6 +576,19 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           playing: false,
         ),
       );
+      // BUG FIX (2026-09-18 — user report: "buffer beech mein hi stuck ho
+      // jaata hai, update nahi hota"): ROOT CAUSE mila — ye poora
+      // stream-drop retry path sirf `playbackState` (notification/OS-facing)
+      // update karta tha, `phase`/`phaseMessage` (jo full player/Radio
+      // screen ka "Buffering.../Resolving..." subtitle text drive karta
+      // hai) ko YAHAN KABHI chua hi nahi jaata tha. Matlab agar drop se
+      // theek pehle screen "Buffering..." dikha rahi thi, wahi text poore
+      // retry-cycle (fresh URL fetch + re-play) ke dauraan hamesha ke liye
+      // frozen reh jaata — chahe background mein retry chal bhi raha ho.
+      // Ab yahan explicit `retrying` phase set karte hain taaki text turant
+      // update ho.
+      _setPhase(token, PlaybackPhase.retrying,
+          'Stream drop — retry $_streamErrorRetries/$_maxStreamErrorRetries...');
       unawaited(_retryAfterStreamDrop(song, token));
       return;
     }
@@ -590,6 +603,11 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         playing: false,
       ),
     );
+    // BUG FIX (dekho upar wala comment) — final failure pe bhi `phase` ko
+    // explicitly `error` set karo, warna text yahan bhi "Buffering..."/
+    // "Retrying..." pe hamesha ke liye atka reh jaata, chahe playback
+    // actually poori tarah ruk chuka ho.
+    _setPhase(token, PlaybackPhase.error, 'Playback me error aaya');
     if (song != null) {
       _notifyPlaybackError(song);
     } else {
@@ -602,6 +620,12 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // ko thoda "settle" hone ka time mile.
     await Future.delayed(const Duration(seconds: 1));
     if (token != _playToken) return; // is dauraan user aage badh gaya
+
+    // BUG FIX (dekho _handleStreamDrop() ka comment) — fresh URL fetch
+    // shuru hote hi phase ko turant "resolving" pe le aao, taaki text
+    // yahan bhi live update dikhe (constant "retry N/3..." pe frozen na
+    // rahe jab tak naya URL na mil jaaye).
+    _setPhase(token, PlaybackPhase.resolving, 'Naya stream dhoonda ja raha hai...');
 
     String? url;
     try {
@@ -1005,6 +1029,21 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         );
       }
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
+      // BUG FIX (2026-09-18 — user report: "next/previous kaam nahi karta
+      // jab tak gaana khud khatam na ho"): real-device log se confirm hua —
+      // kabhi-kabhi ek naya setUrl() apne aap hi non-zero position (kabhi
+      // to gaane ke bilkul END ke bराबर) se resolve ho jaata tha, jisse
+      // player turant `completed` state pe pahunch jaata (buffering→ready→
+      // completed sab 1 second ke andar) — Radio turant agla gaana pe
+      // auto-advance kar deta, aur is se Next/Previous "kaam hi nahi kiya"
+      // jaisa lagta tha (asal mein play ho ke turant khatam ho jaata tha).
+      // Fix: har naye source ke baad explicit seek(0) — guarantee karta hai
+      // ki har gaana HAMESHA shuru se bajta hai, chahe internal player
+      // state kuch bhi carry kar raha ho.
+      try {
+        await player.seek(Duration.zero);
+      } catch (_) {}
+      if (token != _playToken) return;
       await player.play();
       _setPhase(token, PlaybackPhase.playing);
       // Part 3 (Library smarts): asli play-history record — "Recently
@@ -1241,6 +1280,12 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       if (token != _playToken) return;
       try {
         await player.setFilePath(localPath);
+        if (token != _playToken) return;
+        // Dekho _playSong() ka isi tarah ka fix — same guarantee yahan bhi:
+        // local cache/download file se bhi HAMESHA position 0 se shuru ho.
+        try {
+          await player.seek(Duration.zero);
+        } catch (_) {}
         if (token != _playToken) return;
         await player.play();
         _setPhase(token, PlaybackPhase.playing);

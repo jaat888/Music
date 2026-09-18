@@ -1277,9 +1277,21 @@ class _RadioLyricsState extends State<RadioLyrics>
 
   void _syncActiveLine() {
     if (!mounted || _lines.isEmpty) return;
-    final next = _findActive(widgetPlayerPosition);
+    final pos = widgetPlayerPosition;
+    final next = _findActive(pos);
     if (next == _activeIndex) return;
     setState(() => _activeIndex = next);
+    // NEW (2026-09-18 — user report: "subtitle screen pe kab aaya, exact
+    // time ke saath log ho"): Radio ke synced lyrics me bhi wahi
+    // per-line-change log, lyrics_screen.dart jaisa hi.
+    if (next >= 0 && next < _lines.length) {
+      final mm = pos.inMinutes.remainder(60).toString().padLeft(2, '0');
+      final ss = pos.inSeconds.remainder(60).toString().padLeft(2, '0');
+      final ms = pos.inMilliseconds.remainder(1000).toString().padLeft(3, '0');
+      AppLogger.instance.log(
+        '[LYRICS] (radio) line #$next active at $mm:$ss.$ms — "${_lines[next].text}"',
+      );
+    }
     _centerActive(next);
   }
 

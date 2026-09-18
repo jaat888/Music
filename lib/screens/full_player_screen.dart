@@ -307,14 +307,23 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
     );
   }
 
-  Widget _chip({required Widget child}) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: kSurface,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: child,
+  // BUG FIX (2026-09-18 — user request: "button jaisa 4th image jaisa
+  // banao"): pehle ye ek FILLED BOX (rounded square background) tha, jaisa
+  // pehle screenshot me tha. User ne example diya — flat icon + chhota
+  // label neeche, koi box/background nahi (jaisa most modern music apps
+  // me hota hai). Ab wahi style — box hata diya, har action ke neeche
+  // uska naam bhi dikhta hai.
+  Widget _chip({required Widget child, required String label}) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        child,
+        const SizedBox(height: 2),
+        Text(
+          label,
+          style: AppText.bodyS(color: kTextDim).copyWith(fontSize: 11),
+        ),
+      ],
     );
   }
 
@@ -711,6 +720,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                             MainAxisAlignment.spaceEvenly,
                                         children: [
                                           _chip(
+                                            label: 'Like',
                                             child: FutureBuilder<bool>(
                                               future: LikeService.instance
                                                   .isLiked(song.id),
@@ -728,6 +738,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           ),
                                           const SizedBox(width: 10),
                                           _chip(
+                                            label: 'Download',
                                             // BUG FIX (v38): ListenableBuilder
                                             // shared DownloadQueueService se
                                             // jud ke rakhta hai — jab bhi
@@ -798,6 +809,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           ),
                                           const SizedBox(width: 10),
                                           _chip(
+                                            label: 'Radio',
                                             child: IconButton(
                                               icon: _startingRadio
                                                   ?  SizedBox(
@@ -837,6 +849,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           ),
                                           const SizedBox(width: 10),
                                           _chip(
+                                            label: 'Queue',
                                             child: IconButton(
                                               icon:  Icon(
                                                 Icons.queue_music,
@@ -853,6 +866,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           ),
                                           const SizedBox(width: 10),
                                           _chip(
+                                            label: 'Sleep',
                                             child: IconButton(
                                               icon: Icon(
                                                 // FIX: sleep timer active
@@ -873,6 +887,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           ),
                                           const SizedBox(width: 10),
                                           _chip(
+                                            label: 'Speed',
                                             child: IconButton(
                                               icon: Icon(
                                                 Icons.speed,
@@ -896,6 +911,7 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                           ),
                                           const SizedBox(width: 10),
                                           _chip(
+                                            label: 'Lyrics',
                                             child: IconButton(
                                               icon:  Icon(
                                                 Icons.lyrics_outlined,
