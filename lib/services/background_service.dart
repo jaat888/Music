@@ -230,6 +230,16 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       ValueNotifier(PlaybackPhase.idle);
   final ValueNotifier<String?> phaseMessage = ValueNotifier(null);
 
+  // v90: `just_audio.playing` is normally the best signal, but during an
+  // ExoPlayer hand-off it can briefly emit false even though the new source
+  // is already READY and its position is advancing. UI/notification code
+  // must not turn that tiny state publication gap into a fake spinner.
+  bool get playbackStarted =>
+      player.playing ||
+      (phase.value == PlaybackPhase.playing &&
+          player.processingState == ProcessingState.ready &&
+          !_userPaused);
+
   void _setPhase(int token, PlaybackPhase p, [String? message]) {
     // Stale request kabhi phase overwrite na kare — wahi `_playToken`
     // guard jo pehle se poore file mein use hota hai.
@@ -717,7 +727,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   AudioProcessingState? _lastLoggedProcessingState;
 
   void _broadcastState(PlaybackEvent event) {
-    final playing = player.playing;
+    final playing = playbackStarted;
     final processingState = const {
       ProcessingState.idle: AudioProcessingState.idle,
       ProcessingState.loading: AudioProcessingState.loading,
@@ -800,16 +810,26 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   }
 
   Future<bool> _waitUntilPlaying({Duration timeout = const Duration(seconds: 6)}) async {
+    // `playingStream` is authoritative when it arrives, but do not rely on
+    // that single boolean alone. On some ExoPlayer transitions the audio can
+    // already be audible / advancing while the boolean publication briefly
+    // remains false. Confirm either signal OR real position movement.
     if (player.playing) return true;
-    try {
-      await player.playingStream
-          .where((playing) => playing)
-          .first
-          .timeout(timeout);
-      return true;
-    } catch (_) {
-      return false;
+    final startedAt = player.position;
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (player.playing) return true;
+      if (player.processingState == ProcessingState.ready &&
+          player.position > startedAt + const Duration(milliseconds: 150)) {
+        AppLogger.instance.log(
+          '[PLAY] playback-start confirmed by position advance — '
+          'position=${player.position.inMilliseconds}ms while playing flag was delayed.',
+        );
+        return true;
+      }
+      await Future.delayed(const Duration(milliseconds: 150));
     }
+    return player.playing;
   }
 
   @override
@@ -1275,15 +1295,11 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       // `player.playing`; that race produced false "play nahi hua" messages
       // and unnecessary candidate skips. Wait for the authoritative stream
       // signal, but fail fast if the player never starts.
-      if (!player.playing) {
-        try {
-          await player.playingStream
-              .where((playing) => playing)
-              .first
-              .timeout(const Duration(seconds: 6));
-        } catch (e) {
-          throw StateError('player.play() ke baad playing=true nahi hua: $e');
-        }
+      if (!await _waitUntilPlaying()) {
+        throw StateError(
+          'player.play() ke baad playback-start confirm nahi hua '
+          '(playing=true ya position advance dono nahi mila)',
+        );
       }
       if (token != _playToken) return;
       _setPhase(token, PlaybackPhase.playing);

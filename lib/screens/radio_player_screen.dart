@@ -173,6 +173,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         AppLogger.instance.log('[RADIO] _start() — last session ka "${last.song.title}" resume try kar rahe hain.');
         _candidates.add(last);
         started = await _playCandidate(last, addToHistory: false);
+        if (!mounted || generation != _sessionGeneration) return;
         if (!started) {
           AppLogger.instance.log('[RADIO] _start() — resume fail hua ("${last.song.title}"), fresh candidates dhoondenge.');
           _engine.markFailed(last.song.id);
@@ -189,6 +190,10 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
           if (candidate == null) break;
           AppLogger.instance.log('[RADIO] _start() — attempt ${attempt + 1}/12: "${candidate.song.title}" try kar rahe hain.');
           started = await _playCandidate(candidate, addToHistory: true);
+          // A newer Radio navigation invalidates this startup session.
+          // Do NOT continue the startup retry loop or it will replace the
+          // song selected by the user and produce multiple apparent skips.
+          if (!mounted || generation != _sessionGeneration) return;
           if (!started) _engine.markFailed(candidate.song.id);
         }
       }
@@ -349,7 +354,15 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     }
 
     unawaited(_loadLyrics(candidate, token));
-    unawaited(_fillUpcoming());
+    // Warm Radio's actual look-ahead only AFTER the current candidate has
+    // committed successfully. `_upcoming` belongs to Radio (not QueueService),
+    // so this is the point where the next two songs can reliably be resolved.
+    unawaited(_fillUpcoming().then((_) {
+      if (!mounted || token != _candidateGeneration) return;
+      unawaited(audioHandler.prefetchRadioSongs(
+        _upcoming.take(2).map((item) => item.song).toList(),
+      ));
+    }));
     return true;
   }
 
@@ -533,7 +546,13 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     // yahi dikh raha tha). Ab agle 5 songs ke stream URL + disk cache
     // pehle se taiyar rehte hain, isliye kai skips lagatar bhi instant
     // rehte hain.
-    unawaited(audioHandler.prefetchRadioSongs(next.take(5).toList()));
+    // Radio has its own `_upcoming` list; QueueService.upcoming is empty
+    // while Radio owns playback. Use the actual Radio look-ahead here so
+    // the next songs really get their URL warmed. Full downloads are still
+    // NOT started — only the serialized URL warm-up in BackgroundService.
+    unawaited(audioHandler.prefetchRadioSongs(
+      _upcoming.take(2).map((candidate) => candidate.song).toList(),
+    ));
   }
 
   void _trimArtworkCache() {
@@ -579,6 +598,14 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
 
   Future<void> _advance({required bool auto, String? failedSongId}) async {
     if (_current == null) return;
+    // STABILITY FIX (v89): startup/resume `_start()` can still be awaiting a
+    // candidate while the user swipes/taps Next, or a track completes.
+    // In that race the old `_start()` used to see its `_playCandidate()` as
+    // false (because candidate generation changed) and then continue its
+    // own 12-candidate loop, hijacking the newly selected song. Invalidate
+    // the startup generation as soon as Radio advances so the old startup
+    // loop exits instead of skipping through several songs.
+    _sessionGeneration++;
     // BUG FIX (v80, #1 — dekho `_pendingNav` field ka poora comment): pehle
     // yahan `_transitioning` hone par bhi seedha `return` hota tha — command
     // chup-chaap discard. Ab queue kar dete hain, transition khatam hote hi
@@ -713,11 +740,14 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       // BUG FIX (v80, #1/#3/#4): transition abhi-abhi khatam hui — agar
       // is dauraan koi Next/Previous/Play-Pause command queue hui thi,
       // usse ab apply karo.
-      _drainPendingRadioCommand();
+      scheduleMicrotask(_drainPendingRadioCommand);
     }
   }
 
   Future<void> _previous() async {
+    // STABILITY FIX (v89): invalidate any still-running startup/resume loop
+    // for the same reason as `_advance()` — Previous is a new Radio intent.
+    _sessionGeneration++;
     // BUG FIX (v80, #1 — dekho `_pendingNav` field ka poora comment):
     // transition chal rahi ho to pehle seedha discard hota tha, ab queue
     // karte hain.
@@ -763,7 +793,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       if (mounted) setState(() => _transitioning = false); // FIX: dekho upar
       // BUG FIX (v80, #1/#3/#4): dekho _advance()'s finally ka comment —
       // yahan bhi wahi drain zaroori hai.
-      _drainPendingRadioCommand();
+      scheduleMicrotask(_drainPendingRadioCommand);
     }
   }
 
@@ -1101,7 +1131,8 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
                 // READY, the seekbar should become usable even if a small
                 // Radio bookkeeping/transition task is still unwinding.
                 enabled: audioHandler.player.duration != null &&
-                    audioHandler.player.processingState == ProcessingState.ready,
+                    (audioHandler.player.playing ||
+                        audioHandler.player.processingState == ProcessingState.ready),
               ),
               const SizedBox(height: 4),
               _controls(),
@@ -1167,11 +1198,23 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
             // state when switching Radio tracks; listening directly to the
             // player avoids leaving the button on Play while audio is already
             // audible.
-            final playing = playingSnapshot.data ?? audioHandler.player.playing;
+            // v90: raw `playing=false` can lag behind a READY source whose
+            // position is already advancing. The handler's effective signal
+            // keeps the Pause icon stable through that tiny publication gap.
+            final rawPlaying = playingSnapshot.data ?? audioHandler.player.playing;
+            final playing = rawPlaying ||
+                (audioHandler.phase.value == PlaybackPhase.playing &&
+                    audioHandler.player.processingState == ProcessingState.ready);
             final processing = audioHandler.player.processingState;
-            final resolving = _loading || _transitioning ||
-                processing == ProcessingState.loading ||
-                processing == ProcessingState.buffering;
+            // just_audio is authoritative, with the handler's started-phase
+            // fallback for the brief ExoPlayer state-publication gap. A tiny
+            // buffering/loading transition while audio is already audible
+            // must never replace the Pause icon with a spinner.
+            final resolving = !playing &&
+                (_loading ||
+                    _transitioning ||
+                    processing == ProcessingState.loading ||
+                    processing == ProcessingState.buffering);
 
             return Semantics(
               button: true,
