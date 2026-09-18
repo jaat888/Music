@@ -203,6 +203,33 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     if (token != _playToken) return;
     phase.value = p;
     phaseMessage.value = message;
+    // BUG FIX (2026-09-18 — user asked: "log me ye wahi hai jo display pe
+    // dikh raha hai kya?"): pehle sirf `phase`+`message` raw values log
+    // hote the — UI (full_player/radio/mini_player) ka switch-fallback
+    // logic (jab message null ho to phase ke hisaab se default text, aur
+    // playing/paused/idle pe seedha artist naam) alag jagah duplicate tha,
+    // isliye log se 100% confirm nahi hota tha ki screen pe EXACTLY kya
+    // text hai. Ab yahin ek jagah wahi EXACT resolved subtitle text
+    // compute karke log karte hain — teeno UI jagah (full_player_screen,
+    // radio_player_screen, mini_player) isi switch logic ko copy karte
+    // hain, isliye ye log line unke display se hamesha match karega.
+    final resolvedSubtitle = (p == PlaybackPhase.playing ||
+            p == PlaybackPhase.paused ||
+            p == PlaybackPhase.idle)
+        ? (_activePlaybackSong?.artist ?? '(no active song)')
+        : (message ??
+            switch (p) {
+              PlaybackPhase.resolving => 'Resolving...',
+              PlaybackPhase.verifying => 'Verifying...',
+              PlaybackPhase.buffering => 'Buffering...',
+              PlaybackPhase.retrying => 'Retrying...',
+              PlaybackPhase.error => 'Playback error',
+              _ => _activePlaybackSong?.artist ?? '',
+            });
+    AppLogger.instance.log(
+      '[PHASE] token=$token -> $p | subtitle-on-screen: "$resolvedSubtitle"'
+      '${message != null && message != resolvedSubtitle ? " (raw message: \"$message\")" : ""}',
+    );
 
     // NEW (Phase 2, 2026-09-17): notification/lock-screen bhi phase-aware
     // — resolving/retrying/buffering/error ke dauraan status message

@@ -102,22 +102,57 @@ void main() {
       // gap ke) sahi theme choose kar sake (dekho theme_service.dart).
       await ThemeService.instance.init();
 
-      // BUG FIX (v37 — download progress/completion kahin dikhta nahi tha):
-      // global fallback listener — jab bhi koi download poora ho (chahe
-      // kisi bhi screen se enqueue hua ho), ek SnackBar dikha do. Individual
-      // screens apna alag listener add kar sakte hain (list-based hai,
-      // isliye ek-doosre ko overwrite nahi karte — dekho
-      // download_queue_service.dart).
+      // BUG FIX (2026-09-18 — user report: "notification bar-bar aati
+      // rehti hai, bhonduu lagta hai, remove kar de"): pehle HAR completed
+      // download ka apna alag SnackBar dikhta tha — jab ek saath 5-6 gaane
+      // queue mein hote (auto-download-after-cache feature), sab ek ke
+      // baad ek finish hote to utne hi SnackBars ek ke baad ek stack/queue
+      // ho jaate, screen pe bar-bar aate rehte. Ab 1.2s ke andar jitne bhi
+      // downloads finish hon, unhe ek hi SUMMARY SnackBar mein batch karte
+      // hain ("3 gaane download ho gaye" jaisa). `floating` behavior +
+      // bottom margin bhi diya taaki bottom nav bar ke upar overlap na
+      // kare (pehle default `fixed` behavior nav bar se seedha chipak
+      // jaata tha, jaisa screenshot mein dikha).
+      final pendingFinishedTitles = <String>[];
+      var pendingFailedCount = 0;
+      Timer? finishDebounce;
       DownloadQueueService.instance.addFinishListener((song, success) {
-        scaffoldMessengerKey.currentState?.showSnackBar(
-          SnackBar(
-            content: Text(
-              success
-                  ? '"${song.title}" download ho gaya'
-                  : '"${song.title}" download fail ho gaya',
+        if (success) {
+          pendingFinishedTitles.add(song.title);
+        } else {
+          pendingFailedCount++;
+        }
+        finishDebounce?.cancel();
+        finishDebounce = Timer(const Duration(milliseconds: 1200), () {
+          final titles = List<String>.from(pendingFinishedTitles);
+          final failed = pendingFailedCount;
+          pendingFinishedTitles.clear();
+          pendingFailedCount = 0;
+          if (titles.isEmpty && failed == 0) return;
+
+          final String message;
+          if (failed == 0) {
+            message = titles.length == 1
+                ? '"${titles.first}" download ho gaya'
+                : '${titles.length} gaane download ho gaye';
+          } else if (titles.isEmpty) {
+            message = failed == 1
+                ? 'Download fail ho gaya'
+                : '$failed downloads fail ho gaye';
+          } else {
+            message =
+                '${titles.length} download ho gaye, $failed fail ho gaye';
+          }
+
+          scaffoldMessengerKey.currentState?.showSnackBar(
+            SnackBar(
+              content: Text(message),
+              duration: const Duration(seconds: 3),
+              behavior: SnackBarBehavior.floating,
+              margin: const EdgeInsets.fromLTRB(16, 0, 16, 80),
             ),
-          ),
-        );
+          );
+        });
       });
     } catch (e, st) {
       _startupError = 'Startup failed: $e';

@@ -307,14 +307,21 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
     );
   }
 
-  Widget _chip({required Widget child}) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: kSurface,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: child,
+  Widget _flatIconButton({
+    required Widget icon,
+    VoidCallback? onPressed,
+    String? tooltip,
+  }) {
+    // REDESIGN (2026-09-18): koi background box nahi — YT Music/Spotify/
+    // Apple Music ke action-icon row jaisa flat look. Tight constraints
+    // taaki 7 icons bhi ek line me fit ho jaayein.
+    return IconButton(
+      icon: icon,
+      tooltip: tooltip,
+      onPressed: onPressed,
+      visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
     );
   }
 
@@ -676,243 +683,220 @@ class _FullPlayerScreenState extends State<FullPlayerScreen> {
                                       ],
                                     ),
                                     const SizedBox(height: 20),
-                                    // NEW (2026-09-16, v15): download+radio
-                                    // chips add hone se ab 6 chips ho gaye
-                                    // — spaceEvenly Row chhoti screens
-                                    // (~360dp se kam) pe overflow kar
-                                    // sakta tha, isliye horizontally
-                                    // scrollable bana diya (jaisi screen
-                                    // utne chips fit karegi, baaki side-
-                                    // scroll se milenge).
-                                    LayoutBuilder(
-                                      builder: (context, constraints) =>
-                                          SingleChildScrollView(
-                                        scrollDirection: Axis.horizontal,
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 16,
-                                        ),
-                                        child: ConstrainedBox(
-                                          // Jab sab 6 chips available
-                                          // width me fit ho jaayein, Row
-                                          // ko poori width diya jaata hai
-                                          // taaki spaceEvenly pehle jaisa
-                                          // hi evenly-spaced/centered
-                                          // dikhe. Jab fit na ho (chhoti
-                                          // screen), Row apni natural
-                                          // (chhoti) width leta hai aur
-                                          // SingleChildScrollView side-
-                                          // scroll allow karta hai.
-                                          constraints: BoxConstraints(
-                                            minWidth: constraints.maxWidth -
-                                                32, // horizontal padding
-                                          ),
-                                          child: Row(
+                                    // REDESIGN (2026-09-18 — user report:
+                                    // "kya kabad hai ye, jaise playlist
+                                    // swipe ho rahi hai, YT Music/Spotify/
+                                    // Apple Music jaisa kar"): pehle har
+                                    // icon apne boxy `_chip()` Container
+                                    // (kSurface background + borderRadius)
+                                    // ke andar tha, aur 6-7 chips fit na
+                                    // hone par poora Row horizontally
+                                    // scroll karta tha — sideways-swipe
+                                    // jaisa lagta tha, un reference apps
+                                    // (jinke action-icon row me koi box/
+                                    // background nahi hota, sab ek hi line
+                                    // me flat icons hote hain) se bilkul
+                                    // ulta. Ab flat icons hain (koi
+                                    // background box nahi), chhote/tight
+                                    // hit-box (`visualDensity: compact` +
+                                    // tight `constraints`) taaki saare 7
+                                    // icons bina kisi horizontal scroll ke
+                                    // ek hi line me comfortably fit ho
+                                    // jaayein chhoti se chhoti phone screen
+                                    // pe bhi (~320dp).
+                                    Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                      ),
+                                      child: Row(
                                         mainAxisAlignment:
                                             MainAxisAlignment.spaceEvenly,
                                         children: [
-                                          _chip(
-                                            child: FutureBuilder<bool>(
-                                              future: LikeService.instance
-                                                  .isLiked(song.id),
-                                              builder: (context, likeSnap) {
-                                                return HeartButton(
-                                                  isLiked:
-                                                      likeSnap.data ?? false,
-                                                  size: 22,
-                                                  onTap: () => context
-                                                      .read<LikeService>()
-                                                      .toggleLike(song),
-                                                );
-                                              },
-                                            ),
+                                          FutureBuilder<bool>(
+                                            future: LikeService.instance
+                                                .isLiked(song.id),
+                                            builder: (context, likeSnap) {
+                                              return HeartButton(
+                                                isLiked:
+                                                    likeSnap.data ?? false,
+                                                size: 21,
+                                                onTap: () => context
+                                                    .read<LikeService>()
+                                                    .toggleLike(song),
+                                              );
+                                            },
                                           ),
-                                          const SizedBox(width: 10),
-                                          _chip(
-                                            // BUG FIX (v38): ListenableBuilder
-                                            // shared DownloadQueueService se
-                                            // jud ke rakhta hai — jab bhi
-                                            // koi bhi screen se (isi gaane
-                                            // ko) queue/download/finish kare,
-                                            // ye icon turant reflect karta
-                                            // hai. Pehle sirf apna local
-                                            // `_downloading` dekhta tha, jo
-                                            // sirf isi screen ke button se
-                                            // download shuru karne par set
-                                            // hota tha.
-                                            child: ListenableBuilder(
-                                              listenable:
-                                                  DownloadQueueService.instance,
-                                              builder: (context, _) {
-                                                final active =
-                                                    DownloadQueueService
-                                                        .instance
-                                                        .isActive(song.id);
-                                                return FutureBuilder<bool>(
-                                                  // FIX: download icon ab
-                                                  // "already downloaded"
-                                                  // state ko reflect karta
-                                                  // hai (green/filled), sirf
-                                                  // static grey nahi rehta.
-                                                  future: DownloadDB.instance
-                                                      .exists(song.id),
-                                                  builder: (context, dlSnap) {
-                                                    final isDownloaded =
-                                                        !active &&
-                                                        (dlSnap.data ?? false);
-                                                    return IconButton(
-                                                      icon: active
-                                                          ? SizedBox(
-                                                              width: 18,
-                                                              height: 18,
-                                                              child:
-                                                                  CircularProgressIndicator(
-                                                                strokeWidth: 2,
-                                                                color: kTextDim,
-                                                              ),
-                                                            )
-                                                          : Icon(
-                                                              isDownloaded
-                                                                  ? Icons
-                                                                      .download_done_rounded
-                                                                  : Icons
-                                                                      .download_rounded,
-                                                              color: isDownloaded
-                                                                  ? kGreen
-                                                                  : kTextDim,
+                                          // BUG FIX (v38): ListenableBuilder
+                                          // shared DownloadQueueService se
+                                          // jud ke rakhta hai — jab bhi
+                                          // koi bhi screen se (isi gaane
+                                          // ko) queue/download/finish kare,
+                                          // ye icon turant reflect karta
+                                          // hai. Pehle sirf apna local
+                                          // `_downloading` dekhta tha, jo
+                                          // sirf isi screen ke button se
+                                          // download shuru karne par set
+                                          // hota tha.
+                                          ListenableBuilder(
+                                            listenable:
+                                                DownloadQueueService.instance,
+                                            builder: (context, _) {
+                                              final active =
+                                                  DownloadQueueService
+                                                      .instance
+                                                      .isActive(song.id);
+                                              return FutureBuilder<bool>(
+                                                // FIX: download icon ab
+                                                // "already downloaded"
+                                                // state ko reflect karta
+                                                // hai (green/filled), sirf
+                                                // static grey nahi rehta.
+                                                future: DownloadDB.instance
+                                                    .exists(song.id),
+                                                builder: (context, dlSnap) {
+                                                  final isDownloaded =
+                                                      !active &&
+                                                      (dlSnap.data ?? false);
+                                                  return _flatIconButton(
+                                                    icon: active
+                                                        ? SizedBox(
+                                                            width: 18,
+                                                            height: 18,
+                                                            child:
+                                                                CircularProgressIndicator(
+                                                              strokeWidth: 2,
+                                                              color: kTextDim,
                                                             ),
-                                                      tooltip: active
-                                                          ? 'Download ho raha hai'
-                                                          : (isDownloaded
-                                                              ? 'Downloaded'
-                                                              : 'Download'),
-                                                      onPressed: active
-                                                          ? null
-                                                          : () =>
-                                                              _handleDownload(
-                                                                  song),
-                                                    );
-                                                  },
-                                                );
-                                              },
-                                            ),
+                                                          )
+                                                        : Icon(
+                                                            isDownloaded
+                                                                ? Icons
+                                                                    .download_done_rounded
+                                                                : Icons
+                                                                    .download_rounded,
+                                                            color: isDownloaded
+                                                                ? kGreen
+                                                                : kTextDim,
+                                                            size: 21,
+                                                          ),
+                                                    tooltip: active
+                                                        ? 'Download ho raha hai'
+                                                        : (isDownloaded
+                                                            ? 'Downloaded'
+                                                            : 'Download'),
+                                                    onPressed: active
+                                                        ? null
+                                                        : () =>
+                                                            _handleDownload(
+                                                                song),
+                                                  );
+                                                },
+                                              );
+                                            },
                                           ),
-                                          const SizedBox(width: 10),
-                                          _chip(
-                                            child: IconButton(
-                                              icon: _startingRadio
-                                                  ?  SizedBox(
-                                                      width: 18,
-                                                      height: 18,
-                                                      child:
-                                                          CircularProgressIndicator(
-                                                        strokeWidth: 2,
-                                                        color: kTextDim,
-                                                      ),
-                                                    )
-                                                  : Icon(
-                                                      Icons.radio_rounded,
-                                                      // FIX: radio mode
-                                                      // "on" hone par icon
-                                                      // green — pehle
-                                                      // hamesha grey rehta
-                                                      // tha chahe radio
-                                                      // chal hi kyu na
-                                                      // raha ho.
-                                                      color:
-                                                          queueService
-                                                                  .radioMode
-                                                              ? kGreen
-                                                              : kTextDim,
+                                          _flatIconButton(
+                                            icon: _startingRadio
+                                                ? SizedBox(
+                                                    width: 18,
+                                                    height: 18,
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                      color: kTextDim,
                                                     ),
-                                              tooltip: queueService.radioMode
-                                                  ? 'Radio band karo'
-                                                  : 'Radio shuru karo',
-                                              onPressed: _startingRadio
-                                                  ? null
-                                                  : () => queueService
-                                                          .radioMode
-                                                      ? _handleStopRadio()
-                                                      : _handleRadio(song),
+                                                  )
+                                                : Icon(
+                                                    Icons.radio_rounded,
+                                                    // FIX: radio mode
+                                                    // "on" hone par icon
+                                                    // green — pehle
+                                                    // hamesha grey rehta
+                                                    // tha chahe radio
+                                                    // chal hi kyu na
+                                                    // raha ho.
+                                                    color: queueService
+                                                            .radioMode
+                                                        ? kGreen
+                                                        : kTextDim,
+                                                    size: 21,
+                                                  ),
+                                            tooltip: queueService.radioMode
+                                                ? 'Radio band karo'
+                                                : 'Radio shuru karo',
+                                            onPressed: _startingRadio
+                                                ? null
+                                                : () => queueService.radioMode
+                                                    ? _handleStopRadio()
+                                                    : _handleRadio(song),
+                                          ),
+                                          _flatIconButton(
+                                            icon: Icon(
+                                              Icons.queue_music,
+                                              color: kTextDim,
+                                              size: 21,
+                                            ),
+                                            onPressed: () => Navigator.push(
+                                              context,
+                                              MaterialPageRoute(
+                                                builder: (_) =>
+                                                    const QueueScreen(),
+                                              ),
                                             ),
                                           ),
-                                          const SizedBox(width: 10),
-                                          _chip(
-                                            child: IconButton(
-                                              icon:  Icon(
-                                                Icons.queue_music,
-                                                color: kTextDim,
-                                              ),
-                                              onPressed: () => Navigator.push(
-                                                context,
-                                                MaterialPageRoute(
-                                                  builder: (_) =>
-                                                      const QueueScreen(),
-                                                ),
-                                              ),
+                                          _flatIconButton(
+                                            icon: Icon(
+                                              // FIX: sleep timer active
+                                              // hone par icon green +
+                                              // filled — pehle hamesha
+                                              // grey outline hi rehta
+                                              // tha, on/off pata hi
+                                              // nahi chalta tha.
+                                              sleepTimerActive
+                                                  ? Icons.timer
+                                                  : Icons.timer_outlined,
+                                              color: sleepTimerActive
+                                                  ? kGreen
+                                                  : kTextDim,
+                                              size: 21,
                                             ),
+                                            onPressed: _showSleepTimerDialog,
                                           ),
-                                          const SizedBox(width: 10),
-                                          _chip(
-                                            child: IconButton(
-                                              icon: Icon(
-                                                // FIX: sleep timer active
-                                                // hone par icon green +
-                                                // filled — pehle hamesha
-                                                // grey outline hi rehta
-                                                // tha, on/off pata hi
-                                                // nahi chalta tha.
-                                                sleepTimerActive
-                                                    ? Icons.timer
-                                                    : Icons.timer_outlined,
-                                                color: sleepTimerActive
-                                                    ? kGreen
-                                                    : kTextDim,
-                                              ),
-                                              onPressed: _showSleepTimerDialog,
+                                          _flatIconButton(
+                                            icon: Icon(
+                                              Icons.speed,
+                                              // PART 1: 1.0x (normal) pe
+                                              // grey, kisi aur speed pe
+                                              // green — jaise sleep-timer
+                                              // chip "on" state dikhata
+                                              // hai.
+                                              color: (audioHandler
+                                                              .currentSpeed -
+                                                          1.0)
+                                                      .abs() <
+                                                  0.01
+                                                  ? kTextDim
+                                                  : kGreen,
+                                              size: 21,
                                             ),
+                                            tooltip:
+                                                '${audioHandler.currentSpeed}x speed',
+                                            onPressed: _showSpeedDialog,
                                           ),
-                                          const SizedBox(width: 10),
-                                          _chip(
-                                            child: IconButton(
-                                              icon: Icon(
-                                                Icons.speed,
-                                                // PART 1: 1.0x (normal) pe
-                                                // grey, kisi aur speed pe
-                                                // green — jaise sleep-timer
-                                                // chip "on" state dikhata
-                                                // hai.
-                                                color: (audioHandler
-                                                                .currentSpeed -
-                                                            1.0)
-                                                        .abs() <
-                                                    0.01
-                                                    ? kTextDim
-                                                    : kGreen,
-                                              ),
-                                              tooltip:
-                                                  '${audioHandler.currentSpeed}x speed',
-                                              onPressed: _showSpeedDialog,
+                                          _flatIconButton(
+                                            icon: Icon(
+                                              Icons.lyrics_outlined,
+                                              color: kTextDim,
+                                              size: 21,
                                             ),
-                                          ),
-                                          const SizedBox(width: 10),
-                                          _chip(
-                                            child: IconButton(
-                                              icon:  Icon(
-                                                Icons.lyrics_outlined,
-                                                color: kTextDim,
-                                              ),
-                                              onPressed: () => Navigator.push(
-                                                context,
-                                                MaterialPageRoute(
-                                                  builder: (_) =>
-                                                      LyricsScreen(song: song),
-                                                ),
+                                            onPressed: () => Navigator.push(
+                                              context,
+                                              MaterialPageRoute(
+                                                builder: (_) =>
+                                                    LyricsScreen(song: song),
                                               ),
                                             ),
                                           ),
                                         ],
-                                          ),
-                                        ),
                                       ),
                                     ),
                                     const Spacer(),
