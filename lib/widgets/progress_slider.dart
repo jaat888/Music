@@ -12,7 +12,17 @@ import 'package:flutter/material.dart';
 
 import '../theme/colors.dart';
 
-class ProgressSlider extends StatelessWidget {
+// BUG FIX (2026-09-18, real-device log — exact timing proof): pehle ye
+// StatelessWidget tha aur `Slider.onChanged` seedha `onSeek()` (asli
+// `audioHandler.seek()`, ek network-buffering operation) call karta tha —
+// matlab drag ke HAR pixel-move pe ek real seek fire hoti thi. Log me
+// isi wajah se ek hi drag gesture ke dauraan 61ms ke andar 6 alag seek()
+// calls dikhe (10:22:50.010 se 10:22:50.071) — har ek apna buffering
+// cycle shuru karti, isliye drag karte waqt gaana atakta/stutter karta
+// tha. `radio_player_screen.dart` ka apna slider ye SAHI tarike se karta
+// hai (drag ke dauraan sirf local state update, seek sirf release pe ek
+// baar) — yahi pattern copy kiya.
+class ProgressSlider extends StatefulWidget {
   final Duration position;
   final Duration total;
   final ValueChanged<Duration> onSeek;
@@ -28,6 +38,14 @@ class ProgressSlider extends StatelessWidget {
     this.bufferedPosition,
   });
 
+  @override
+  State<ProgressSlider> createState() => _ProgressSliderState();
+}
+
+class _ProgressSliderState extends State<ProgressSlider> {
+  bool _dragging = false;
+  double _dragMs = 0;
+
   // Duration ko "m:ss" format me convert karta hai
   String _format(Duration d) {
     final minutes = d.inMinutes;
@@ -37,14 +55,18 @@ class ProgressSlider extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final maxMs = total.inMilliseconds;
+    final maxMs = widget.total.inMilliseconds;
     final hasDuration = maxMs > 0;
-    // Total zero hone pe slider disabled rahega — divide-by-zero/crash na ho
-    final currentMs = hasDuration
-        ? position.inMilliseconds.clamp(0, maxMs).toDouble()
-        : 0.0;
-    final bufferedFraction = hasDuration && bufferedPosition != null
-        ? (bufferedPosition!.inMilliseconds / maxMs).clamp(0.0, 1.0)
+    // Drag ke dauraan hamesha local `_dragMs` dikhao (warna stream se aane
+    // wali purani `position` beech-beech me thumb ko wapas kheech legi) —
+    // drag khatam hote hi wapas live `position` follow karta hai.
+    final displayMs = _dragging
+        ? _dragMs
+        : (hasDuration
+            ? widget.position.inMilliseconds.clamp(0, maxMs).toDouble()
+            : 0.0);
+    final bufferedFraction = hasDuration && widget.bufferedPosition != null
+        ? (widget.bufferedPosition!.inMilliseconds / maxMs).clamp(0.0, 1.0)
         : 0.0;
 
     return Column(
@@ -73,22 +95,37 @@ class ProgressSlider extends StatelessWidget {
               ),
             SliderTheme(
               data: SliderTheme.of(context).copyWith(
-                activeTrackColor: activeColor,
+                activeTrackColor: widget.activeColor,
                 // Buffered bar upar se dikhta rahe — is track ka apna
                 // "inactive" hissa transparent rakha, warna buffered bar
                 // ko dhak dega.
                 inactiveTrackColor:
                     bufferedFraction > 0 ? Colors.transparent : Colors.white24,
-                thumbColor: activeColor,
+                thumbColor: widget.activeColor,
                 trackHeight: 3,
                 overlayShape: SliderComponentShape.noOverlay,
                 thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
               ),
               child: Slider(
-                value: currentMs,
+                value: displayMs,
                 max: hasDuration ? maxMs.toDouble() : 1.0,
+                onChangeStart: hasDuration
+                    ? (value) => setState(() {
+                          _dragging = true;
+                          _dragMs = value;
+                        })
+                    : null,
+                // Drag ke dauraan SIRF local UI update — koi network seek
+                // nahi (yehi asli fix hai).
                 onChanged: hasDuration
-                    ? (value) => onSeek(Duration(milliseconds: value.round()))
+                    ? (value) => setState(() => _dragMs = value)
+                    : null,
+                // Asli seek SIRF yahan, finger uthane par, ek hi baar.
+                onChangeEnd: hasDuration
+                    ? (value) {
+                        setState(() => _dragging = false);
+                        widget.onSeek(Duration(milliseconds: value.round()));
+                      }
                     : null,
               ),
             ),
@@ -99,8 +136,10 @@ class ProgressSlider extends StatelessWidget {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(_format(position), style: TextStyle(color: kTextDim, fontSize: 12)),
-              Text(_format(total), style: TextStyle(color: kTextDim, fontSize: 12)),
+              Text(_format(_dragging
+                  ? Duration(milliseconds: _dragMs.round())
+                  : widget.position), style: TextStyle(color: kTextDim, fontSize: 12)),
+              Text(_format(widget.total), style: TextStyle(color: kTextDim, fontSize: 12)),
             ],
           ),
         ),

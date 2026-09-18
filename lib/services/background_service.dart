@@ -934,8 +934,19 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     _activePlaybackSong = song;
     // BUG FIX (2026-09-18, v59): dekho playWithRetry() ka same comment.
     _userPaused = false;
+    // BUG FIX (2026-09-18, real-device log): ChunkedYoutubeAudioSource
+    // (dekho chunked_audio_source.dart ka poora comment-history — 4
+    // attempts already) abhi bhi ~100% fail ho raha hai turant "Source
+    // error" ke saath, phir plain setUrl() retry pe chal jaata hai — har
+    // gaane pe isi wajah se 1-4 sec ka visible retry-storm (buffering-
+    // stuck jaisa lagta hai, notification bhi isi wajah se baar-baar
+    // idle/loading flicker karti hai), aur Radio mode isi wajah se poori
+    // tarah fail ho gaya (12/12 candidates, dekho [RADIO] log). Chunking
+    // ka speed-fayda is reliability cost ke saamne worth nahi — DISABLE
+    // kar diya, wapas seedha plain setUrl() (jo log me consistently
+    // pehli hi try me chalta hai jab bhi try hota hai).
     return _playSong(song, url, ++_playToken,
-        useHeaders: false, useChunking: true, format: format);
+        useHeaders: false, useChunking: false, format: format);
   }
 
   // BUG FIX (2026-09-17, Attempt #5 RESULT — real-device log confirm
@@ -1044,7 +1055,22 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           playing: false,
         ),
       );
-      _notifyPlaybackError(song);
+      // BUG FIX (2026-09-18, real-device log): pehle yahan seedha
+      // `_notifyPlaybackError(song)` call hota tha — lekin yahi failure
+      // (CDN drop) lagbhag hamesha `player.playbackEventStream`'s async
+      // `onError` pe BHI fire hoti hai (dekho upar wala listener), jo
+      // `_handleStreamDrop()` ko call karta hai — matlab EK hi failure ke
+      // liye DO independent paths radio/UI ko error batate the, bina kisi
+      // retry-budget coordination ke. Log me isi wajah se ek hi gaane ke
+      // liye radio ka error-handler lagatar 7 baar back-to-back fire hua
+      // tha (koi gap nahi, koi retry nahi — seedha 7 duplicate calls).
+      // Fix: yahan bhi `_handleStreamDrop()` hi call karo — wahi ek single
+      // retry-budgeted (max 3) state-machine hai; agar async stream ne
+      // already ek attempt count kar li hai to ye usi counter ko continue
+      // karega (duplicate nahi), aur agar ye ek purely-synchronous error
+      // hai (async stream kabhi fire hi nahi hui) to bhi properly retry +
+      // ek hi final notify milega.
+      _handleStreamDrop();
     }
   }
 
@@ -1258,7 +1284,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         cached.url,
         token,
         useHeaders: false,
-        useChunking: true,
+        // BUG FIX (2026-09-18): dekho playSong() ka comment — chunking
+        // disabled, real-device pe ~100% fail hoti thi.
+        useChunking: false,
         format: cached.format,
       );
       return;
@@ -1307,7 +1335,10 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           url,
           token,
           useHeaders: false,
-          useChunking: true,
+          // BUG FIX (2026-09-18): dekho playSong() ka comment — chunking
+          // disabled, real-device pe ~100% fail hoti thi (isi wajah se
+          // saara buffering-stuck/notification-flicker/Radio-crash issue).
+          useChunking: false,
           format: format,
         );
         return;

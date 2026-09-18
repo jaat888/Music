@@ -49,6 +49,11 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   int _sessionGeneration = 0;
   int _candidateGeneration = 0;
   bool _transitioning = false;
+  // Reels-jaisa swipe animation ke liye — kis taraf se swipe hua, taaki
+  // naya content sahi direction se slide-in ho (up-swipe → neeche se aaye,
+  // down-swipe → upar se aaye). Default true (up) taaki pehla load bhi
+  // consistent lage.
+  bool _swipedUp = true;
   String? _recoveringSongId;
   Future<bool>? _recoveryFuture;
   final Map<String, int> _recentLanguageCounts = <String, int>{};
@@ -804,80 +809,117 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
           child: Column(
             children: [
               // NEW (2026-09-17, v68 — user report: "slide se next/
-              // previous kaam nahi karta"): pehle koi swipe-gesture tha hi
-              // nahi is screen pe. Ab left/right horizontal swipe se bhi
-              // Next/Previous chalta hai — SIRF title/artwork/lyrics area
-              // pe (topBar se lyrics tak), taaki neeche wali seekbar
-              // (`RadioPlayerProgress`, jo khud horizontal-drag se scrub
-              // hoti hai) ka gesture kabhi is se conflict/compete na kare
-              // — seekbar apni jagah bilkul normal kaam karti rehti hai.
+              // previous kaam nahi karta"): is screen pe swipe-gesture
+              // (title/artwork/lyrics area pe, topBar se lyrics tak) —
+              // neeche wali seekbar (`RadioPlayerProgress`, jo khud
+              // horizontal-drag se scrub hoti hai) ka gesture kabhi is se
+              // conflict/compete na kare, isliye seekbar bahar hai.
               Expanded(
                 child: GestureDetector(
                   behavior: HitTestBehavior.translucent,
-                  onHorizontalDragEnd: (details) {
+                  // BUG FIX (2026-09-18, user report: "radio me swipe up/
+                  // down nahi hota, aur koi animation nahi hai jaisa
+                  // Instagram Reels me hota"): pehle sirf LEFT/RIGHT
+                  // (horizontal) swipe tha, koi animation nahi thi — bas
+                  // content turant snap ho jaata tha. Ab VERTICAL swipe
+                  // hai (Reels jaisa hi convention): swipe UP = agla gaana,
+                  // swipe DOWN = pichla gaana — aur content slide+fade
+                  // animation ke saath badalta hai (neeche AnimatedSwitcher
+                  // dekho). Chhota accidental-drag threshold same rakha.
+                  onVerticalDragEnd: (details) {
                     final v = details.primaryVelocity ?? 0;
-                    // Chhota accidental-drag threshold — sirf ek clear/
-                    // intentional swipe pe hi trigger ho.
                     if (v.abs() < 200) return;
                     if (v < 0) {
-                      _advance(auto: false); // left swipe → agla gaana
+                      _swipedUp = true;
+                      _advance(auto: false); // swipe up → agla gaana
                     } else {
-                      _previous(); // right swipe → pichla gaana
+                      _swipedUp = false;
+                      _previous(); // swipe down → pichla gaana
                     }
                   },
                   child: Column(
                     children: [
                       SizedBox(height: 48, child: _topBar()),
                       SizedBox(height: compact ? 14 : 24),
-                      Text(current.language.toUpperCase(), style: AppText.bodyS(color: Colors.white70)),
-                      const SizedBox(height: 6),
-                      Text(
-                        current.song.title,
-                        textAlign: TextAlign.center,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: AppText.displayL(color: Colors.white),
-                      ),
-                      const SizedBox(height: 5),
-                      ValueListenableBuilder<PlaybackPhase>(
-                        valueListenable: audioHandler.phase,
-                        builder: (context, phase, _) {
-                          String subtitle = current.song.artist;
-                          if (phase != PlaybackPhase.playing &&
-                              phase != PlaybackPhase.paused &&
-                              phase != PlaybackPhase.idle) {
-                            subtitle = audioHandler.phaseMessage.value ??
-                                switch (phase) {
-                                  PlaybackPhase.resolving => 'Resolving...',
-                                  PlaybackPhase.verifying => 'Verifying...',
-                                  PlaybackPhase.buffering => 'Buffering...',
-                                  PlaybackPhase.retrying => 'Retrying...',
-                                  PlaybackPhase.error => 'Playback error',
-                                  _ => subtitle,
-                                };
-                          }
-                          return Text(
-                            subtitle,
-                            textAlign: TextAlign.center,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: AppText.bodyM(color: Colors.white70),
-                          );
-                        },
-                      ),
-                      const SizedBox(height: 4),
                       Expanded(
-                        child: Center(
-                          child: SizedBox(
-                            height: lyricHeight,
-                            width: double.infinity,
-                            child: IgnorePointer(
-                              child: RadioLyrics(
-                                key: ValueKey('lyrics-${current.song.id}'),
-                                result: _lyrics,
-                                loading: _lyricsLoading,
+                        child: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 280),
+                          switchInCurve: Curves.easeOut,
+                          switchOutCurve: Curves.easeIn,
+                          transitionBuilder: (child, animation) {
+                            // Reels jaisa hi: agla gaana (swipe up) neeche
+                            // se upar aata hai, pichla gaana (swipe down)
+                            // upar se neeche aata hai — fade ke saath.
+                            final offsetAnim = Tween<Offset>(
+                              begin: Offset(0, _swipedUp ? 0.12 : -0.12),
+                              end: Offset.zero,
+                            ).animate(animation);
+                            return ClipRect(
+                              child: SlideTransition(
+                                position: offsetAnim,
+                                child: FadeTransition(
+                                  opacity: animation,
+                                  child: child,
+                                ),
                               ),
-                            ),
+                            );
+                          },
+                          child: Column(
+                            key: ValueKey('content-${current.song.id}'),
+                            children: [
+                              Text(current.language.toUpperCase(), style: AppText.bodyS(color: Colors.white70)),
+                              const SizedBox(height: 6),
+                              Text(
+                                current.song.title,
+                                textAlign: TextAlign.center,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: AppText.displayL(color: Colors.white),
+                              ),
+                              const SizedBox(height: 5),
+                              ValueListenableBuilder<PlaybackPhase>(
+                                valueListenable: audioHandler.phase,
+                                builder: (context, phase, _) {
+                                  String subtitle = current.song.artist;
+                                  if (phase != PlaybackPhase.playing &&
+                                      phase != PlaybackPhase.paused &&
+                                      phase != PlaybackPhase.idle) {
+                                    subtitle = audioHandler.phaseMessage.value ??
+                                        switch (phase) {
+                                          PlaybackPhase.resolving => 'Resolving...',
+                                          PlaybackPhase.verifying => 'Verifying...',
+                                          PlaybackPhase.buffering => 'Buffering...',
+                                          PlaybackPhase.retrying => 'Retrying...',
+                                          PlaybackPhase.error => 'Playback error',
+                                          _ => subtitle,
+                                        };
+                                  }
+                                  return Text(
+                                    subtitle,
+                                    textAlign: TextAlign.center,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: AppText.bodyM(color: Colors.white70),
+                                  );
+                                },
+                              ),
+                              const SizedBox(height: 4),
+                              Expanded(
+                                child: Center(
+                                  child: SizedBox(
+                                    height: lyricHeight,
+                                    width: double.infinity,
+                                    child: IgnorePointer(
+                                      child: RadioLyrics(
+                                        key: ValueKey('lyrics-${current.song.id}'),
+                                        result: _lyrics,
+                                        loading: _lyricsLoading,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
