@@ -1770,6 +1770,7 @@ class YoutubeService {
     // kuch dikha sakti hai, real duration nahi badalti lekin ab "atka hua"
     // nahi lagta.
     void Function(String status)? onStatus,
+    bool _retryAfterCdnFailure = true,
   }) async {
     // FIX (user request): ye check yahan (root level) bhi hona chahiye —
     // sirf UI screens pe nahi — taaki koi bhi caller miss kare to bhi
@@ -1910,6 +1911,13 @@ class YoutubeService {
           if (res.statusCode != 200 && res.statusCode != 206) {
             throw Exception('HTTP ${res.statusCode}');
           }
+          // A Range request must return 206 once we move past byte 0.
+          // Some CDN/proxy layers ignore Range and return the whole file
+          // with 200; accepting that here would append the whole file again
+          // on every 10MB iteration and corrupt the downloaded file.
+          if (rangeStart > 0 && res.statusCode == 200) {
+            throw Exception('HTTP 200 ignored requested Range at byte $rangeStart');
+          }
         } catch (e) {
           if (!useHeadersForChunk) {
             // Ek dur ka fallback — kabhi kisi rare stream ko WITH
@@ -1966,6 +1974,28 @@ class YoutubeService {
       return filePath;
     } catch (e) {
       print('YT DOWNLOAD ERROR: $e');
+      final msg = e.toString();
+      final cdnFailure = msg.contains('HTTP 403') ||
+          msg.contains('HTTP 429') ||
+          msg.contains('HTTP 5') ||
+          msg.contains('Range at byte');
+      if (_retryAfterCdnFailure && cdnFailure) {
+        // Stream URLs can expire or be rejected by a CDN after the resolver
+        // returned them. Re-resolve once and restart from byte 0 rather than
+        // retrying the same dead URL forever. openWrite() on the second pass
+        // truncates the partial file.
+        print('YT DOWNLOAD RETRY: CDN ne stream reject kiya; fresh stream resolve kar rahe hain: $videoId');
+        onStatus?.call('Download source refresh ho raha hai...');
+        await Future<void>.delayed(const Duration(milliseconds: 700));
+        return download(
+          videoId,
+          title,
+          author: author,
+          onProgress: onProgress,
+          onStatus: onStatus,
+          _retryAfterCdnFailure: false,
+        );
+      }
       return null;
     }
   }

@@ -40,12 +40,12 @@ class DownloadQueueService extends ChangeNotifier {
   DownloadQueueService._internal();
   static final DownloadQueueService instance = DownloadQueueService._internal();
 
-  // BUMPED (2026-09-17, user request): 3 → 5. Cache-reuse fix (dekho
+  // STABILITY (2026-09-18): 5 → 2. Cache-reuse fix (dekho
   // youtube_service.dart download()) ne per-song network load kaafi kam
   // kar diya hai (jo gaana pehle se cached hai uske liye ye ab sirf local
   // disk copy hai, koi extra network hit nahi) — isliye 5 parallel
   // network-download bhi ab safe hain.
-  static const int maxConcurrent = 5;
+  static const int maxConcurrent = 2;
 
   final List<Song> _queue = [];
   // Abhi active (in-flight) downloads — songId -> Song
