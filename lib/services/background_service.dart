@@ -723,6 +723,22 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       ProcessingState.completed: AudioProcessingState.completed,
     }[player.processingState]!;
 
+    // PHASE SELF-HEAL (v81): just_audio is the authoritative playback
+    // signal. In a Radio transition an older async resolve could leave the
+    // custom phase at "buffering" even though ExoPlayer was already READY
+    // and PLAYING. That produced the exact UI symptom: audio/progress moving
+    // while Radio subtitle still said "Buffering...". Only promote the phase
+    // when the player is genuinely READY+PLAYING; never hide a real loading
+    // or buffering state.
+    if (playing && player.processingState == ProcessingState.ready &&
+        _activePlaybackSong != null &&
+        (phase.value == PlaybackPhase.resolving ||
+            phase.value == PlaybackPhase.verifying ||
+            phase.value == PlaybackPhase.buffering ||
+            phase.value == PlaybackPhase.retrying)) {
+      _setPhase(_playToken, PlaybackPhase.playing);
+    }
+
     if (playing != _lastLoggedPlaying ||
         processingState != _lastLoggedProcessingState) {
       AppLogger.instance.log(
@@ -930,19 +946,90 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> Function(Song song)? _radioErrorHandler;
   Song? _activePlaybackSong;
 
+  // RADIO OWNER LOCK (v81): an old Radio screen can dispose while a new
+  // Radio screen is already being created. Previously dispose() called
+  // setRadioPlaybackOwned(false) unconditionally, so the old screen could
+  // switch Radio OFF and stop the NEW screen's player. The real-device log
+  // showed exactly that sequence: a new candidate reached playing=true, then
+  // an old dispose() stopped it and the new transition was reported as
+  // failed. Owner ids make release conditional.
+  int _radioOwnerSequence = 0;
+  int? _radioOwnerId;
+
+  int claimRadioPlaybackOwned({
+    Future<void> Function()? onNext,
+    Future<void> Function()? onPrevious,
+    Future<void> Function(Song song)? onError,
+  }) {
+    final ownerId = ++_radioOwnerSequence;
+    AppLogger.instance.log(
+      '[RADIO] claimRadioPlaybackOwned() — owner #$ownerId ON (Radio screen playback control karega)',
+    );
+    _radioOwnerId = ownerId;
+    _radioPlaybackOwned = true;
+    _radioNextHandler = onNext;
+    _radioPreviousHandler = onPrevious;
+    _radioErrorHandler = onError;
+
+    // Invalidate stale resolve/recovery work from the previous Radio owner.
+    _playToken++;
+    _streamErrorRetries = 0;
+    return ownerId;
+  }
+
+  Future<void> releaseRadioPlaybackOwned(int ownerId) async {
+    if (_radioOwnerId != ownerId) {
+      AppLogger.instance.log(
+        '[RADIO] releaseRadioPlaybackOwned(owner #$ownerId) IGNORED — current owner #${_radioOwnerId ?? "none"}',
+      );
+      return;
+    }
+
+    AppLogger.instance.log(
+      '[RADIO] releaseRadioPlaybackOwned(owner #$ownerId) — Radio mode OFF',
+    );
+    _radioOwnerId = null;
+    _radioPlaybackOwned = false;
+    _radioNextHandler = null;
+    _radioPreviousHandler = null;
+    _radioErrorHandler = null;
+
+    // Invalidate in-flight work. Delay the actual stop by one event-loop turn
+    // so a new Radio screen can claim ownership first; in that case this old
+    // release must NOT stop the new owner's source.
+    _playToken++;
+    _streamErrorRetries = 0;
+    final sequenceAtRelease = _radioOwnerSequence;
+    await Future<void>.delayed(Duration.zero);
+    if (_radioOwnerSequence != sequenceAtRelease || _radioOwnerId != null) {
+      AppLogger.instance.log(
+        '[RADIO] stale release stop cancelled — new owner appeared.',
+      );
+      return;
+    }
+    try {
+      await stop();
+    } catch (_) {}
+  }
+
+  // Compatibility for any older caller. RadioPlayerScreen uses the
+  // owner-aware claim/release API above.
   void setRadioPlaybackOwned(
     bool owned, {
     Future<void> Function()? onNext,
     Future<void> Function()? onPrevious,
     Future<void> Function(Song song)? onError,
   }) {
-    AppLogger.instance.log(
-      '[RADIO] setRadioPlaybackOwned($owned) — Radio mode ${owned ? "ON (ab Radio screen playback control karega)" : "OFF (wapas normal Queue control me)"}',
-    );
-    _radioPlaybackOwned = owned;
-    _radioNextHandler = owned ? onNext : null;
-    _radioPreviousHandler = owned ? onPrevious : null;
-    _radioErrorHandler = owned ? onError : null;
+    if (owned) {
+      claimRadioPlaybackOwned(
+        onNext: onNext,
+        onPrevious: onPrevious,
+        onError: onError,
+      );
+    } else {
+      final owner = _radioOwnerId;
+      if (owner != null) unawaited(releaseRadioPlaybackOwned(owner));
+    }
   }
 
   /// Radio-only preload. This never touches QueueService or its queue index.

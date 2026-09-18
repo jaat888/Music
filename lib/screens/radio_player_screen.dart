@@ -49,6 +49,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   int _sessionGeneration = 0;
   int _candidateGeneration = 0;
   bool _transitioning = false;
+  int? _radioOwnerId;
 
   // BUG FIX (v80 — user-verified list, #1/#3/#4: "Next/Previous/Play-Pause
   // command transition ke dauraan drop ho jaati hai"): pehle
@@ -76,8 +77,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   @override
   void initState() {
     super.initState();
-    audioHandler.setRadioPlaybackOwned(
-      true,
+    _radioOwnerId = audioHandler.claimRadioPlaybackOwned(
       onNext: () => _advance(auto: false),
       onPrevious: _previous,
       onError: _onRadioPlaybackError,
@@ -96,8 +96,11 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   @override
   void dispose() {
     _completionSub?.cancel();
-    audioHandler.setRadioPlaybackOwned(false);
-    unawaited(audioHandler.stop());
+    final ownerId = _radioOwnerId;
+    _radioOwnerId = null;
+    if (ownerId != null) {
+      unawaited(audioHandler.releaseRadioPlaybackOwned(ownerId));
+    }
     _evictRadioArtwork();
     super.dispose();
   }
