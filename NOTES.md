@@ -2795,3 +2795,42 @@ confirm karna, khaaskar low-bandwidth/CDN-stall scenario reproduce karke.
 - Removed the skip-next button from the Radio controls.
 - Swipe detection uses both drag distance and velocity so slow swipes work reliably.
 - v82 buffering/owner-lock/play-pause fixes are retained.
+
+## 2026-09-19 (v95) — Home: JioSaavn + iTunes curated playlists added
+
+**User ka ask:** iTunes ki free/daily India playlists jaisa kuch chahiye tha
+(gaana hamesha YouTube se hi bajega, jaisa Radio mode karta hai — sirf
+title/singer naam chahiye source se). Baat karte-karte pata chala ki jo
+screenshot reference diya gaya tha (Categories → "Dancing on your own" →
+"India's biggest hits" wagera), wo dar-asal APP KA APNA already-existing
+`getHomeFeed()` feature hi tha (YT Music ka live curated home feed,
+`youtube_service.dart` — koi Spotify nahi, jaisa beech mein galat-samjha
+gaya tha). Isliye Spotify Browse API (jo already Nov 2024 se sabke liye
+band ho chuki hai — `featured-playlists`/`categories/{id}/playlists` dono
+403) use hi nahi karna pada.
+
+**Kya naya hua** (dekho README.md "Batch 95" ka poora detail):
+1. `lib/services/jiosaavn_service.dart` (NEW) — JioSaavn se koi-login-nahi
+   playlist search (`searchPlaylists`) + tracks (`getPlaylistTracks`) —
+   sirf title+singer, poori tarah defensive parsing (undocumented endpoint
+   hai, koi bhi field missing ho sakta hai — us case me section bas khaali
+   reh jaayega, crash nahi).
+2. `lib/services/itunes_charts_service.dart` (NEW) — Apple ka free/keyless
+   `rss.marketingtools.apple.com` "Most Played" chart, India ("in")
+   region.
+3. `lib/screens/curated_playlist_screen.dart` (NEW) — generic
+   title+artist → YouTube-match-and-play screen, dono naye sources isi ek
+   screen ko reuse karte hain (pattern `import_playlist_screen.dart` ke
+   Spotify-branch se copy kiya).
+4. `lib/screens/home_screen.dart` — do naye sections ("India ki
+   Playlists" = JioSaavn, "iTunes — India Top Songs") Categories ke neeche
+   jode, apne alag loading-flags + try/catch ke saath (asli YT feed se
+   bilkul independent — koi bhi ek fail ho to baaki sab chalte rahenge).
+   Pull-to-refresh (`_refreshAll()`) ab teeno source refresh karta hai.
+
+STATUS: is dev-environment mein compile-test NAHI ho paaya (Flutter/Dart
+toolchain nahi hai yahan). JioSaavn ka shape sabse zyada risky hissa hai
+(undocumented) — real device pe "India ki Playlists" section mein data
+aana confirm karna; agar khaali aaye to endpoint response ka actual JSON
+shape dekh ke `jiosaavn_service.dart` ki parsing adjust karni padegi.
+iTunes wala Apple ka stable/official format hai, kam risk hai.

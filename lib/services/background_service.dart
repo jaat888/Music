@@ -636,8 +636,28 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
 
   // Actual CDN stream-drop handler — ab yahan bhi retry hota hai (pehle
   // seedha final error dikha deta tha, 0 retries).
+  // FIX (v94): EK hi asli failure ke liye do signal aate the — (1) player ka
+  // playbackEventStream `onError` aur (2) `_playSong()` ka apna catch — dono
+  // ~10-100ms ke andar `_handleStreamDrop()` bulate the. Result: ek error 2 retry
+  // gin leta tha (real log: "retry 1/3" aur "retry 2/3" 9ms ke gap pe) aur do
+  // parallel retry-chains ek dusre ka setUrl cut karti thi ("Source error"),
+  // isliye 3 retries jaldi khatam ho ke ~10 sec ka atkna hota tha.
+  // Ab same token ke liye 700ms ke andar dobara aaya call duplicate maana jaata hai.
+  DateTime? _lastStreamDropAt;
+  int? _lastStreamDropToken;
+
   void _handleStreamDrop() {
     final token = _playToken;
+    final nowTs = DateTime.now();
+    if (_lastStreamDropToken == token &&
+        _lastStreamDropAt != null &&
+        nowTs.difference(_lastStreamDropAt!) <
+            const Duration(milliseconds: 700)) {
+      print('YT STREAM DROP: duplicate signal (same failure, <700ms) — ignore kiya.');
+      return;
+    }
+    _lastStreamDropToken = token;
+    _lastStreamDropAt = nowTs;
     final song = _activePlaybackSong ?? QueueService.instance.currentSong;
 
     if (song != null && _streamErrorRetries == 0) {
@@ -899,12 +919,23 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // (neeche `player.play()` error nahi deta), phase ko unconditionally
     // `playing` kar do — sirf `paused` check hata diya, taaki koi bhi
     // stuck-frozen state (chahe kaise bhi aayi ho) hamesha clear ho jaaye.
-    return player.play().then((_) {
-      if (phase.value != PlaybackPhase.playing) {
-        _setPhase(_playToken, PlaybackPhase.playing);
-      }
-      _logCtl('play() DONE');
-    });
+    // FIX (v94): just_audio ka `player.play()` Future tab tak complete NAHI hota
+    // jab tak playback pause/stop/complete na ho. Purana `.then(...)` isliye
+    // phase ko `playing` TAB set karta tha jab user PAUSE dabata (log: `pause()
+    // DONE — playing=false, phase=playing`), ya skip pe `stop()` ke waqt naye gaane
+    // ka phase galat overwrite ho jaata tha. Ab resume hote hi (source ready ho to)
+    // turant phase `playing` karte hain, aur play() ka Future playback-end tak
+    // caller ko latkata nahi.
+    final playFuture = player.play();
+    if (player.processingState == ProcessingState.ready &&
+        phase.value != PlaybackPhase.playing) {
+      _setPhase(_playToken, PlaybackPhase.playing);
+    }
+    _logCtl('play() DONE');
+    unawaited(playFuture.catchError((Object e) {
+      print('BG: player.play() error (non-fatal): $e');
+    }));
+    return Future.value();
   }
 
   @override

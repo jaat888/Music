@@ -18,6 +18,8 @@ import '../services/youtube_service.dart';
 import '../services/background_service.dart';
 import '../services/like_service.dart';
 import '../services/queue_service.dart';
+import '../services/jiosaavn_service.dart';
+import '../services/itunes_charts_service.dart';
 import '../widgets/song_card.dart';
 import '../widgets/category_card.dart';
 import '../widgets/section_header.dart';
@@ -28,6 +30,7 @@ import 'library_screen.dart';
 import 'downloads_screen.dart';
 import 'full_player_screen.dart';
 import 'live_playlist_screen.dart';
+import 'curated_playlist_screen.dart';
 import 'daily_mix_screen.dart';
 import 'debug_screen.dart';
 import 'settings_screen.dart';
@@ -187,11 +190,122 @@ class _HomeTabContentState extends State<_HomeTabContent> {
   // category jinke liye YouTube ne khud bola "aur results nahi bache"
   final Set<String> _categoryExhausted = {};
 
+  // NEW (2026-09-19, v95) — extra curated-playlist sources (JioSaavn +
+  // iTunes), dekho jiosaavn_service.dart / itunes_charts_service.dart ke
+  // top comments. Dono apne alag `_load*()` + try/catch me hain, taaki
+  // agar in mein se koi bhi source down/slow ho ya shape badal jaaye, to
+  // wo sirf apna hi section khaali chhod de — asli YT Music feed
+  // (`_load()`, upar) ya doosra source bilkul unaffected rahe.
+  List<JioSaavnPlaylistPreview> _jioSaavnPlaylists = [];
+  bool _jioSaavnLoading = true;
+  List<ItunesTrackMeta> _itunesTop = [];
+  bool _itunesLoading = true;
+
+  Future<void> _loadJioSaavn() async {
+    if (!mounted) return;
+    setState(() => _jioSaavnLoading = true);
+    try {
+      final collected = <JioSaavnPlaylistPreview>[];
+      final seen = <String>{};
+      // Apni hi existing categories (Bollywood/Punjabi/Haryanvi/...) reuse
+      // karte hain taaki language-coverage consistent rahe — har category
+      // ke liye chhoti si JioSaavn playlist-search.
+      for (final cat in _kCategories.take(10)) {
+        if (!mounted) return;
+        List<JioSaavnPlaylistPreview> results;
+        try {
+          results = await JioSaavnService.instance.searchPlaylists(
+            '${cat.name} hits',
+            max: 3,
+          );
+        } catch (_) {
+          results = []; // ek category fail ho to baaki try karte rehna hai
+        }
+        for (final r in results) {
+          if (seen.add(r.id)) collected.add(r);
+        }
+        if (collected.length >= 24) break;
+      }
+      if (!mounted) return;
+      setState(() {
+        _jioSaavnPlaylists = collected;
+        _jioSaavnLoading = false;
+      });
+    } catch (e) {
+      print('HOME jiosaavn-section ERROR: $e');
+      if (mounted) setState(() => _jioSaavnLoading = false);
+    }
+  }
+
+  Future<void> _loadItunesChart() async {
+    if (!mounted) return;
+    setState(() => _itunesLoading = true);
+    try {
+      final tracks =
+          await ItunesChartsService.instance.getTopSongs(country: 'in', limit: 50);
+      if (!mounted) return;
+      setState(() {
+        _itunesTop = tracks;
+        _itunesLoading = false;
+      });
+    } catch (e) {
+      print('HOME itunes-section ERROR: $e');
+      if (mounted) setState(() => _itunesLoading = false);
+    }
+  }
+
+  // Pull-to-refresh sabhi teeno source refresh kare (asli YT feed +
+  // JioSaavn + iTunes) — taaki playlists "updated rehna chahiye" wali
+  // requirement poori ho. Teeno parallel/independent hain, ek fail ho to
+  // baaki do normally load ho jaayenge.
+  Future<void> _refreshAll() async {
+    await Future.wait([
+      _load(),
+      _loadJioSaavn(),
+      _loadItunesChart(),
+    ]);
+  }
+
+  void _openJioSaavnPlaylist(JioSaavnPlaylistPreview p) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CuratedPlaylistScreen(
+          title: p.title,
+          subtitle: p.subtitle,
+          metaLoader: () async {
+            final tracks = await JioSaavnService.instance.getPlaylistTracks(p.id);
+            return tracks.map((t) => CuratedTrackMeta(t.title, t.artist)).toList();
+          },
+        ),
+      ),
+    );
+  }
+
+  void _openItunesChart() {
+    final snapshot = _itunesTop; // is tap ke waqt ka data, baad me badlega to bhi consistent
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CuratedPlaylistScreen(
+          title: '🇮🇳 India Top Songs',
+          subtitle: 'Apple Music charts',
+          metaLoader: () async =>
+              snapshot.map((t) => CuratedTrackMeta(t.title, t.artist)).toList(),
+        ),
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
     _load();
+    // JioSaavn/iTunes ko _load() se independent, parallel fire karte hain —
+    // taaki asli YT feed ka loading in dono ke response ka wait na kare.
+    _loadJioSaavn();
+    _loadItunesChart();
   }
 
   @override
@@ -639,7 +753,7 @@ class _HomeTabContentState extends State<_HomeTabContent> {
         children: [
           Expanded(
             child: RefreshIndicator(
-              onRefresh: _load,
+              onRefresh: _refreshAll,
               color: kGreen,
               backgroundColor: kBgElev,
               child: ListView(
@@ -816,6 +930,71 @@ class _HomeTabContentState extends State<_HomeTabContent> {
                       },
                     ),
                   ),
+                  // NEW (2026-09-19, v95) — extra curated-playlist sources.
+                  // Dono sections independent hain (_jioSaavnLoading /
+                  // _itunesLoading alag flags) — ek khaali/fail ho to
+                  // doosra bhi normally dikhta rahega.
+                  if (_jioSaavnLoading) ...[
+                    SectionHeader(title: 'India ki Playlists'),
+                    SizedBox(
+                      height: 180,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: 4,
+                        separatorBuilder: (_, __) => const SizedBox(width: 12),
+                        itemBuilder: (_, __) => Container(
+                          width: 130,
+                          height: 130,
+                          decoration: BoxDecoration(
+                            color: kSurface,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ] else if (_jioSaavnPlaylists.isNotEmpty) ...[
+                    SectionHeader(title: 'India ki Playlists'),
+                    SizedBox(
+                      height: 180,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _jioSaavnPlaylists.length,
+                        separatorBuilder: (_, __) => const SizedBox(width: 12),
+                        itemBuilder: (context, i) {
+                          final p = _jioSaavnPlaylists[i];
+                          return _LivePlaylistCard(
+                            preview: YtPlaylistPreview(
+                              id: p.id,
+                              title: p.title,
+                              subtitle: p.subtitle,
+                              thumb: p.thumb,
+                            ),
+                            onTap: () => _openJioSaavnPlaylist(p),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                  if (!_itunesLoading && _itunesTop.isNotEmpty) ...[
+                    SectionHeader(title: 'iTunes — India Top Songs'),
+                    SizedBox(
+                      height: 180,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        children: [
+                          _LivePlaylistCard(
+                            preview: YtPlaylistPreview(
+                              id: 'itunes_top_in',
+                              title: 'India Top ${_itunesTop.length}',
+                              subtitle: 'Apple Music',
+                              thumb: _itunesTop.first.artwork,
+                            ),
+                            onTap: _openItunesChart,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   ..._buildFeedWidgets(),
                   const SizedBox(height: 90), // mini player + bottom nav ke liye jagah
                 ],

@@ -427,6 +427,37 @@ koi WebView nahi. **NOT YET COMPILE-TESTED** (is session me Android SDK
 available nahi tha) — pehla CI build compile-errors de sakta hai, standard
 batch-by-batch flow se fix karna. Poori details `NOTES.md` Batch 22 me.
 
+### Batch 95 — Extra curated-playlist sources: JioSaavn + iTunes (2026-09-19)
+Home screen pe pehle se maujood live YT Music feed (`getHomeFeed()` —
+Categories, "Dancing on your own", "India's biggest hits" jaisi sections)
+ke SAATH, do naye playlist sources jode:
+- **JioSaavn** (`jiosaavn_service.dart`) — koi login/API-key nahi, JioSaavn
+  ka apna undocumented endpoint (jo saari open-source JioSaavn wrapper
+  libraries use karti hain). App ki existing categories (Bollywood,
+  Punjabi, Haryanvi, ...) reuse karke unki editorial/curated playlists
+  dhoondta hai — "India ki Playlists" section, Home screen pe.
+- **iTunes/Apple Music** (`itunes_charts_service.dart`) — Apple ka free,
+  keyless, public "Marketing Tools" chart feed (`rss.marketingtools.apple.com`)
+  — India ka "Most Played" Top-50 chart, ek card ki tarah ("iTunes — India
+  Top Songs").
+
+Dono sources se sirf **title + artist metadata** aata hai — audio hamesha
+YouTube se hi resolve hota hai (naya `curated_playlist_screen.dart`,
+`import_playlist_screen.dart` ke Spotify-import-branch jaisa hi pattern:
+ek-ek track YouTube pe search karke best-match video se play hota hai).
+Dono naye sources `home_screen.dart` ke asli YT-feed load se **independent**
+hain (alag `try/catch`, alag loading-flag) — koi bhi ek down/slow/shape-
+change ho to baaki sab (asli YT feed included) normally kaam karte rahenge.
+Pull-to-refresh (`_refreshAll()`) teeno source refresh karta hai.
+
+**STATUS — is dev-environment mein compile-test NAHI ho paaya** (yahan
+Flutter/Dart toolchain nahi hai). JioSaavn ka endpoint reverse-engineered/
+undocumented hai — agar JioSaavn apna response-shape badal de, poori
+defensive parsing (`jiosaavn_service.dart`) ke through wo section bas
+khaali reh jaayega (crash nahi), lekin real device pe ek baar confirm
+zaroor karna ki "India ki Playlists" section mein data aa raha hai.
+iTunes ka feed Apple ka official/stable format hai, kam risk hai.
+
 ## Features (poore app ka scope, reference ke liye)
 YouTube search + stream + download; Home categories (Bollywood, Punjabi,
 Haryanvi, Lo-Fi, Party, Romantic, Workout, Old Hits, Arijit, Chill,
