@@ -8,12 +8,15 @@
 // video se play hota hai) — audio hamesha YouTube se hi aata hai, source
 // se sirf naam/singer milta hai.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../db/cache_db.dart';
 import '../models/song.dart';
 import '../services/background_service.dart';
+import '../services/curated_match_cache.dart';
 import '../services/like_service.dart';
 import '../services/local_media_resolver.dart';
 import '../services/queue_service.dart';
@@ -79,26 +82,45 @@ class _CuratedPlaylistScreenState extends State<CuratedPlaylistScreen> {
       // Har track ko YouTube pe search karke best-match video jodte hain —
       // ek-ek karke (rate-limit friendly), progress dikhate hue — bilkul
       // import_playlist_screen.dart ke Spotify-branch jaisa.
+      //
+      // FIX: pehle har baar playlist kholne par saare gaane dobara search hote
+      // the. Ab pehle CuratedMatchCache (disk) dekhte hain — pehle se matched
+      // gaane instantly aate hain, sirf naye gaano ke liye network jaata hai.
+      final cache = CuratedMatchCache.instance;
+      await cache.ensureLoaded();
       final matched = <Song>[];
       final seenIds = <String>{};
+      var newlyMatched = 0;
       for (var i = 0; i < metas.length; i++) {
         final m = metas[i];
-        if (!mounted) return;
-        setState(() {
-          _progressText = 'Match kar rahe hain ${i + 1}/${metas.length}: ${m.title}';
-        });
-        try {
-          final query = m.artist.isNotEmpty ? '${m.title} ${m.artist}' : m.title;
-          final results = await YoutubeService.instance.search(query, max: 3);
-          if (results.isNotEmpty) {
-            final song = results.first.toSong();
-            if (seenIds.add(song.id)) matched.add(song);
-          }
-        } catch (_) {
-          // Ek track match na ho (network/parsing) to poori playlist khaali
-          // na ho — bas agla track try karo.
+        if (!mounted) {
+          unawaited(cache.flush());
+          return;
         }
+        Song? song = cache.get(m.title, m.artist);
+        if (song == null) {
+          setState(() {
+            _progressText =
+                'Match kar rahe hain ${i + 1}/${metas.length}: ${m.title}';
+          });
+          try {
+            final query = m.artist.isNotEmpty ? '${m.title} ${m.artist}' : m.title;
+            final results = await YoutubeService.instance.search(query, max: 3);
+            if (results.isNotEmpty) {
+              song = results.first.toSong();
+              cache.put(m.title, m.artist, song);
+              newlyMatched++;
+              // Beech me screen band ho jaye to bhi ab tak ka kaam bacha rahe.
+              if (newlyMatched % 5 == 0) unawaited(cache.flush());
+            }
+          } catch (_) {
+            // Ek track match na ho (network/parsing) to poori playlist khaali
+            // na ho — bas agla track try karo.
+          }
+        }
+        if (song != null && seenIds.add(song.id)) matched.add(song);
       }
+      unawaited(cache.flush());
       if (matched.isEmpty) {
         throw Exception('Koi bhi gaana YouTube pe match nahi hua.');
       }

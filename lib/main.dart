@@ -5,7 +5,6 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'services/app_logger.dart';
@@ -23,7 +22,6 @@ import 'services/sleep_timer_service.dart';
 import 'services/theme_service.dart';
 import 'theme/app_theme.dart';
 import 'theme/colors.dart';
-import 'screens/home_screen.dart';
 import 'screens/splash_screen.dart';
 
 String? _startupError;
@@ -273,33 +271,14 @@ class _ErrorScreen extends StatelessWidget {
   }
 }
 
-class _Boot extends StatefulWidget {
+// UPDATE: ab har baar app khulne par intro (SplashScreen — "Welcome to
+// SurSathi" awaaz + animation) chalta hai. Splash khatam hone par wahi
+// SharedPreferences ('onboarding_done') check karke Home ya Onboarding kholta
+// hai — pehle ye check yahan hota tha aur onboarded users splash skip kar
+// dete the.
+class _Boot extends StatelessWidget {
   const _Boot({super.key});
-  @override
-  State<_Boot> createState() => _BootState();
-}
-
-class _BootState extends State<_Boot> {
-  bool? _onboarded;
 
   @override
-  void initState() {
-    super.initState();
-    _check();
-  }
-
-  Future<void> _check() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (mounted) {
-      setState(() => _onboarded = prefs.getBool('onboarding_done') ?? false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_onboarded == null) {
-      return Scaffold(backgroundColor: kBg, body: SizedBox.shrink());
-    }
-    return _onboarded! ? const HomeScreen() : const SplashScreen();
-  }
+  Widget build(BuildContext context) => const SplashScreen();
 }

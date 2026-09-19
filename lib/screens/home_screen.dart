@@ -212,36 +212,65 @@ class _HomeTabContentState extends State<_HomeTabContent> {
   List<ItunesTrackMeta> _itunesTop = [];
   bool _itunesLoading = true;
 
-  Future<void> _loadJioSaavn() async {
+  Future<void> _loadJioSaavn({bool force = false}) async {
     if (!mounted) return;
-    setState(() => _jioSaavnLoading = true);
+    // FIX (V120): list ab 12 ghante disk pe cache hoti hai — app khulte hi
+    // turant dikhti hai, aur network/API fail hone par purani list dikhti
+    // rehti hai (pehle fail = section gayab).
+    final cache = await JioSaavnService.instance.readHomeCache();
+    if (!mounted) return;
+    final ageMs = DateTime.now().millisecondsSinceEpoch - cache.savedAtMs;
+    final fresh = cache.items.isNotEmpty &&
+        ageMs >= 0 &&
+        ageMs < const Duration(hours: 12).inMilliseconds;
+    if (cache.items.isNotEmpty) {
+      setState(() {
+        _jioSaavnPlaylists = cache.items;
+        _jioSaavnLoading = false;
+      });
+      if (fresh && !force) return;
+    } else {
+      setState(() => _jioSaavnLoading = true);
+    }
+
     try {
       final collected = <JioSaavnPlaylistPreview>[];
       final seen = <String>{};
       // Apni hi existing categories (Bollywood/Punjabi/Haryanvi/...) reuse
       // karte hain taaki language-coverage consistent rahe — har category
-      // ke liye chhoti si JioSaavn playlist-search.
-      for (final cat in _kCategories.take(10)) {
+      // ke liye chhoti si JioSaavn playlist-search. 5-5 categories parallel
+      // (pehle ek-ek karke — bahut der lagti thi).
+      final cats = _kCategories.take(10).toList();
+      for (var i = 0; i < cats.length; i += 5) {
+        final batch = cats.skip(i).take(5);
+        final lists = await Future.wait(batch.map((cat) async {
+          try {
+            return await JioSaavnService.instance.searchPlaylists(
+              '${cat.name} hits',
+              max: 3,
+            );
+          } catch (_) {
+            return <JioSaavnPlaylistPreview>[]; // ek category fail ho to baaki chalein
+          }
+        }));
         if (!mounted) return;
-        List<JioSaavnPlaylistPreview> results;
-        try {
-          results = await JioSaavnService.instance.searchPlaylists(
-            '${cat.name} hits',
-            max: 3,
-          );
-        } catch (_) {
-          results = []; // ek category fail ho to baaki try karte rehna hai
-        }
-        for (final r in results) {
+        for (final r in lists.expand((e) => e)) {
           if (seen.add(r.id)) collected.add(r);
+        }
+        if (collected.isNotEmpty) {
+          setState(() {
+            _jioSaavnPlaylists = List.of(collected);
+            _jioSaavnLoading = false;
+          });
         }
         if (collected.length >= 24) break;
       }
+      if (collected.isNotEmpty) {
+        await JioSaavnService.instance.writeHomeCache(collected);
+      }
       if (!mounted) return;
-      setState(() {
-        _jioSaavnPlaylists = collected;
-        _jioSaavnLoading = false;
-      });
+      // Kuch nahi mila to jo pehle se dikh raha hai (cache) wahi rehne do.
+      setState(() => _jioSaavnLoading = false);
     } catch (e) {
       print('HOME jiosaavn-section ERROR: $e');
       if (mounted) setState(() => _jioSaavnLoading = false);
@@ -250,7 +279,9 @@ class _HomeTabContentState extends State<_HomeTabContent> {
 
   Future<void> _loadItunesChart() async {
     if (!mounted) return;
-    setState(() => _itunesLoading = true);
+    // Loading flag sirf pehli baar (jab list khaali ho) — warna chart card
+    // har tap/refresh par kuch der ke liye gayab ho jata tha.
+    if (_itunesTop.isEmpty) setState(() => _itunesLoading = true);
     try {
       final tracks =
           await ItunesChartsService.instance.getTopSongs(country: 'in', limit: 50);
@@ -273,7 +304,7 @@ class _HomeTabContentState extends State<_HomeTabContent> {
   Future<void> _refreshAll() async {
     await Future.wait([
       _load(),
-      _loadJioSaavn(),
+      _loadJioSaavn(force: true),
       _loadItunesChart(),
     ]);
   }
