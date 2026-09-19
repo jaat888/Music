@@ -1,0 +1,14 @@
+{
+  "name": "SurSathi Flutter",
+  "image": "ghcr.io/cirruslabs/flutter:stable",
+  "postCreateCommand": "flutter create . --platforms=android --org com.sursathi --project-name sursathi --no-overwrite && flutter pub get && dart run flutter_launcher_icons",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "Dart-Code.flutter",
+        "GitHub.copilot",
+        "GitHub.copilot-chat"
+      ]
+    }
+  }
+}

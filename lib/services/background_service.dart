@@ -965,7 +965,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     _logCtl('stop() called');
     _playToken++; // koi bhi pending stale resolve ab kuch overwrite nahi karega
     _playbackStartedToken = null;
-    _skipDebounce?.cancel();
+    _cancelSkipDebounce();
     await player.stop();
     // BUG FIX (2026-09-18): dekho play() ka poora comment — `stop()` pehle
     // `phase` ko bilkul touch nahi karta tha, isliye agar ye kisi beech-ke
@@ -1000,6 +1000,18 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // hote hain. Yahan `_skipDebounce` field sirf declare hua hai taaki
   // `stop()` (aur playWithRetry khud) ek hi Timer share kar sakein.
   Timer? _skipDebounce;
+  // FIX (v94): jab debounce Timer cancel hota tha (naya playWithRetry ya stop()),
+  // purane call ka Completer kabhi complete nahi hota tha -> `await playWithRetry()`
+  // hamesha ke liye latka rehta tha (Radio me isse `_transitioning` stuck ho sakta hai).
+  Completer<void>? _skipDebounceCompleter;
+
+  void _cancelSkipDebounce() {
+    _skipDebounce?.cancel();
+    _skipDebounce = null;
+    final c = _skipDebounceCompleter;
+    _skipDebounceCompleter = null;
+    if (c != null && !c.isCompleted) c.complete();
+  }
 
   // v55 Radio Enhanced: Radio owns its own candidate/history/error transitions.
   // When this flag is true, the global just_audio completion listener must not
@@ -1563,23 +1575,31 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // state upar hi turant broadcast ho chuke hain, isliye UI (mini
     // player/full player) turant update dikhta hai — sirf asli network
     // resolve thoda delay hota hai jab tak taps settle na ho jaayein.
+    _cancelSkipDebounce(); // purana pending call (agar ho) ka Completer bhi complete karta hai
     final completer = Completer<void>();
-    _skipDebounce?.cancel();
+    _skipDebounceCompleter = completer;
     _skipDebounce = Timer(
       _radioPlaybackOwned ? Duration.zero : const Duration(milliseconds: 300),
       () async {
-        if (token != _playToken) {
-          completer.complete();
-          return;
+        try {
+          if (token != _playToken) return;
+          // Agar ye Radio ki OUTER recovery hai (`_ensureRecovery`, jo
+          // `_handleStreamDrop()` ke apne 3 internal attempts fail hone ke
+          // baad chalti hai) usi gaane ke liye jiska drop hua tha, tab bhi
+          // wahi captured position use karo — na ki 0.
+          final resumeAt =
+              _streamDropSongId == song.id ? _streamDropResumePosition : null;
+          await _resolveAndPlay(song, token, resumeAt: resumeAt);
+        } catch (e) {
+          // FIX (v94): _resolveAndPlay se koi bhi unexpected exception aaye
+          // to Completer phir bhi complete ho (finally), caller latke nahi.
+          print('playWithRetry: _resolveAndPlay unexpected error: $e');
+        } finally {
+          if (!completer.isCompleted) completer.complete();
+          if (identical(_skipDebounceCompleter, completer)) {
+            _skipDebounceCompleter = null;
+          }
         }
-        // Agar ye Radio ki OUTER recovery hai (`_ensureRecovery`, jo
-        // `_handleStreamDrop()` ke apne 3 internal attempts fail hone ke
-        // baad chalti hai) usi gaane ke liye jiska drop hua tha, tab bhi
-        // wahi captured position use karo — na ki 0.
-        final resumeAt =
-            _streamDropSongId == song.id ? _streamDropResumePosition : null;
-        await _resolveAndPlay(song, token, resumeAt: resumeAt);
-        completer.complete();
       },
     );
     return completer.future;

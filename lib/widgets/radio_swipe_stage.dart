@@ -219,11 +219,19 @@ class _RadioSwipeStageState extends State<RadioSwipeStage>
     });
   }
 
+  // FIX (v94): gesture cancel (system gesture / notification shade / multi-touch)
+  // pe pehle koi handler nahi tha -> screen aadhi khinchi hui atak jaati thi.
+  void _onDragCancel() {
+    if (_pendingCommit != 0) return;
+    _springBack();
+  }
+
   void _springBack() {
     _animateTo(0, curve: Curves.easeOutCubic);
   }
 
   void _animateTo(double target, {required Curve curve}) {
+    _settleAnim = null; // FIX (v94): purani anim ka listener reset() pe _drag ko puraani value pe na kudaye
     _controller
       ..stop()
       ..reset();
@@ -258,6 +266,7 @@ class _RadioSwipeStageState extends State<RadioSwipeStage>
           onVerticalDragStart: _onDragStart,
           onVerticalDragUpdate: _onDragUpdate,
           onVerticalDragEnd: _onDragEnd,
+          onVerticalDragCancel: _onDragCancel,
           child: ClipRect(
             child: Stack(
               fit: StackFit.expand,
