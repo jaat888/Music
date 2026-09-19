@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import '../lib/services/mood_catalog.dart';
-import '../lib/screens/radio_language_select_screen.dart';
+import 'package:sursathi/services/mood_catalog.dart';
 
 void main() {
   test('strict mood accepts explicit mood keyword', () {
@@ -16,7 +15,7 @@ void main() {
   test('mood query carries the selected language and negative regional guards', () {
     final mood = moodProfileByCode('chill')!;
     final bollywood = mood.queryFor(
-      RadioLanguageSelectScreen.languages.first.code,
+      'bollywood',
       latest: true,
       seedIndex: 0,
     );

@@ -424,7 +424,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     final mood = _moodProfile;
     if (mood == null) return _candidates;
 
-    bool eligible(RadioCandidate c) {
+    bool isEligible(RadioCandidate c) {
       if (excludeIds.contains(c.song.id)) return false;
       if (_engine.failedSessionIds.contains(c.song.id)) return false;
       if (!RadioCandidateFilter.durationAllowed(c.song.duration)) return false;
@@ -436,7 +436,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       return !RadioHistoryStore.instance.wasPlayedRecently(c.song.id);
     }
 
-    final eligible = _candidates.where(eligible).toList();
+    final eligible = _candidates.where(isEligible).toList();
     final latest = eligible.where((c) => c.isLatest).toList();
     // Mood protocol: latest/new candidates are a hard first phase. Only once
     // there are no fresh latest candidates left do we fall back to the broader
