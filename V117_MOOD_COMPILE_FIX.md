@@ -19,3 +19,10 @@ so the test file failed at *loading* time
   tree in for one string.
 
 Not run here (no Flutter SDK in sandbox): `flutter analyze`, `flutter test`.
+
+## Release build fix (build #: `flutter build apk --release`)
+`lib/screens/mood_playlist_screen.dart:290` — `const Icon(Icons.chevron_right, color: kTextDim)`
+failed with "Not a constant expression" because `kTextDim` is a theme-reactive
+getter (see `lib/theme/colors.dart`), not a const. Removed `const` from that one
+widget. All other `const` expressions in `lib/` were scanned for the same
+pattern (kBg / kBgElev / kSurface / kText / kTextDim): no other occurrences.

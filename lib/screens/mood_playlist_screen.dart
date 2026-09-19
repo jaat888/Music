@@ -287,7 +287,7 @@ class _MoodPlaylistScreenState extends State<MoodPlaylistScreen> {
                           ],
                         ),
                       ),
-                      const Icon(Icons.chevron_right, color: kTextDim),
+                      Icon(Icons.chevron_right, color: kTextDim),
                     ],
                   ),
                 ),
