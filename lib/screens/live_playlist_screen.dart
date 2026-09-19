@@ -1,4 +1,8 @@
 // lib/screens/live_playlist_screen.dart
+// UPDATED (2026-09-19, v122): playlist open hote hi first 20 song stream URLs
+// 10-at-a-time background warm-up me resolve hote hain; MiniPlayer + both
+// Add-to-Playlist/Download actions are available on the playlist screen.
+//
 // NEW (2026-09-16, v11): YouTube Music ki ek curated/"live" playlist ke
 // andar ke gaane dikhata hai. Home feed (getHomeFeed) me jo playlist
 // cards aate hain, unhe tap karne pe ye screen khulti hai aur us
@@ -14,6 +18,7 @@ import '../theme/typography.dart';
 import '../models/song.dart';
 import '../db/liked_db.dart';
 import '../db/cache_db.dart';
+import '../db/download_db.dart';
 import '../services/youtube_service.dart';
 import '../services/background_service.dart';
 import '../services/like_service.dart';
@@ -51,12 +56,25 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
   List<YtResult> _tracks = [];
   Set<String> _likedIds = {};
   Set<String> _cachedIds = {};
+  Set<String> _downloadedIds = {};
+  late final void Function(Song song, bool success) _downloadFinishListener;
   String? _error;
 
   @override
   void initState() {
     super.initState();
+    _downloadFinishListener = (song, success) {
+      if (!success || !mounted) return;
+      setState(() => _downloadedIds.add(song.id));
+    };
+    DownloadQueueService.instance.addFinishListener(_downloadFinishListener);
     _load();
+  }
+
+  @override
+  void dispose() {
+    DownloadQueueService.instance.removeFinishListener(_downloadFinishListener);
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -70,16 +88,21 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
       );
       final liked = await LikedDB.instance.getAll();
       final cached = await CacheDB.instance.getAll();
+      final downloaded = await DownloadDB.instance.getAll();
       if (!mounted) return;
       setState(() {
         _tracks = tracks;
         _likedIds = liked.map((s) => s.id).toSet();
         _cachedIds = cached.map((e) => e['id'] as String).toSet();
+        _downloadedIds = downloaded.map((s) => s.id).toSet();
         _error = tracks.isEmpty
             ? 'Ye playlist abhi load nahi ho paayi (khaali hai ya YouTube'
                 ' se load fail hua). Thodi der baad try karo.'
             : null;
       });
+      // First 20 playlist songs ka stream URL background me warm karo.
+      // UI/playlist list block nahi hoti; existing player wahi cached URL use karega.
+      audioHandler.prefetchPlaylistSongs(tracks.map((r) => r.toSong()), count: 20);
     } catch (e) {
       print('LIVE PLAYLIST _load() ERROR: $e');
       if (!mounted) return;
@@ -117,6 +140,18 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
 
   Future<void> _addToPlaylist(Song song) async {
     await showAddToPlaylistSheet(context, song);
+  }
+
+  void _downloadSong(Song song) {
+    if (_downloadedIds.contains(song.id) ||
+        DownloadQueueService.instance.isActive(song.id)) {
+      return;
+    }
+    DownloadQueueService.instance.enqueue(song);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('"${song.title}" download queue mein daal diya')),
+    );
   }
 
   // NEW (v41 — user request): poori playlist ek tap me local library me
@@ -160,9 +195,10 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
         createdAt: DateTime.now(),
       ),
     );
-    for (final r in _tracks) {
-      await PlaylistDB.instance.addSongToPlaylist(id, r.toSong());
-    }
+    await PlaylistDB.instance.addSongsToPlaylist(
+      id,
+      _tracks.map((r) => r.toSong()),
+    );
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('"$name" library me save ho gayi — ${_tracks.length} gaane')),
@@ -360,6 +396,8 @@ class _LivePlaylistScreenState extends State<LivePlaylistScreen> {
                               onTap: () => _playFrom(i),
                               onPlay: () => _playFrom(i),
                               onAddToPlaylist: () => _addToPlaylist(song),
+                              onDownload: () => _downloadSong(song),
+                              isDownloaded: _downloadedIds.contains(song.id),
                               onLike: () => _toggleLike(song),
                             ),
                           );

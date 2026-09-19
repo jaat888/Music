@@ -1,301 +1,337 @@
 // lib/screens/mood_playlist_screen.dart
-// Mood Mode entry flow:
-// 1) language selection (same three strict language choices as Radio),
-// 2) mood selection,
-// 3) the existing hardened Radio player runs in strict Mood mode so it can
-//    keep generating songs continuously instead of stopping at a short list.
+// YouTube Music-style discovery: Mood/Genre or Language -> live playlists
+// -> existing normal playlist/player flow. No Radio mode is involved here.
 
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 import '../services/mood_catalog.dart';
-import '../services/radio_service.dart';
+import '../services/youtube_service.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
-import 'radio_language_select_screen.dart';
-import 'radio_player_screen.dart';
+import 'live_playlist_screen.dart';
 
-class MoodPlaylistScreen extends StatefulWidget {
+class MoodPlaylistScreen extends StatelessWidget {
   const MoodPlaylistScreen({super.key});
 
   @override
-  State<MoodPlaylistScreen> createState() => _MoodPlaylistScreenState();
-}
-
-class _MoodPlaylistScreenState extends State<MoodPlaylistScreen> {
-  static const _prefsKey = 'mood_selected_languages';
-
-  final Set<String> _selectedLanguages = <String>{};
-  bool _loading = true;
-  bool _saving = false;
-  bool _showMoodStep = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadSelection();
-  }
-
-  Future<void> _loadSelection() async {
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getStringList(_prefsKey) ?? [];
-    final valid = RadioLanguageSelectScreen.languages.map((e) => e.code).toSet();
-    if (!mounted) return;
-    setState(() {
-      _selectedLanguages
-        ..clear()
-        ..addAll(saved.where(valid.contains));
-      _loading = false;
-    });
-  }
-
-  void _toggleLanguage(String code) {
-    setState(() {
-      if (_selectedLanguages.contains(code)) {
-        _selectedLanguages.remove(code);
-      } else {
-        _selectedLanguages.add(code);
-      }
-    });
-  }
-
-  Future<void> _continueToMood() async {
-    if (_selectedLanguages.isEmpty || _saving) return;
-    setState(() => _saving = true);
-    final ordered = RadioLanguageSelectScreen.languages
-        .where((language) => _selectedLanguages.contains(language.code))
-        .map((language) => language.code)
-        .toList();
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(_prefsKey, ordered);
-    RadioService.instance.setSelectedLanguages(ordered);
-    if (!mounted) return;
-    setState(() {
-      _selectedLanguages
-        ..clear()
-        ..addAll(ordered);
-      _saving = false;
-      _showMoodStep = true;
-    });
-  }
-
-  void _startMood(MoodProfile mood) {
-    final languages = RadioLanguageSelectScreen.languages
-        .where((language) => _selectedLanguages.contains(language.code))
-        .map((language) => language.code)
-        .toList();
-    if (languages.isEmpty) return;
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => RadioPlayerScreen(
-          languages: languages,
-          moodCode: mood.code,
-          moodLabel: mood.label,
-        ),
-      ),
-    );
-  }
-
-  @override
   Widget build(BuildContext context) {
-    if (_loading) {
-      return Scaffold(
-        backgroundColor: kBg,
-        body: const Center(child: CircularProgressIndicator()),
-      );
-    }
     return Scaffold(
       backgroundColor: kBg,
       appBar: AppBar(
         backgroundColor: kBg,
         elevation: 0,
-        title: Text(_showMoodStep ? 'Choose Mood' : 'Mood Mode', style: AppText.titleL()),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () {
-            if (_showMoodStep) {
-              setState(() => _showMoodStep = false);
-            } else {
-              Navigator.of(context).pop();
-            }
-          },
-        ),
+        title: Text('Moods & Genres', style: AppText.titleL()),
       ),
       body: SafeArea(
-        child: _showMoodStep ? _buildMoodStep() : _buildLanguageStep(),
+        child: CustomScrollView(
+          slivers: [
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 14),
+                child: Text(
+                  'YouTube Music se live playlists discover karo. Mood ya language choose karo.',
+                  style: AppText.bodyM(),
+                ),
+              ),
+            ),
+            SliverToBoxAdapter(child: _sectionTitle('Mood & Genres')),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+              sliver: SliverGrid(
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) {
+                    final mood = kMoodDefinitions[index];
+                    return _DiscoveryCard(
+                      label: mood.label,
+                      emoji: mood.emoji,
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => MoodDiscoveryPlaylistsScreen(mood: mood),
+                        ),
+                      ),
+                    );
+                  },
+                  childCount: kMoodDefinitions.length,
+                ),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 12,
+                  mainAxisSpacing: 12,
+                  childAspectRatio: 1.72,
+                ),
+              ),
+            ),
+            SliverToBoxAdapter(child: _sectionTitle('Languages')),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 30),
+              sliver: SliverGrid(
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) {
+                    final language = kMoodLanguages[index];
+                    return _DiscoveryCard(
+                      label: language.label,
+                      emoji: language.emoji,
+                      subtitle: language.nativeName,
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => MoodDiscoveryPlaylistsScreen(language: language),
+                        ),
+                      ),
+                    );
+                  },
+                  childCount: kMoodLanguages.length,
+                ),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 12,
+                  mainAxisSpacing: 12,
+                  childAspectRatio: 1.72,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _buildLanguageStep() {
-    final canContinue = _selectedLanguages.isNotEmpty && !_saving;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+  Widget _sectionTitle(String title) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+        child: Text(title, style: AppText.displayS()),
+      );
+}
+
+class _DiscoveryCard extends StatelessWidget {
+  final String label;
+  final String emoji;
+  final String? subtitle;
+  final VoidCallback onTap;
+
+  const _DiscoveryCard({
+    required this.label,
+    required this.emoji,
+    required this.onTap,
+    this.subtitle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: kBgElev,
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Text('Pehle languages chuno', style: AppText.displayL()),
+              Text(emoji, style: const TextStyle(fontSize: 31)),
               const SizedBox(height: 8),
-              Text(
-                'Radio ki tarah ek ya jitni chaaho languages select karo. Uske baad mood choose karna hai.',
-                style: AppText.bodyM(),
-              ),
-              const SizedBox(height: 8),
-              Text('${_selectedLanguages.length} selected', style: AppText.bodyS(color: kGreen)),
+              Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: AppText.bodyL()),
+              if (subtitle != null) ...[
+                const SizedBox(height: 2),
+                Text(subtitle!, maxLines: 1, overflow: TextOverflow.ellipsis, style: AppText.bodyS()),
+              ],
             ],
           ),
         ),
-        const SizedBox(height: 18),
-        Expanded(
-          child: ListView.separated(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-            itemCount: RadioLanguageSelectScreen.languages.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 12),
-            itemBuilder: (_, index) {
-              final language = RadioLanguageSelectScreen.languages[index];
-              final selected = _selectedLanguages.contains(language.code);
-              return Semantics(
-                button: true,
-                selected: selected,
-                label: '${language.name} language',
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(18),
-                  onTap: () => _toggleLanguage(language.code),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 180),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: selected ? kGreen.withOpacity(.12) : kBgElev,
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(
-                        color: selected ? kGreen : Colors.transparent,
-                        width: 1.5,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 50,
-                          height: 50,
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(color: kSurface, borderRadius: BorderRadius.circular(14)),
-                          child: Text(language.emoji, style: const TextStyle(fontSize: 26)),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(language.name, style: AppText.bodyL()),
-                              const SizedBox(height: 3),
-                              Text(language.nativeName, style: AppText.bodyS()),
-                            ],
-                          ),
-                        ),
-                        AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 150),
-                          child: selected
-                              ? const Icon(Icons.check_circle, key: ValueKey(true), color: kGreen, size: 27)
-                              : Icon(Icons.radio_button_unchecked, key: const ValueKey(false), color: kTextDim, size: 27),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
+      ),
+    );
+  }
+}
+
+class MoodDiscoveryPlaylistsScreen extends StatefulWidget {
+  final MoodDefinition? mood;
+  final LanguageDefinition? language;
+
+  const MoodDiscoveryPlaylistsScreen({super.key, this.mood, this.language})
+      : assert((mood == null) != (language == null));
+
+  @override
+  State<MoodDiscoveryPlaylistsScreen> createState() => _MoodDiscoveryPlaylistsScreenState();
+}
+
+class _MoodDiscoveryPlaylistsScreenState extends State<MoodDiscoveryPlaylistsScreen> {
+  bool _loading = true;
+  List<YtPlaylistPreview> _playlists = const [];
+  String? _error;
+
+  String get _title => widget.mood?.label ?? widget.language!.label;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      List<YtPlaylistPreview> playlists;
+      if (widget.mood != null) {
+        playlists = await _loadMoodPlaylists(widget.mood!);
+      } else {
+        playlists = await YoutubeService.instance.searchPlaylistsAll(widget.language!.query, max: 80);
+      }
+      final deduped = <String, YtPlaylistPreview>{};
+      for (final playlist in playlists) {
+        if (playlist.id.isNotEmpty && playlist.title.trim().isNotEmpty) {
+          deduped[playlist.id] = playlist;
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _playlists = deduped.values.toList();
+        _error = _playlists.isEmpty ? 'Abhi playlists nahi mil paayi. Pull karke dobara try karo.' : null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _playlists = const [];
+        _error = 'Playlists load nahi ho paayi: $e';
+      });
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<List<YtPlaylistPreview>> _loadMoodPlaylists(MoodDefinition mood) async {
+    final categories = await YoutubeService.instance.getMoodGenreCategories();
+    final aliases = mood.categoryAliases.map(_normalize).where((e) => e.isNotEmpty).toSet();
+
+    for (final category in categories) {
+      final title = _normalize(category.title);
+      if (aliases.contains(title) || aliases.any((alias) => title == alias || title.contains(alias))) {
+        final live = await YoutubeService.instance.getMoodGenrePlaylists(category.params, max: 100);
+        if (live.isNotEmpty) return live;
+      }
+    }
+
+    // Category not available in the current YT Music experiment/locale:
+    // playlist search remains a safe discovery fallback.
+    return YoutubeService.instance.searchPlaylistsAll(mood.fallbackQuery, max: 80);
+  }
+
+  String _normalize(String value) => value
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(
+        backgroundColor: kBg,
+        elevation: 0,
+        title: Text(_title, style: AppText.titleL()),
+      ),
+      body: SafeArea(
+        child: RefreshIndicator(
+          onRefresh: _load,
+          color: kGreen,
+          backgroundColor: kBgElev,
+          child: _buildBody(),
         ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
-          child: SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: canContinue ? _continueToMood : null,
-              icon: _saving
-                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.arrow_forward),
-              label: Text(_saving ? 'Saving...' : 'Next — Choose Mood', style: AppText.button()),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: kGreen,
-                disabledBackgroundColor: kSurface,
-                disabledForegroundColor: kTextDim,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-              ),
-            ),
-          ),
-        ),
-      ],
+      ),
     );
   }
 
-  Widget _buildMoodStep() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-          child: Text('Ab mood chuno', style: AppText.displayL()),
-        ),
-        const SizedBox(height: 8),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: Text(
-            'Sirf selected mood se strict-match gaane aayenge. Latest/new songs ko pehle priority milegi.',
-            style: AppText.bodyM(),
+  Widget _buildBody() {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_error != null && _playlists.isEmpty) {
+      return ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(28),
+        children: [
+          const SizedBox(height: 100),
+          Icon(Icons.playlist_remove, color: kTextDim, size: 54),
+          const SizedBox(height: 14),
+          Center(child: Text(_error!, textAlign: TextAlign.center, style: AppText.bodyM())),
+        ],
+      );
+    }
+    return GridView.builder(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 18,
+        childAspectRatio: .78,
+      ),
+      itemCount: _playlists.length,
+      itemBuilder: (_, index) {
+        final playlist = _playlists[index];
+        return _PlaylistTile(
+          playlist: playlist,
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => LivePlaylistScreen(
+                playlistId: playlist.id,
+                title: playlist.title,
+                subtitle: playlist.subtitle,
+                thumb: playlist.thumb,
+              ),
+            ),
           ),
-        ),
-        const SizedBox(height: 18),
-        Expanded(
-          child: ListView.separated(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-            itemCount: kMoodProfiles.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 12),
-            itemBuilder: (_, index) {
-              final mood = kMoodProfiles[index];
-              return InkWell(
-                borderRadius: BorderRadius.circular(18),
-                onTap: () => _startMood(mood),
-                child: Container(
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: kBgElev,
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(color: kSurface),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 56,
-                        height: 56,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(color: kSurface, borderRadius: BorderRadius.circular(16)),
-                        child: Text(mood.emoji, style: const TextStyle(fontSize: 30)),
+        );
+      },
+    );
+  }
+}
+
+class _PlaylistTile extends StatelessWidget {
+  final YtPlaylistPreview playlist;
+  final VoidCallback onTap;
+
+  const _PlaylistTile({required this.playlist, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: onTap,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: playlist.thumb.isEmpty
+                  ? Container(color: kSurface, child: const Center(child: Icon(Icons.queue_music, size: 42)))
+                  : CachedNetworkImage(
+                      imageUrl: playlist.thumb,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
+                      errorWidget: (_, __, ___) => Container(
+                        color: kSurface,
+                        child: const Center(child: Icon(Icons.queue_music, size: 42)),
                       ),
-                      const SizedBox(width: 14),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(mood.label, style: AppText.bodyL()),
-                            const SizedBox(height: 4),
-                            Text('Strict ${mood.label} Radio • latest first • continuous play', style: AppText.bodyS(color: kTextDim)),
-                          ],
-                        ),
-                      ),
-                      Icon(Icons.chevron_right, color: kTextDim),
-                    ],
-                  ),
-                ),
-              );
-            },
+                    ),
+            ),
           ),
-        ),
-      ],
+          const SizedBox(height: 8),
+          Text(playlist.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: AppText.bodyL()),
+          const SizedBox(height: 2),
+          Text(
+            playlist.subtitle.isEmpty ? 'YouTube Music playlist' : playlist.subtitle,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AppText.bodyS(),
+          ),
+        ],
+      ),
     );
   }
 }

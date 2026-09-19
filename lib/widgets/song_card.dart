@@ -18,10 +18,8 @@ class SongCard extends StatelessWidget {
   final VoidCallback onLike;
   final bool isLiked;
   final bool isCached;
-  // Optional — pass karo to download icon ki jagah playlist_add icon dikhta
-  // hai (e.g. search_screen.dart). Null rakho to purana download button
-  // hamesha jaisa hi rehta hai — baaki saari screens is param ko touch
-  // nahi karti, isliye unka behaviour bilkul same rehta hai.
+  // Optional playlist action. Agar onDownload bhi diya ho to dono buttons
+  // saath dikhte hain; sirf onAddToPlaylist ho to sirf playlist button aata hai.
   final VoidCallback? onAddToPlaylist;
   // NEW: song pehle se offline-downloaded hai to download icon ko
   // "on" (green + filled) dikhane ke liye. Default false — jo screens
@@ -147,10 +145,11 @@ class SongCard extends StatelessWidget {
               if (onAddToPlaylist != null)
                 IconButton(
                   icon: Icon(Icons.playlist_add, color: kTextDim, size: 22),
+                  tooltip: 'Add to playlist',
                   onPressed: onAddToPlaylist,
                   splashRadius: 18,
-                )
-              else if (onDownload != null)
+                ),
+              if (onDownload != null)
                 IconButton(
                   icon: Icon(
                     isDownloaded

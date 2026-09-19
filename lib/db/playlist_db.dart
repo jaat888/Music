@@ -135,6 +135,43 @@ class PlaylistDB {
     );
   }
 
+  // Puri remote/local playlist ko ek saath local playlist me add karo.
+  // Single DB transaction/batch use karta hai, isliye 50-100 songs ke liye
+  // har song par alag query/commit nahi hota.
+  Future<void> addSongsToPlaylist(
+    String playlistId,
+    Iterable<Song> songs,
+  ) async {
+    final db = await _database;
+    final existing = await db.query(
+      _songsTable,
+      columns: ['song_id'],
+      where: 'playlist_id = ?',
+      whereArgs: [playlistId],
+    );
+    var position = existing.length;
+    final batch = db.batch();
+    final seen = existing.map((row) => row['song_id'] as String).toSet();
+    for (final song in songs) {
+      if (!seen.add(song.id)) continue;
+      batch.insert(
+        _songsTable,
+        {
+          'playlist_id': playlistId,
+          'song_id': song.id,
+          'position': position++,
+          'added_at': DateTime.now().millisecondsSinceEpoch,
+          'title': song.title,
+          'artist': song.artist,
+          'thumb': song.thumb,
+          'duration': song.duration,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    await batch.commit(noResult: true);
+  }
+
   // Playlist se song hatao
   Future<void> removeSongFromPlaylist(String playlistId, String songId) async {
     final db = await _database;

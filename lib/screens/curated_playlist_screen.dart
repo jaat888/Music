@@ -6,7 +6,8 @@
 // home_screen.dart). Pattern bilkul import_playlist_screen.dart ke
 // Spotify-branch jaisa hai (ek-ek track YouTube pe search karke best-match
 // video se play hota hai) — audio hamesha YouTube se hi aata hai, source
-// se sirf naam/singer milta hai.
+// se sirf naam/singer milta hai. Match requests ab 10-at-a-time parallel
+// waves me run hoti hain; disk cache hits network ko bypass karte hain.
 
 import 'dart:async';
 
@@ -26,6 +27,9 @@ import '../theme/colors.dart';
 import '../theme/typography.dart';
 import '../widgets/shimmer_song_card.dart';
 import '../widgets/song_card.dart';
+import '../widgets/mini_player.dart';
+import 'add_to_playlist_sheet.dart';
+import 'full_player_screen.dart';
 
 // Source-agnostic track metadata — JioSaavnTrackMeta/ItunesTrackMeta dono
 // yahan convert ho jaate hain, taaki screen ko alag-alag service classes
@@ -79,48 +83,57 @@ class _CuratedPlaylistScreenState extends State<CuratedPlaylistScreen> {
         throw Exception('Is playlist mein koi gaana nahi mila.');
       }
 
-      // Har track ko YouTube pe search karke best-match video jodte hain —
-      // ek-ek karke (rate-limit friendly), progress dikhate hue — bilkul
-      // import_playlist_screen.dart ke Spotify-branch jaisa.
-      //
-      // FIX: pehle har baar playlist kholne par saare gaane dobara search hote
-      // the. Ab pehle CuratedMatchCache (disk) dekhte hain — pehle se matched
-      // gaane instantly aate hain, sirf naye gaano ke liye network jaata hai.
+      // Pehle ye har track ko 1-1 karke YouTube pe search karta tha, isliye
+      // 50-song playlist ka wait sum of 50 network calls jaisa lagta tha.
+      // Ab cache hit instant hai aur cache-miss searches 10-at-a-time waves
+      // me parallel chalte hain. Playlist/order deterministic rehta hai.
       final cache = CuratedMatchCache.instance;
       await cache.ensureLoaded();
-      final matched = <Song>[];
+      final slots = List<Song?>.filled(metas.length, null);
       final seenIds = <String>{};
-      var newlyMatched = 0;
-      for (var i = 0; i < metas.length; i++) {
-        final m = metas[i];
+      var completed = 0;
+      const parallel = 10;
+
+      for (var start = 0; start < metas.length; start += parallel) {
         if (!mounted) {
           unawaited(cache.flush());
           return;
         }
-        Song? song = cache.get(m.title, m.artist);
-        if (song == null) {
-          setState(() {
-            _progressText =
-                'Match kar rahe hain ${i + 1}/${metas.length}: ${m.title}';
-          });
-          try {
-            final query = m.artist.isNotEmpty ? '${m.title} ${m.artist}' : m.title;
-            final results = await YoutubeService.instance.search(query, max: 3);
-            if (results.isNotEmpty) {
-              song = results.first.toSong();
-              cache.put(m.title, m.artist, song);
-              newlyMatched++;
-              // Beech me screen band ho jaye to bhi ab tak ka kaam bacha rahe.
-              if (newlyMatched % 5 == 0) unawaited(cache.flush());
-            }
-          } catch (_) {
-            // Ek track match na ho (network/parsing) to poori playlist khaali
-            // na ho — bas agla track try karo.
+        final end = (start + parallel).clamp(0, metas.length);
+        final results = await Future.wait(
+          [
+            for (var i = start; i < end; i++)
+              _matchCuratedTrack(metas[i], cache),
+          ],
+        );
+
+        for (var offset = 0; offset < results.length; offset++) {
+          final song = results[offset];
+          final index = start + offset;
+          completed++;
+          if (song != null && seenIds.add(song.id)) {
+            slots[index] = song;
           }
         }
-        if (song != null && seenIds.add(song.id)) matched.add(song);
+
+        final matched = [
+          for (final song in slots)
+            if (song != null) song,
+        ];
+        if (mounted) {
+          setState(() {
+            _songs = matched;
+            _progressText =
+                'Playlists load ho rahi hain: $completed/${metas.length}';
+          });
+        }
       }
-      unawaited(cache.flush());
+
+      await cache.flush();
+      final matched = [
+        for (final song in slots)
+          if (song != null) song,
+      ];
       if (matched.isEmpty) {
         throw Exception('Koi bhi gaana YouTube pe match nahi hua.');
       }
@@ -133,6 +146,9 @@ class _CuratedPlaylistScreenState extends State<CuratedPlaylistScreen> {
         _likedIds = liked.map((s) => s.id).toSet();
         _cachedIds = cached.map((e) => e['id'] as String).toSet();
       });
+      // First 20 playback URLs ko bhi background me warm karo taaki first
+      // few taps par resolve wait minimum ho.
+      audioHandler.prefetchPlaylistSongs(matched, count: 20);
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
@@ -155,6 +171,31 @@ class _CuratedPlaylistScreenState extends State<CuratedPlaylistScreen> {
     } else {
       await audioHandler.playWithRetry(song);
     }
+  }
+
+  Future<Song?> _matchCuratedTrack(
+    CuratedTrackMeta meta,
+    CuratedMatchCache cache,
+  ) async {
+    final cached = cache.get(meta.title, meta.artist);
+    if (cached != null) return cached;
+
+    try {
+      final query = meta.artist.isNotEmpty
+          ? '${meta.title} ${meta.artist}'
+          : meta.title;
+      final results = await YoutubeService.instance.search(query, max: 3);
+      if (results.isEmpty) return null;
+      final song = results.first.toSong();
+      cache.put(meta.title, meta.artist, song);
+      return song;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _addToPlaylist(Song song) async {
+    await showAddToPlaylistSheet(context, song);
   }
 
   Future<void> _download(Song song) async {
@@ -186,7 +227,14 @@ class _CuratedPlaylistScreenState extends State<CuratedPlaylistScreen> {
           overflow: TextOverflow.ellipsis,
         ),
       ),
-      body: SafeArea(child: _buildBody()),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(child: _buildBody()),
+            const _CuratedMiniPlayerBar(),
+          ],
+        ),
+      ),
     );
   }
 
@@ -234,6 +282,7 @@ class _CuratedPlaylistScreenState extends State<CuratedPlaylistScreen> {
             isCached: _cachedIds.contains(song.id),
             onTap: () => _playFrom(i),
             onPlay: () => _playFrom(i),
+            onAddToPlaylist: () => _addToPlaylist(song),
             onDownload: () => _download(song),
             onLike: () async {
               await context.read<LikeService>().toggleLike(song);
@@ -249,6 +298,30 @@ class _CuratedPlaylistScreenState extends State<CuratedPlaylistScreen> {
           ),
         );
       },
+    );
+  }
+}
+
+
+class _CuratedMiniPlayerBar extends StatelessWidget {
+  const _CuratedMiniPlayerBar();
+
+  @override
+  Widget build(BuildContext context) {
+    final queue = context.watch<QueueService>();
+    final song = queue.currentSong;
+    if (song == null) return const SizedBox.shrink();
+
+    return FutureBuilder<bool>(
+      future: LikeService.instance.isLiked(song.id),
+      builder: (context, snap) => MiniPlayer(
+        isLiked: snap.data ?? false,
+        onLike: () => context.read<LikeService>().toggleLike(song),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const FullPlayerScreen()),
+        ),
+      ),
     );
   }
 }

@@ -85,6 +85,18 @@ class InnertubePage<T> {
   static InnertubePage<T> empty<T>() => InnertubePage<T>([], null);
 }
 
+class InnertubeMoodCategory {
+  final String title;
+  final String params;
+  final String section;
+
+  InnertubeMoodCategory({
+    required this.title,
+    required this.params,
+    required this.section,
+  });
+}
+
 // ---------------- The client ----------------
 
 class InnertubeClient {
@@ -413,6 +425,112 @@ class InnertubeClient {
     } catch (_) {
       return null;
     }
+  }
+
+  InnertubePlaylistPreview? _playlistFromTwoRowItem(dynamic item) {
+    try {
+      var browseId;
+      final titleRuns = item['title']?['runs'] as List?;
+      if (titleRuns != null && titleRuns.isNotEmpty) {
+        browseId = titleRuns.first['navigationEndpoint']?['browseEndpoint']?['browseId'];
+      }
+      browseId ??= item['navigationEndpoint']?['browseEndpoint']?['browseId'];
+      if (browseId is! String || browseId.isEmpty) return null;
+      if (browseId.startsWith('VL')) browseId = browseId.substring(2);
+      final title = titleRuns != null
+          ? titleRuns.map((r) => r['text'] as String? ?? '').join()
+          : '';
+      if (title.trim().isEmpty) return null;
+      final subtitleRuns = item['subtitle']?['runs'] as List?;
+      final subtitle = subtitleRuns != null
+          ? subtitleRuns.map((r) => r['text'] as String? ?? '').join()
+          : '';
+      var thumb = '';
+      final thumbs = item['thumbnailRenderer']?['musicThumbnailRenderer']?['thumbnail']?['thumbnails'] as List?;
+      if (thumbs != null && thumbs.isNotEmpty) {
+        thumb = thumbs.last['url'] as String? ?? '';
+      }
+      return InnertubePlaylistPreview(
+        id: browseId,
+        title: title.trim(),
+        subtitle: subtitle.trim(),
+        thumb: thumb,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ---------------- Moods & Genres ----------------
+
+  Future<List<InnertubeMoodCategory>> moodCategories() async {
+    final data = await _post('browse', {'browseId': 'FEmusic_moods_and_genres'});
+    if (data == null) return const [];
+
+    final results = <InnertubeMoodCategory>[];
+    final seen = <String>{};
+    for (final grid in _findAll(data, 'gridRenderer')) {
+      if (grid is! Map) continue;
+      final titleText = grid['header']?['gridHeaderRenderer']?['title']?['runs'];
+      final section = titleText is List
+          ? titleText.map((r) => r['text'] as String? ?? '').join().trim()
+          : '';
+      final items = grid['items'];
+      if (items is! List) continue;
+      for (final raw in items) {
+        if (raw is! Map) continue;
+        final button = raw['musicNavigationButtonRenderer'] is Map
+            ? raw['musicNavigationButtonRenderer']
+            : raw;
+        final buttonText = button['buttonText']?['runs'];
+        final title = buttonText is List
+            ? buttonText.map((r) => r['text'] as String? ?? '').join().trim()
+            : '';
+        final params = button['clickCommand']?['browseEndpoint']?['params'];
+        if (title.isEmpty || params is! String || params.isEmpty) continue;
+        final key = '$title|$params';
+        if (seen.add(key)) {
+          results.add(InnertubeMoodCategory(
+            title: title,
+            params: params,
+            section: section,
+          ));
+        }
+      }
+    }
+    return results;
+  }
+
+  Future<InnertubePage<InnertubePlaylistPreview>> moodPlaylists(
+    String params, {
+    String? continuation,
+  }) async {
+    final data = continuation != null
+        ? await _post('browse', {'continuation': continuation})
+        : await _post('browse', {
+            'browseId': 'FEmusic_moods_and_genres_category',
+            'params': params,
+          });
+    if (data == null) {
+      return InnertubePage.empty<InnertubePlaylistPreview>();
+    }
+
+    final results = <InnertubePlaylistPreview>[];
+    final seen = <String>{};
+    for (final raw in _findAll(data, 'musicTwoRowItemRenderer')) {
+      final playlist = _playlistFromTwoRowItem(raw);
+      if (playlist != null && seen.add(playlist.id)) results.add(playlist);
+    }
+    // Some experiments/layouts render the category as responsive list items.
+    for (final raw in _findAll(data, 'musicResponsiveListItemRenderer')) {
+      final playlist = _playlistFromItem(raw);
+      if (playlist != null && seen.add(playlist.id)) results.add(playlist);
+    }
+
+    return InnertubePage<InnertubePlaylistPreview>(
+      results,
+      _findContinuationToken(data),
+    );
   }
 
   InnertubePlaylistPreview? _playlistFromItem(dynamic item) {

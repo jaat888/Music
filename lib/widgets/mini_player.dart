@@ -71,7 +71,23 @@ class _MiniPlayerState extends State<MiniPlayer> {
     return StreamBuilder<MediaItem?>(
       stream: audioHandler.mediaItem,
       builder: (context, mediaSnap) {
-        final item = mediaSnap.data;
+        // QueueService ka current song playback request ke bilkul shuru me
+        // available hota hai, jabki audio_service.mediaItem stream resolve
+        // ke dauraan thodi der baad publish ho sakta hai. Queue fallback se
+        // playlist screen par MiniPlayer us gap me bhi visible rehta hai.
+        final queueSong = context.watch<QueueService>().currentSong;
+        final streamItem = mediaSnap.data;
+        final item = streamItem ??
+            (queueSong == null
+                ? null
+                : MediaItem(
+                    id: queueSong.id,
+                    title: queueSong.title,
+                    artist: queueSong.artist,
+                    artUri: queueSong.thumb.isEmpty
+                        ? null
+                        : Uri.tryParse(queueSong.thumb),
+                  ));
         // Koi song load nahi hai to mini player dikhana hi nahi
         if (item == null) return const SizedBox.shrink();
 

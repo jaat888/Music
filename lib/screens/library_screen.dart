@@ -286,15 +286,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ),
           margin: const EdgeInsets.only(bottom: 10),
         ),
-        // Part 6 (Engagement) — mood-based auto playlist ("chill"/"workout"
-        // tap se). Yahin "Smart" section me, kyunki ye bhi existing library
-        // data (liked+cache+download) se hi banti hai, sirf zaroorat pade to
-        // online search se supplement hoti hai.
+        // Part 6 (Engagement) — live Mood/Genre/Language playlist discovery.
         _LibraryCard(
           icon: Icons.mood,
           iconColor: kPurple,
           title: 'Moods',
-          subtitle: 'Chill, Workout, Party, Sad, Focus',
+          subtitle: 'Moods, Genres & Languages',
           onTap: () => Navigator.push(
             context,
             MaterialPageRoute(builder: (_) => const MoodPlaylistScreen()),

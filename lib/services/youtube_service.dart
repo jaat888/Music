@@ -201,6 +201,18 @@ class _AudioStream {
   });
 }
 
+class YtMoodCategory {
+  final String title;
+  final String params;
+  final String section;
+
+  YtMoodCategory({
+    required this.title,
+    required this.params,
+    required this.section,
+  });
+}
+
 class YoutubeService {
   YoutubeService._internal();
   static final YoutubeService instance = YoutubeService._internal();
@@ -590,9 +602,25 @@ class YoutubeService {
   // youtube_explode_dart client — lazily banta hai, ek baar bante hi
   // reuse hota hai (naya banane me Deno solver dobara init karna padega).
   YoutubeExplode? _yt;
+  Future<YoutubeExplode>? _ytInitializing;
   Future<YoutubeExplode> _getYt({void Function(String status)? onProgress}) async {
     final existing = _yt;
     if (existing != null) return existing;
+    final inFlight = _ytInitializing;
+    if (inFlight != null) return inFlight;
+
+    final future = _createYoutubeExplode(onProgress: onProgress);
+    _ytInitializing = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_ytInitializing, future)) _ytInitializing = null;
+    }
+  }
+
+  Future<YoutubeExplode> _createYoutubeExplode({
+    void Function(String status)? onProgress,
+  }) async {
     YoutubeExplode created;
     // BUG FIX (2026-09-17): Android 10+ (API 29+) W^X restriction ki wajah
     // se `code_cache/` jaisi app-writable directory se koi bhi extracted
@@ -628,15 +656,29 @@ class YoutubeService {
     return created;
   }
 
-  // dart_ytmusic_api client — lazily init hota hai.
+  // dart_ytmusic_api client — lazily init hota hai. Parallel playlist
+  // searches ke case me ek hi initialization future share karna zaroori hai,
+  // warna 10 concurrent requests 10 clients initialize kar sakti hain.
   YTMusic? _ytMusic;
+  Future<YTMusic>? _ytMusicInitializing;
   Future<YTMusic> _getYtMusic() async {
     final existing = _ytMusic;
     if (existing != null) return existing;
-    final created = YTMusic();
-    await created.initialize();
-    _ytMusic = created;
-    return created;
+    final inFlight = _ytMusicInitializing;
+    if (inFlight != null) return inFlight;
+
+    final future = () async {
+      final created = YTMusic();
+      await created.initialize();
+      _ytMusic = created;
+      return created;
+    }();
+    _ytMusicInitializing = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_ytMusicInitializing, future)) _ytMusicInitializing = null;
+    }
   }
 
   // ---------------- Search ----------------
@@ -873,6 +915,79 @@ class YoutubeService {
       print('YT MUSIC PLAYLIST SEARCH ERROR: $e');
       return [];
     }
+  }
+
+  Future<List<YtMoodCategory>> getMoodGenreCategories() async {
+    try {
+      final categories = await _innertube.moodCategories();
+      return categories
+          .map((c) => YtMoodCategory(
+                title: c.title,
+                params: c.params,
+                section: c.section,
+              ))
+          .toList();
+    } catch (e) {
+      print('INNERTUBE MOOD CATEGORIES FAILED: $e');
+      return [];
+    }
+  }
+
+  Future<List<YtPlaylistPreview>> getMoodGenrePlaylists(
+    String params, {
+    int max = 100,
+  }) async {
+    if (params.trim().isEmpty || max <= 0) return [];
+    final out = <YtPlaylistPreview>[];
+    final seen = <String>{};
+    String? continuation;
+    for (var pageIndex = 0; pageIndex < 8 && out.length < max; pageIndex++) {
+      final page = await _innertube.moodPlaylists(params, continuation: continuation);
+      for (final pl in page.items) {
+        if (pl.id.isEmpty || !seen.add(pl.id)) continue;
+        out.add(YtPlaylistPreview(
+          id: pl.id,
+          title: pl.title,
+          subtitle: pl.subtitle,
+          thumb: pl.thumb,
+        ));
+        if (out.length >= max) break;
+      }
+      continuation = page.continuation;
+      if (continuation == null || continuation.isEmpty || page.items.isEmpty) break;
+    }
+    return out;
+  }
+
+  Future<List<YtPlaylistPreview>> searchPlaylistsAll(
+    String query, {
+    int max = 80,
+  }) async {
+    if (query.trim().isEmpty || max <= 0) return [];
+    final out = <YtPlaylistPreview>[];
+    final seen = <String>{};
+    String? continuation;
+    try {
+      for (var pageIndex = 0; pageIndex < 6 && out.length < max; pageIndex++) {
+        final page = await _innertube.searchPlaylists(query, continuation: continuation);
+        for (final pl in page.items) {
+          if (pl.id.isEmpty || !seen.add(pl.id)) continue;
+          out.add(YtPlaylistPreview(
+            id: pl.id,
+            title: pl.title,
+            subtitle: pl.subtitle,
+            thumb: pl.thumb,
+          ));
+          if (out.length >= max) break;
+        }
+        continuation = page.continuation;
+        if (continuation == null || continuation.isEmpty || page.items.isEmpty) break;
+      }
+      if (out.isNotEmpty) return out;
+    } catch (e) {
+      print('INNERTUBE ALL PLAYLIST SEARCH FAILED: $e');
+    }
+    return searchPlaylists(query);
   }
 
   // ---------------- Radio ("current jaisa gaana chalate raho") ----------------
@@ -1598,18 +1713,33 @@ class YoutubeService {
   // pipeline (jo minutes le sakta hai) bilkul skip karo, turant null
   // return karo taaki "3 attempts x 45s" wasted na ho aur error jaldi +
   // clearly dikhe ("no internet", na ki confusing PoToken-jaisa symptom).
+  Future<bool>? _connectivityProbeInFlight;
+
   Future<bool> _quickConnectivityCheck() async {
+    final inFlight = _connectivityProbeInFlight;
+    if (inFlight != null) return inFlight;
+
+    final future = () async {
+      try {
+        final socket = await Socket.connect(
+          'www.google.com',
+          443,
+          timeout: const Duration(seconds: 3),
+        );
+        socket.destroy();
+        return true;
+      } catch (e) {
+        print('YT: quick connectivity check fail — internet down lagta hai: $e');
+        return false;
+      }
+    }();
+    _connectivityProbeInFlight = future;
     try {
-      final socket = await Socket.connect(
-        'www.google.com',
-        443,
-        timeout: const Duration(seconds: 3),
-      );
-      socket.destroy();
-      return true;
-    } catch (e) {
-      print('YT: quick connectivity check fail — internet down lagta hai: $e');
-      return false;
+      return await future;
+    } finally {
+      if (identical(_connectivityProbeInFlight, future)) {
+        _connectivityProbeInFlight = null;
+      }
     }
   }
 

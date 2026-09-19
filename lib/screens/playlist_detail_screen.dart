@@ -22,6 +22,9 @@ import '../widgets/song_card.dart';
 import '../widgets/shimmer_song_card.dart';
 import 'create_playlist_screen.dart';
 import 'search_screen.dart';
+import 'add_to_playlist_sheet.dart';
+import '../widgets/mini_player.dart';
+import 'full_player_screen.dart';
 
 class PlaylistDetailScreen extends StatefulWidget {
   final String playlistId;
@@ -156,6 +159,10 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
         _likedIds.add(song.id);
       }
     });
+  }
+
+  Future<void> _addToPlaylist(Song song) async {
+    await showAddToPlaylistSheet(context, song);
   }
 
   Future<void> _download(Song song) async {
@@ -514,16 +521,26 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
         ],
       ),
       body: SafeArea(
-        child: _loading
-            ? ListView(
-                padding: const EdgeInsets.all(16),
-                children: List.generate(4, (_) => const ShimmerSongCard()),
-              )
-            : playlist == null
-                ? Center(
-                    child: Text('Playlist nahi mili', style: AppText.bodyM(color: kTextDim)),
-                  )
-                : _buildBody(playlist),
+        child: Column(
+          children: [
+            Expanded(
+              child: _loading
+                  ? ListView(
+                      padding: const EdgeInsets.all(16),
+                      children: List.generate(4, (_) => const ShimmerSongCard()),
+                    )
+                  : playlist == null
+                      ? Center(
+                          child: Text(
+                            'Playlist nahi mili',
+                            style: AppText.bodyM(color: kTextDim),
+                          ),
+                        )
+                      : _buildBody(playlist),
+            ),
+            const _PlaylistDetailMiniPlayerBar(),
+          ],
+        ),
       ),
     );
   }
@@ -696,6 +713,7 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
                     isDownloaded: _downloadedIds.contains(song.id),
                     onTap: () => _playFrom(song),
                     onPlay: () => _playFrom(song),
+                    onAddToPlaylist: () => _addToPlaylist(song),
                     onDownload: () => _download(song),
                     onLike: () => _toggleLike(song),
                   ),
@@ -721,6 +739,30 @@ class _PlaylistDetailScreenState extends State<PlaylistDetailScreen> {
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 90),
       itemCount: songs.length,
       itemBuilder: (context, i) => buildTile(songs[i], i),
+    );
+  }
+}
+
+
+class _PlaylistDetailMiniPlayerBar extends StatelessWidget {
+  const _PlaylistDetailMiniPlayerBar();
+
+  @override
+  Widget build(BuildContext context) {
+    final queue = context.watch<QueueService>();
+    final song = queue.currentSong;
+    if (song == null) return const SizedBox.shrink();
+
+    return FutureBuilder<bool>(
+      future: LikeService.instance.isLiked(song.id),
+      builder: (context, snap) => MiniPlayer(
+        isLiked: snap.data ?? false,
+        onLike: () => context.read<LikeService>().toggleLike(song),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const FullPlayerScreen()),
+        ),
+      ),
     );
   }
 }

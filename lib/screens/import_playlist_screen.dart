@@ -8,6 +8,8 @@
 //     (title+artist) deta hai; har track ko phir YouTube pe search karke
 //     best-match audio jod diya jaata hai. Isliye Spotify match hamesha
 //     100% accurate nahi hoga (kabhi galat version/cover mil sakta hai).
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 
@@ -119,23 +121,26 @@ class _ImportPlaylistScreenState extends State<ImportPlaylistScreen> {
         }
         _nameController.text = meta.name;
 
-        // Har Spotify track ko YouTube pe match karo — ek-ek karke (rate
-        // limit friendly), progress dikhate hue.
+        // Spotify metadata ko pehle 1-1 karke match kiya jaata tha. Ab
+        // 10 searches ek saath chalti hain; completed batch ke baad agla
+        // batch start hota hai, taaki YouTube ko 50+ simultaneous requests
+        // se flood na karein.
         final matched = <_ImportRow>[];
-        for (var i = 0; i < meta.tracks.length; i++) {
-          final t = meta.tracks[i];
+        const parallel = 10;
+        for (var start = 0; start < meta.tracks.length; start += parallel) {
           if (!mounted) return;
-          setState(() {
-            _progressText = 'Match kar rahe hain ${i + 1}/${meta.tracks.length}: ${t.title}';
-          });
-          try {
-            final query = t.artist.isNotEmpty ? '${t.title} ${t.artist}' : t.title;
-            final results = await YoutubeService.instance.search(query, max: 3);
-            if (results.isNotEmpty) {
-              matched.add(_ImportRow(results.first.toSong()));
-            }
-          } catch (_) {
-            // ek track match na ho to poora import na roko
+          final end = (start + parallel).clamp(0, meta.tracks.length);
+          final batch = await Future.wait([
+            for (var i = start; i < end; i++) _matchSpotifyTrack(meta.tracks[i]),
+          ]);
+          for (final song in batch) {
+            if (song != null) matched.add(_ImportRow(song));
+          }
+          if (mounted) {
+            setState(() {
+              _progressText =
+                  'Playlist matches load ho rahe hain: $end/${meta.tracks.length}';
+            });
           }
         }
         if (matched.isEmpty) {
@@ -152,6 +157,18 @@ class _ImportPlaylistScreenState extends State<ImportPlaylistScreen> {
         _loading = false;
         _progressText = null;
       });
+    }
+  }
+
+  Future<Song?> _matchSpotifyTrack(SpotifyTrackMeta track) async {
+    try {
+      final query = track.artist.isNotEmpty
+          ? '${track.title} ${track.artist}'
+          : track.title;
+      final results = await YoutubeService.instance.search(query, max: 3);
+      return results.isEmpty ? null : results.first.toSong();
+    } catch (_) {
+      return null;
     }
   }
 

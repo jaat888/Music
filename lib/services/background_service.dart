@@ -360,14 +360,18 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // assume playable later. Warm URLs are a latency optimisation, not a
   // permanent credential/cache.
   static const Duration _warmUrlTtl = Duration(minutes: 5);
-  static const int _warmUrlCacheLimit = 12;
-  static const int _prefetchWindow = 3;
+  static const int _warmUrlCacheLimit = 24;
+  // Playlist/queue warm-up: 10 stream URLs resolve in parallel, while the
+  // first 20 upcoming songs are kept warm. This resolves URLs/metadata only;
+  // it does NOT download 20 audio files.
+  static const int _prefetchWindow = 20;
+  static const int _prefetchMaxConcurrent = 10;
 
   final Map<String, _WarmUrl> _urlCache = {};
   final Set<String> _prefetchingIds = {};
   final Set<String> _prefetchQueuedIds = {};
   final List<Song> _prefetchQueue = <Song>[];
-  bool _prefetchWorkerRunning = false;
+  int _prefetchRunningWorkers = 0;
 
   _WarmUrl? _freshWarmUrl(String id) {
     final value = _urlCache[id];
@@ -408,21 +412,25 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     });
   }
 
-  Future<void> _drainPrefetchQueue() async {
-    if (_prefetchWorkerRunning) return;
-    _prefetchWorkerRunning = true;
-    try {
-      while (_prefetchQueue.isNotEmpty) {
-        final next = _prefetchQueue.removeAt(0);
-        _prefetchQueuedIds.remove(next.id);
-        if (_freshWarmUrl(next.id) != null ||
-            _prefetchingIds.contains(next.id)) {
-          continue;
-        }
-        _prefetchingIds.add(next.id);
+  void _drainPrefetchQueue() {
+    // Worker-pool model: several independent stream URLs can resolve at the
+    // same time. Queue state is still de-duplicated via `_prefetchingIds` and
+    // `_prefetchQueuedIds`, so the same song never gets two warm-up requests.
+    while (_prefetchRunningWorkers < _prefetchMaxConcurrent &&
+        _prefetchQueue.isNotEmpty) {
+      final next = _prefetchQueue.removeAt(0);
+      _prefetchQueuedIds.remove(next.id);
+      if (_freshWarmUrl(next.id) != null ||
+          _prefetchingIds.contains(next.id)) {
+        continue;
+      }
+
+      _prefetchingIds.add(next.id);
+      _prefetchRunningWorkers++;
+      unawaited(() async {
         try {
           final already = await LocalMediaResolver.instance.getPath(next.id);
-          if (already != null) continue;
+          if (already != null) return;
 
           _WarmUrl? resolved;
           for (var attempt = 1; attempt <= 2; attempt++) {
@@ -470,15 +478,31 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           }
         } finally {
           _prefetchingIds.remove(next.id);
+          _prefetchRunningWorkers--;
+          // Worker complete hote hi queue ko refill karo — isse 10 workers
+          // continuously busy rehte hain jab tak warm-up window pending hai.
+          _drainPrefetchQueue();
         }
-      }
-    } finally {
-      _prefetchWorkerRunning = false;
-      // A producer may have queued another item between the final while-check
-      // and setting the worker flag false.
-      if (_prefetchQueue.isNotEmpty) {
-        unawaited(_drainPrefetchQueue());
-      }
+      }());
+    }
+  }
+
+  /// Playlist screen ke first 20 songs ko foreground UI ko block kiye bina
+  /// warm karta hai. `_prefetchNext()` ke same short-lived URL cache me jaata
+  /// hai, isliye Play/Next ko existing playback path hi use karta hai.
+  void prefetchPlaylistSongs(Iterable<Song> songs, {int count = 20}) {
+    if (_radioPlaybackOwned || count <= 0) return;
+    var added = 0;
+    for (final song in songs) {
+      if (added >= count) break;
+      final before = _prefetchQueue.length +
+          _prefetchQueuedIds.length +
+          _prefetchingIds.length;
+      _enqueuePrefetch(song);
+      final after = _prefetchQueue.length +
+          _prefetchQueuedIds.length +
+          _prefetchingIds.length;
+      if (after > before) added++;
     }
   }
 
