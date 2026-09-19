@@ -6,6 +6,7 @@
 import 'dart:math' as math;
 
 import '../models/song.dart';
+import 'radio_candidate_filter.dart';
 import 'radio_history_store.dart';
 import 'radio_service.dart';
 import 'radio_tagging.dart';
@@ -74,15 +75,16 @@ class RadioEngine {
   final RadioService _radio;
   final math.Random _random;
 
-  // Soft signals only. There is deliberately no fixed old/new bucket split.
+  // Soft signals only. Age is hard-gated at the YouTube search layer; there
+  // is deliberately no fixed old/new percentage split inside the scorer.
   static const double popularityWeight = 8;
-  static const double recencyWeight = 10;
+  static const double recencyWeight = 14;
   static const double moodWeight = 0.18;
   static const double likedWeight = 9;
   // Likes receive a soft boost only after their cooldown has elapsed; the
-  // hard 150-day exact-song repeat rule still applies independently.
+  // hard 90-day exact-song repeat rule still applies independently.
   static const Duration likedBoostCooldown = Duration(hours: 12);
-  static const double latestSoftBoost = 1.5;
+  static const double latestSoftBoost = 2.5;
   static const double randomJitter = 2.5;
   // Adaptive behaviour layer: listening history gently changes future picks.
   static const double behaviourWeight = 3.5;
@@ -140,7 +142,13 @@ class RadioEngine {
 
     return candidates
         .where((c) => languages.contains(c.language.trim().toLowerCase()))
-        // 150-day exact-song exclusion remains hard.
+        // Hard Radio content gates: strict metadata language guard + max 7 min.
+        .where((c) => RadioCandidateFilter.durationAllowed(c.song.duration))
+        .where((c) => RadioCandidateFilter.matchesStrictLanguage(
+              language: c.language,
+              song: c.song,
+            ))
+        // 90-day exact-song exclusion remains hard.
         .where((c) => !_history.wasPlayedRecently(c.song.id))
         // A failed Radio candidate cannot reappear during this session.
         .where((c) => !_failedSessionIds.contains(c.song.id))

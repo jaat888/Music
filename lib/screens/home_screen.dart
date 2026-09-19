@@ -28,6 +28,7 @@ import '../widgets/mini_player.dart';
 import 'search_screen.dart';
 import 'library_screen.dart';
 import 'downloads_screen.dart';
+import 'profile_screen.dart';
 import 'full_player_screen.dart';
 import 'live_playlist_screen.dart';
 import 'curated_playlist_screen.dart';
@@ -92,6 +93,12 @@ class _HomeScreenState extends State<HomeScreen> {
           const SearchScreen(),
           const LibraryScreen(),
           const DownloadsScreen(),
+          // BUG FIX (feature wiring): ProfileScreen (Settings/About/Help/
+          // Backup-Restore/Equalizer/Stats sabko navigate karta hai, poora
+          // functional tha) ke paas app me koi entry point hi nahi tha —
+          // isi wajah se StatsScreen bhi orphaned tha (sirf isi Profile se
+          // link tha). Ab 5th bottom-nav tab ke through dono reachable hain.
+          const ProfileScreen(),
         ],
       ),
       bottomNavigationBar: BottomNavigationBar(
@@ -111,6 +118,10 @@ class _HomeScreenState extends State<HomeScreen> {
           BottomNavigationBarItem(
             icon: Icon(Icons.download_done),
             label: 'Downloads',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.person),
+            label: 'Profile',
           ),
         ],
       ),
@@ -254,10 +265,11 @@ class _HomeTabContentState extends State<_HomeTabContent> {
     }
   }
 
-  // Pull-to-refresh sabhi teeno source refresh kare (asli YT feed +
-  // JioSaavn + iTunes) — taaki playlists "updated rehna chahiye" wali
-  // requirement poori ho. Teeno parallel/independent hain, ek fail ho to
-  // baaki do normally load ho jaayenge.
+  // Pull-to-refresh sabhi teeno source ka freshness-check kare (asli YT feed
+  // + JioSaavn + iTunes). iTunes daily 06:00->06:00 snapshot ke andar
+  // network ko repeat nahi karta; stale window me hi refresh hota hai.
+  // Teeno parallel/independent hain, ek fail ho to baaki do normally load ho
+  // jaayenge.
   Future<void> _refreshAll() async {
     await Future.wait([
       _load(),
@@ -282,8 +294,14 @@ class _HomeTabContentState extends State<_HomeTabContent> {
     );
   }
 
-  void _openItunesChart() {
-    final snapshot = _itunesTop; // is tap ke waqt ka data, baad me badlega to bhi consistent
+  Future<void> _openItunesChart() async {
+    // Opening the list after 06:00 is also a refresh opportunity, but the
+    // service guarantees at most one network refresh in that 06:00->06:00
+    // window. Within the same day this returns the cached snapshot instantly.
+    await _loadItunesChart();
+    if (!mounted) return;
+    final snapshot = List<ItunesTrackMeta>.from(_itunesTop);
+    if (snapshot.isEmpty) return;
     Navigator.push(
       context,
       MaterialPageRoute(

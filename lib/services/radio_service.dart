@@ -23,7 +23,7 @@ class RadioService extends ChangeNotifier {
   static const double kSkipPenalty = 15;
   static const double kFavoriteBoost = 10;
   // Part 11 tuning: keep the roadmap starting values explicit and centralized.
-  static const Duration kSessionHistoryWindow = Duration(days: 150);
+  static const Duration kSessionHistoryWindow = Duration(days: 90);
   static const Duration kDecayConstant = Duration(minutes: 27);
   // Section 4.3: lagatar 2-3 skip ke baad extra penalty ("jaise double").
   static const int kEscalationThreshold = 2;

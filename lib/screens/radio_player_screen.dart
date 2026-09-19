@@ -2,19 +2,19 @@
 // SurSathi v55 Radio Enhanced — same Radio UI, hardened transition/playback layer.
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
 import '../services/app_logger.dart';
 import '../services/background_service.dart';
 import '../services/like_service.dart';
+import '../services/mood_catalog.dart';
 import '../services/lyrics_service.dart';
+import '../services/radio_candidate_filter.dart';
 import '../services/radio_engine.dart';
 import '../services/radio_history_store.dart';
 import '../services/radio_service.dart';
@@ -28,7 +28,18 @@ import 'radio_language_select_screen.dart';
 
 class RadioPlayerScreen extends StatefulWidget {
   final List<String> languages;
-  const RadioPlayerScreen({super.key, required this.languages});
+  // Optional strict Mood mode reuses the hardened Radio playback pipeline.
+  // When present, candidates must match this mood and latest candidates are
+  // selected before older (but still <=2-year) candidates.
+  final String? moodCode;
+  final String? moodLabel;
+
+  const RadioPlayerScreen({
+    super.key,
+    required this.languages,
+    this.moodCode,
+    this.moodLabel,
+  });
 
   @override
   State<RadioPlayerScreen> createState() => _RadioPlayerScreenState();
@@ -82,6 +93,12 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   Future<bool>? _recoveryFuture;
   int? _recoveringCandidateGeneration;
   final Map<String, int> _recentLanguageCounts = <String, int>{};
+  final math.Random _moodQueryRandom = math.Random();
+  int _moodQueryRound = 0;
+
+  MoodProfile? get _moodProfile =>
+      widget.moodCode == null ? null : moodProfileByCode(widget.moodCode!);
+  bool get _isMoodMode => _moodProfile != null;
 
   @override
   void initState() {
@@ -122,42 +139,6 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     super.dispose();
   }
 
-  static const _lastRadioSongKey = 'radio_last_song_v55';
-
-  Future<RadioCandidate?> _loadLastRadioCandidate() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_lastRadioSongKey);
-      if (raw == null || raw.isEmpty) return null;
-      final map = jsonDecode(raw) as Map<String, dynamic>;
-      final songMap = map['song'] as Map<String, dynamic>?;
-      final language = map['language'] as String?;
-      if (songMap == null || language == null || !widget.languages.contains(language)) {
-        return null;
-      }
-      return RadioCandidate.fromSong(
-        Song.fromJson(songMap),
-        language: language,
-        categoryHint: RadioLanguageSelectLookup.byCode(language)?.categoryHint,
-      );
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<void> _saveLastRadioCandidate(RadioCandidate candidate) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        _lastRadioSongKey,
-        jsonEncode({
-          'song': candidate.song.toJson(),
-          'language': candidate.language,
-        }),
-      );
-    } catch (_) {}
-  }
-
   Future<void> _start() async {
     final generation = ++_sessionGeneration;
     AppLogger.instance.log('[RADIO] _start() — session #$generation shuru.');
@@ -179,25 +160,12 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     });
 
     try {
-      // Re-entering Radio should feel like resuming, not starting from zero.
-      // Try the last Radio song first; background_service will use its warm
-      // disk/URL cache when available, so the first screen can start without
-      // waiting for a fresh candidate search.
+      // Strict Radio policy: every session starts from the filtered search pool.
+      // We intentionally do not resurrect an old persisted Radio song because
+      // that stored object has no authoritative YouTube upload date and could
+      // bypass the new 2-year freshness gate.
       var started = false;
-      final last = await _loadLastRadioCandidate();
-      if (last != null) {
-        AppLogger.instance.log('[RADIO] _start() — last session ka "${last.song.title}" resume try kar rahe hain.');
-        _candidates.add(last);
-        started = await _playCandidate(last, addToHistory: false);
-        if (!mounted || generation != _sessionGeneration) return;
-        if (!started) {
-          AppLogger.instance.log('[RADIO] _start() — resume fail hua ("${last.song.title}"), fresh candidates dhoondenge.');
-          _engine.markFailed(last.song.id);
-          _candidates.removeWhere((c) => c.song.id == last.song.id);
-        }
-      }
 
-      // Search/fill the real Radio pool after the resume attempt.
       await _fetchCandidates();
       if (!mounted || generation != _sessionGeneration) return;
       if (!started) {
@@ -232,7 +200,9 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     final localCandidates = <RadioCandidate>[];
     final byId = <String, int>{};
     final languages = widget.languages.toSet();
-    final targetCandidateCount = (languages.length * 12).clamp(24, 60).toInt();
+    final targetCandidateCount = _isMoodMode
+        ? (languages.length * 16).clamp(32, 90).toInt()
+        : (languages.length * 12).clamp(24, 60).toInt();
 
     int eligibleCount() => _engine
         .buildPool(localCandidates, selectedLanguages: widget.languages)
@@ -246,12 +216,34 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     ) {
       var rank = 0;
       for (final item in results) {
+        final song = item.toSong();
+        // HARD GATE: no Radio candidate above 7:00, and reject metadata with
+        // unknown duration because the user asked for a strict upper bound.
+        if (!RadioCandidateFilter.durationAllowed(song.duration)) continue;
+        // HARD-ish language gate: query-level negative terms plus strong
+        // metadata mismatch detection keep obvious Punjabi/Haryanvi leakage
+        // out when a single language is selected.
+        if (!RadioCandidateFilter.matchesStrictLanguage(
+          language: language,
+          song: song,
+        )) continue;
+        final mood = _moodProfile;
+        if (mood != null &&
+            !matchesStrictMood(
+              mood: mood,
+              title: song.title,
+              artist: song.artist,
+            )) {
+          continue;
+        }
         final rankSignal = (1.0 - (rank / 30.0)).clamp(0.0, 1.0).toDouble();
         rank++;
         final candidate = RadioCandidate.fromSong(
-          item.toSong(),
+          song,
           language: language,
-          categoryHint: option.categoryHint,
+          categoryHint: mood == null
+              ? option.categoryHint
+              : '${option.categoryHint} ${mood.label}',
           popularity: queryIndex == 0 ? rankSignal : rankSignal * 0.35,
           recency: queryIndex == 1 ? (0.30 + rankSignal * 0.50) : 0.12,
           isLatest: queryIndex == 1,
@@ -272,11 +264,42 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     }
 
     final queryList = <({String language, RadioLanguageSelectLookup option, String query, int index})>[];
+    final mood = _moodProfile;
+    final moodSeedBase = _moodQueryRound++;
     for (final language in languages) {
       final option = RadioLanguageSelectLookup.byCode(language);
       if (option == null) continue;
-      queryList.add((language: language, option: option, query: option.hitsQuery, index: 0));
-      queryList.add((language: language, option: option, query: option.latestQuery, index: 1));
+      if (mood == null) {
+        queryList.add((
+          language: language,
+          option: option,
+          query: option.hitsQuery,
+          index: 0,
+        ));
+        queryList.add((
+          language: language,
+          option: option,
+          query: option.latestQuery,
+          index: 1,
+        ));
+      } else {
+        // Rotate query seeds on every refill. This prevents a long Mood
+        // session from repeatedly receiving only the same deterministic
+        // first search page while keeping the hard 2-year/month date gates.
+        final seedIndex = (moodSeedBase + language.length + _moodQueryRandom.nextInt(mood.querySeeds.length)) % mood.querySeeds.length;
+        queryList.add((
+          language: language,
+          option: option,
+          query: mood.queryFor(option.code, latest: false, seedIndex: seedIndex),
+          index: 0,
+        ));
+        queryList.add((
+          language: language,
+          option: option,
+          query: mood.queryFor(option.code, latest: true, seedIndex: seedIndex + 1),
+          index: 1,
+        ));
+      }
     }
 
     // Pass 1: fast YT Music search. This preserves the curated first-page
@@ -286,7 +309,8 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         final results = await YoutubeService.instance.search(
           item.query,
           max: 30,
-          dateFilter: item.index == 1 ? YtDateFilter.month : YtDateFilter.relevance,
+          // Hits: only last 2 years of YouTube uploads. Latest: last month.
+          dateFilter: item.index == 1 ? YtDateFilter.month : YtDateFilter.twoYears,
         );
         if (!mounted ||
             sessionGeneration != _sessionGeneration ||
@@ -302,7 +326,12 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       for (final item in queryList) {
         if (eligibleCount() >= targetCandidateCount) break;
         try {
-          var page = await YoutubeService.instance.searchPage(item.query);
+          final dateFilter =
+              item.index == 1 ? YtDateFilter.month : YtDateFilter.twoYears;
+          var page = await YoutubeService.instance.searchPage(
+            item.query,
+            dateFilter: dateFilter,
+          );
           if (!mounted ||
               sessionGeneration != _sessionGeneration ||
               fetchGeneration != _candidateFetchGeneration) return;
@@ -316,6 +345,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
             page = await YoutubeService.instance.searchPage(
               item.query,
               continuation: page.continuation,
+              dateFilter: dateFilter,
             );
             if (!mounted ||
                 sessionGeneration != _sessionGeneration ||
@@ -388,9 +418,35 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     return out;
   }
 
+  Iterable<RadioCandidate> _preferredCandidateSource({
+    Set<String> excludeIds = const <String>{},
+  }) {
+    final mood = _moodProfile;
+    if (mood == null) return _candidates;
+
+    bool eligible(RadioCandidate c) {
+      if (excludeIds.contains(c.song.id)) return false;
+      if (_engine.failedSessionIds.contains(c.song.id)) return false;
+      if (!RadioCandidateFilter.durationAllowed(c.song.duration)) return false;
+      if (!RadioCandidateFilter.matchesStrictLanguage(
+        language: c.language,
+        song: c.song,
+      )) return false;
+      if (!matchesStrictMood(mood: mood, title: c.song.title, artist: c.song.artist)) return false;
+      return !RadioHistoryStore.instance.wasPlayedRecently(c.song.id);
+    }
+
+    final eligible = _candidates.where(eligible).toList();
+    final latest = eligible.where((c) => c.isLatest).toList();
+    // Mood protocol: latest/new candidates are a hard first phase. Only once
+    // there are no fresh latest candidates left do we fall back to the broader
+    // <=2-year mood pool.
+    return latest.isNotEmpty ? latest : eligible;
+  }
+
   RadioCandidate? _pickNext({Set<String> excludeIds = const <String>{}}) {
     return _engine.pickNext(
-      _candidates,
+      _preferredCandidateSource(excludeIds: excludeIds),
       selectedLanguages: widget.languages,
       excludeIds: excludeIds,
       recentLanguageCounts: _recentLanguageCounts,
@@ -423,8 +479,6 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       setState(() => _liked = liked);
     }));
     if (!mounted || token != _candidateGeneration) return false;
-
-    unawaited(_saveLastRadioCandidate(candidate));
 
     setState(() {
       _loading = true;
@@ -635,7 +689,10 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
 
   Future<void> _loadLyrics(RadioCandidate candidate, int token) async {
     try {
-      final result = await LyricsService.instance.getForSong(
+      // Radio intentionally accepts ONLY synchronized lyrics. The service
+      // scans every timing-capable provider and picks the one with the best
+      // timeline coverage. Plain-only lyrics are not shown in Radio.
+      final result = await LyricsService.instance.getSyncedForSong(
         songId: candidate.song.id,
         title: candidate.song.title,
         artist: candidate.song.artist,
@@ -687,7 +744,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     // for songs nobody is listening to anymore.
     if (!mounted || gen != _candidateGeneration) return;
     unawaited(
-      LyricsService.instance.prefetchForSongs(
+      LyricsService.instance.prefetchSyncedForSongs(
         next,
         maxSongs: 10,
         isCancelled: () => _candidateGeneration != gen,
@@ -742,7 +799,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         final tagCounts = _recentTagCountsForRanking();
         final desired = (10 - _upcoming.length).clamp(0, 10).toInt();
         final result = _engine.buildLookAhead(
-          _candidates,
+          _preferredCandidateSource(excludeIds: used),
           selectedLanguages: widget.languages,
           count: desired,
           excludeIds: used,
@@ -1436,7 +1493,10 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
           ),
         ),
         const Spacer(),
-        Text('RADIO', style: AppText.titleM(color: Colors.white)),
+        Text(
+          _isMoodMode ? 'MOOD • ${widget.moodLabel ?? _moodProfile!.label.toUpperCase()}' : 'RADIO',
+          style: AppText.titleM(color: Colors.white),
+        ),
         const Spacer(),
         SizedBox(
           width: 48,
@@ -1936,9 +1996,9 @@ class RadioLanguageSelectLookup {
   const RadioLanguageSelectLookup(this.code, this.hitsQuery, this.latestQuery, this.categoryHint);
 
   static const all = <RadioLanguageSelectLookup>[
-    RadioLanguageSelectLookup('bollywood', 'bollywood hits songs', 'latest bollywood songs', 'Bollywood'),
-    RadioLanguageSelectLookup('punjabi', 'punjabi hits songs', 'latest punjabi songs', 'Punjabi'),
-    RadioLanguageSelectLookup('haryanvi', 'haryanvi hits songs', 'latest haryanvi songs', 'Haryanvi'),
+    RadioLanguageSelectLookup('bollywood', 'bollywood hits songs -punjabi -haryanvi', 'latest bollywood songs -punjabi -haryanvi', 'Bollywood'),
+    RadioLanguageSelectLookup('punjabi', 'punjabi hits songs -haryanvi', 'latest punjabi songs -haryanvi', 'Punjabi'),
+    RadioLanguageSelectLookup('haryanvi', 'haryanvi hits songs -punjabi', 'latest haryanvi songs -punjabi', 'Haryanvi'),
   ];
 
   static RadioLanguageSelectLookup? byCode(String code) {

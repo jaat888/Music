@@ -1,7 +1,7 @@
 name: sursathi
 description: "SurSathi - Hindi/Haryanvi/Punjabi music player"
 publish_to: 'none'
-version: 1.0.0+558
+version: 1.0.0+563
 
 environment:
   sdk: '>=3.2.0 <4.0.0'

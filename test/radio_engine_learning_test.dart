@@ -101,6 +101,10 @@ void main() {
     expect(RadioHistoryStore.instance.artistAffinity()['artist a'], closeTo(1.35, 0.001));
   });
 
+  test('Radio hard repeat check is based on the live 90-day cutoff', () {
+    expect(RadioHistoryStore.maxAge, const Duration(days: 90));
+  });
+
   test('candidate construction keeps radio tags', () {
     final song = Song(
       id: 'abc',

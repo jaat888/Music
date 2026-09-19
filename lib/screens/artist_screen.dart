@@ -18,6 +18,7 @@ import '../theme/colors.dart';
 import '../theme/typography.dart';
 import '../widgets/shimmer_song_card.dart';
 import '../widgets/song_card.dart';
+import 'album_screen.dart';
 
 class ArtistScreen extends StatefulWidget {
   final String artistName;
@@ -45,10 +46,50 @@ class _ArtistScreenState extends State<ArtistScreen> {
   Set<String> _likedIds = {};
   Set<String> _cachedIds = {};
 
+  // BUG FIX (feature wiring): AlbumScreen (album detail UI — poori tarah
+  // functional, apna "<naam> full album" search khud karti hai) ke paas
+  // app me kahin se bhi Navigator.push nahi hota tha. App me koi real
+  // "artist ke albums" API nahi hai (ArtistScreen khud bhi sirf
+  // "<artist> songs" text-search se bani hai — dekho upar wala class
+  // comment), isliye yahan bhi wahi pattern follow karte hain: ek chhota
+  // "<artist> album" search karke uske results ko album-tiles ki tarah
+  // dikhate hain — tap karne par AlbumScreen khulti hai.
+  List<YtResult> _albumResults = [];
+  bool _loadingAlbums = true;
+
   @override
   void initState() {
     super.initState();
     _load();
+    _loadAlbums();
+  }
+
+  Future<void> _loadAlbums() async {
+    if (!mounted) return;
+    setState(() => _loadingAlbums = true);
+    try {
+      final results = await YoutubeService.instance.search(
+        '${widget.artistName} album',
+        max: 10,
+      );
+      if (!mounted) return;
+      setState(() => _albumResults = results);
+    } catch (e) {
+      print('ARTIST albums-section ERROR: $e');
+      if (!mounted) return;
+      setState(() => _albumResults = []);
+    } finally {
+      if (mounted) setState(() => _loadingAlbums = false);
+    }
+  }
+
+  void _openAlbum(YtResult r) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AlbumScreen(albumName: r.title, albumThumb: r.thumb),
+      ),
+    );
   }
 
   Future<void> _load() async {
@@ -222,6 +263,81 @@ class _ArtistScreenState extends State<ArtistScreen> {
                 ),
               ),
             ),
+            // ---------- Albums (feature wiring — see _loadAlbums()) ----------
+            if (_loadingAlbums || _albumResults.isNotEmpty)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Albums',
+                        style: AppText.displayS(color: kText).copyWith(fontSize: 16),
+                      ),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        height: 150,
+                        child: _loadingAlbums
+                            ? ListView.separated(
+                                scrollDirection: Axis.horizontal,
+                                itemCount: 4,
+                                separatorBuilder: (_, __) => const SizedBox(width: 12),
+                                itemBuilder: (_, __) => Container(
+                                  width: 110,
+                                  height: 110,
+                                  decoration: BoxDecoration(
+                                    color: kSurface,
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                ),
+                              )
+                            : ListView.separated(
+                                scrollDirection: Axis.horizontal,
+                                itemCount: _albumResults.length,
+                                separatorBuilder: (_, __) => const SizedBox(width: 12),
+                                itemBuilder: (context, i) {
+                                  final r = _albumResults[i];
+                                  return GestureDetector(
+                                    onTap: () => _openAlbum(r),
+                                    child: SizedBox(
+                                      width: 110,
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          ClipRRect(
+                                            borderRadius: BorderRadius.circular(8),
+                                            child: CachedNetworkImage(
+                                              imageUrl: r.thumb,
+                                              width: 110,
+                                              height: 110,
+                                              fit: BoxFit.cover,
+                                              errorWidget: (_, __, ___) => Container(
+                                                width: 110,
+                                                height: 110,
+                                                color: kSurface,
+                                                child: Icon(Icons.album, color: kTextDim),
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 6),
+                                          Text(
+                                            r.title,
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: AppText.bodyS(color: kText).copyWith(fontSize: 11),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             if (_loading)
               SliverPadding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),

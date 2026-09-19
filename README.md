@@ -531,7 +531,7 @@ The Home top bar now exposes a clean, accessible Radio Mode entry icon that open
 Documentation/status phase completed. Radio Mode Phases 1–9 are now recorded here and in `NOTES.md` / `FEATURE_ROADMAP.md`. Part 10 makes no runtime or protected-pipeline changes.
 
 ## Radio Mode — Parts 11–12
-- Part 11 finalized Radio tuning defaults: 150-day history window, session-only mood state, one-step Previous, and centralized skip/decay constants.
+- Part 11 finalized Radio tuning defaults: 90-day history window, session-only mood state, one-step Previous, and centralized skip/decay constants.
 - Part 12 hardened Radio Player transitions against rapid double swipe/auto-next/Previous races.
 - Existing protected playback/resolve/CDN/background pipeline remains untouched.
 
@@ -624,4 +624,80 @@ The Radio player no longer has two competing preload callers with different look
 - Skipped-song timing is no longer counted twice through generic tag/artist affinity and dedicated skip-timing affinity.
 - Added regression tests for both behaviours.
 
-Version: `1.0.0+558`
+Version: `1.0.0+561`
+
+
+## V114 — Radio freshness / strict language / duration
+
+See `V114_RADIO_90DAY_2YEAR_LANGUAGE_DURATION_FIX.md` for the Radio policy change.
+
+## V113 — Deep playback race hardening
+
+See `V113_DEEP_PLAYBACK_RACE_FIX.md` and the top section of `NOTES.md` for the exact bugs fixed, root causes, and validation limits.
+
+
+## V115 — 2026-09-19 — Radio lyrics strict timing scan + word-spacing fix
+
+### User-reported Radio lyrics problems
+
+1. Kuch songs me lyrics source milta tha, lekin **time-synced lyrics** available hain ya nahi ye Radio strictly verify nahi karta tha. Plain lyrics aane par Radio unhe bhi display kar sakta tha.
+2. Multiple lyric providers me synced versions ho sakte hain, lekin old flow **first synced response par return** kar deta tha; isliye kisi doosre provider ki zyada complete timing ko compare nahi kiya jaata tha.
+3. BetterLyrics TTML me `<span>` text ko direct concatenate kiya ja raha tha. Jab provider word spans ke beech whitespace nahi deta tha, result `meradilyeh` jaisa mix ho sakta tha.
+
+### Fix
+
+- Radio ke liye naya strict `getSyncedForSong()` path add kiya.
+- Timing-capable providers ko scan kiya jaata hai: BetterLyrics, LRCLIB exact, LRCLIB search, Kugou.
+- Saare returned timed results ko compare karke **timeline coverage + line completeness** ke basis par source select hota hai.
+- Radio ko plain-only lyrics intentionally nahi diye jaate. Koi usable timed lyrics nahi mile to UI seedha **"Lyrics not available for this song"** dikhata hai.
+- Radio look-ahead prefetch bhi strict synced path use karta hai, isliye future songs ke plain lyrics bandwidth waste karke timed lookup ko mask nahi karte.
+- TTML timed word spans ke beech automatic whitespace normalization add ki gayi; punctuation ke pehle unnecessary space nahi dala jaata.
+- LRC/plain/cached lyric text me whitespace normalization add ki gayi, taaki old cached malformed spacing dobara mix na ho.
+
+### Important behavior
+
+Radio abhi bhi normal Lyrics screen se alag strict hai: normal Lyrics screen plain fallback dikha sakti hai, lekin Radio me bina timestamps ke lyrics nahi dikhengi.
+
+### Validation
+
+- Added unit tests for timed-word spacing, punctuation spacing aur timing coverage scoring.
+- Flutter SDK/device runtime is environment me available nahi tha, isliye `flutter test`, `flutter analyze`, APK build aur real-device playback validation run nahi ki gayi.
+
+### Version
+
+`1.0.0+561` → `1.0.0+562`
+
+
+--- V116 ---
+# V116 — Mood Mode + iTunes daily snapshot + lyrics cache isolation
+
+## Included
+
+1. **Lyrics strict-cache isolation**
+   - Normal LyricsScreen keeps `lyrics_v5_<songId>` cache.
+   - Radio strict synced lookup now uses `lyrics_v5_synced_<songId>`.
+   - A normal-screen cached first provider can no longer bypass Radio’s all-provider timed quality scan.
+   - Timed lyric word joins now keep ASCII apostrophe contractions tight (`don` + `'t` -> `don't`).
+
+2. **Mood Mode two-step flow**
+   - Moods opens with the same Radio language choices first.
+   - Next screen asks for Chill / Workout / Party / Sad / Focus.
+   - Selecting a mood launches the hardened Radio player in strict Mood mode.
+   - Mood candidates must match an explicit mood keyword in title/artist metadata.
+   - Language hard gates, <=7 minute duration, 90-day exact-song history exclusion, failed-session exclusion, and <=2-year YouTube-upload freshness gates are reused from Radio.
+   - Latest-month candidates are a hard first phase; broader <=2-year candidates are used only after the latest pool is exhausted.
+   - Mood query seeds rotate across refills so long sessions do not depend on one deterministic first search page.
+   - Playback remains continuous through the existing Radio advance/look-ahead pipeline.
+
+3. **iTunes India Top Songs daily snapshot**
+   - Home no longer re-downloads the iTunes chart every time the screen opens.
+   - Cache window is anchored to local device 06:00 -> 06:00.
+   - First Home load after 06:00 performs at most one refresh for that daily window.
+   - Previous good snapshot is kept on network/API failure.
+   - This is an on-open refresh/cache policy; Android may defer background work when the app is fully closed, so an exact 06:00 background network fetch is not claimed.
+
+## Validation
+
+Flutter/Dart SDK is not installed in the sandbox, so `flutter analyze`, `flutter test`, APK build, and real-device playback were not run here. Static source review and targeted test additions were performed.
+
+Version: `1.0.0+563`

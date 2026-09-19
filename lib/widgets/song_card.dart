@@ -8,6 +8,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
 import '../models/song.dart';
+import 'cache_indicator.dart';
 
 class SongCard extends StatelessWidget {
   final Song song;
@@ -97,20 +98,18 @@ class SongCard extends StatelessWidget {
                       ),
                     ),
                   ),
-                  // Cached hone pe bottom-right green dot dikhao
-                  if (isCached)
-                    Positioned(
-                      bottom: -2,
-                      right: -2,
-                      child: Container(
-                        width: 6,
-                        height: 6,
-                        decoration: const BoxDecoration(
-                          color: kGreen,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                    ),
+                  // Cached hone pe bottom-right fade-in badge dikhao.
+                  // BUG FIX (feature wiring): pehle yahan ek hand-rolled
+                  // plain green Container tha (koi fade-in animation
+                  // nahi) — asli CacheIndicator widget (jo animate karke
+                  // render hota hai) kabhi kahin use hi nahi hua tha.
+                  // Widget khud hi `isCached == false` par khud ko chhupa
+                  // leta hai, isliye bahar wala `if` bhi hata diya.
+                  Positioned(
+                    bottom: -2,
+                    right: -2,
+                    child: CacheIndicator(isCached: isCached, size: 10),
+                  ),
                 ],
               ),
               const SizedBox(width: 10),

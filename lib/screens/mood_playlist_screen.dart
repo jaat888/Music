@@ -1,51 +1,19 @@
 // lib/screens/mood_playlist_screen.dart
-// Part 6 (Engagement) — mood-based auto playlist. Ek tap se ("chill",
-// "workout", "party", "sad", "focus") ek playlist ban jaati hai: pehle
-// apni library (liked+cache+download pool, jaisa smart_playlist_screen.dart
-// karta hai) me se us mood se milte-julte gaane (title/artist keyword
-// match) chunte hain, aur agar wo kam pade to YoutubeService.search() se
-// online supplement karte hain (jaisa radio mode karta hai, dekho
-// getRadioQueue()) — koi audio-feature analysis nahi hai (wo scope se
-// bahar hai), sirf keyword-heuristic + online fallback.
+// Mood Mode entry flow:
+// 1) language selection (same three strict language choices as Radio),
+// 2) mood selection,
+// 3) the existing hardened Radio player runs in strict Mood mode so it can
+//    keep generating songs continuously instead of stopping at a short list.
 
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-import '../db/cache_db.dart';
-import '../db/download_db.dart';
-import '../db/liked_db.dart';
-import '../models/song.dart';
-import '../services/background_service.dart';
-import '../services/like_service.dart';
-import '../services/local_media_resolver.dart';
-import '../services/queue_service.dart';
-import '../services/download_queue_service.dart';
-import '../services/youtube_service.dart';
+import '../services/mood_catalog.dart';
+import '../services/radio_service.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
-import '../widgets/shimmer_song_card.dart';
-import '../widgets/song_card.dart';
-
-class _Mood {
-  final String label;
-  final String emoji;
-  final List<String> keywords;
-  final String searchQuery;
-  const _Mood(this.label, this.emoji, this.keywords, this.searchQuery);
-}
-
-const List<_Mood> _kMoods = [
-  _Mood('Chill', '😌', ['lofi', 'chill', 'acoustic', 'unplugged', 'calm', 'soft'],
-      'chill lofi hindi songs'),
-  _Mood('Workout', '🔥', ['workout', 'gym', 'pump', 'power', 'beast'],
-      'workout gym hindi songs'),
-  _Mood('Party', '🎉', ['party', 'dance', 'dj', 'remix', 'club'],
-      'party dance hindi songs'),
-  _Mood('Sad', '💔', ['sad', 'breakup', 'dard', 'judaai', 'tanha', 'heartbreak'],
-      'sad hindi songs'),
-  _Mood('Focus', '📚', ['instrumental', 'lofi', 'focus', 'study', 'calm'],
-      'focus instrumental lofi songs'),
-];
+import 'radio_language_select_screen.dart';
+import 'radio_player_screen.dart';
 
 class MoodPlaylistScreen extends StatefulWidget {
   const MoodPlaylistScreen({super.key});
@@ -55,213 +23,279 @@ class MoodPlaylistScreen extends StatefulWidget {
 }
 
 class _MoodPlaylistScreenState extends State<MoodPlaylistScreen> {
-  _Mood? _selected;
-  bool _loading = false;
-  List<Song> _songs = [];
-  Set<String> _likedIds = {};
-  Set<String> _cachedIds = {};
+  static const _prefsKey = 'mood_selected_languages';
 
-  // Liked + Cache + Download — same pool pattern jo smart_playlist_screen.dart
-  // (Part 3) use karta hai.
-  Future<Map<String, Song>> _libraryPool() async {
-    final pool = <String, Song>{};
-    for (final s in await LikedDB.instance.getAll()) {
-      pool[s.id] = s;
-    }
-    for (final row in await CacheDB.instance.getAll()) {
-      final s = Song.fromMap(row);
-      pool.putIfAbsent(s.id, () => s);
-    }
-    for (final s in await DownloadDB.instance.getAll()) {
-      pool.putIfAbsent(s.id, () => s);
-    }
-    return pool;
-  }
-
-  bool _matchesMood(Song s, _Mood mood) {
-    final haystack = '${s.title} ${s.artist}'.toLowerCase();
-    return mood.keywords.any((k) => haystack.contains(k));
-  }
-
-  Future<void> _pickMood(_Mood mood) async {
-    setState(() {
-      _selected = mood;
-      _loading = true;
-      _songs = [];
-    });
-    try {
-      final pool = await _libraryPool();
-      final fromLibrary = pool.values.where((s) => _matchesMood(s, mood)).toList()
-        ..shuffle();
-
-      final combined = <String, Song>{for (final s in fromLibrary) s.id: s};
-
-      // Library se kam pade (naye users / khaali library) to online
-      // search se bhar do — radio mode jaisa hi fallback pattern.
-      if (combined.length < 15) {
-        try {
-          final results = await YoutubeService.instance.search(mood.searchQuery, max: 25);
-          for (final r in results) {
-            combined.putIfAbsent(r.id, () => r.toSong());
-          }
-        } catch (_) {
-          // Online search fail ho (network/parsing) to bhi library-wale
-          // gaane to dikh hi jaayenge — poori playlist khaali nahi hogi.
-        }
-      }
-
-      final liked = await LikeService.instance.getAllLiked();
-      final cached = await CacheDB.instance.getAll();
-      if (!mounted) return;
-      setState(() {
-        _songs = combined.values.toList();
-        _likedIds = liked.map((s) => s.id).toSet();
-        _cachedIds = cached.map((e) => e['id'] as String).toSet();
-      });
-    } catch (e) {
-      print('MOOD_PLAYLIST(${mood.label}) _pickMood() ERROR: $e');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  Future<void> _playFrom(int index) async {
-    context.read<QueueService>().setQueue(_songs, startIndex: index);
-    final song = _songs[index];
-    // (2026-09-18: consolidated — dekho local_media_resolver.dart)
-    final localPath = await LocalMediaResolver.instance.getPath(song.id);
-    if (localPath != null) {
-      await audioHandler.playFromFile(song, localPath);
-    } else {
-      await audioHandler.playWithRetry(song);
-    }
-  }
-
-  // BUG FIX (v37 — download queue/progress visibility): shared
-  // DownloadQueueService use karte hain.
-  Future<void> _download(Song song) async {
-    if (DownloadQueueService.instance.isActive(song.id)) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('"${song.title}" already download queue mein hai')),
-      );
-      return;
-    }
-    DownloadQueueService.instance.enqueue(song);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('"${song.title}" download queue mein daal diya')),
-    );
-  }
+  final Set<String> _selectedLanguages = <String>{};
+  bool _loading = true;
+  bool _saving = false;
+  bool _showMoodStep = false;
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: kBg,
-      appBar: AppBar(
-        backgroundColor: kBg,
-        elevation: 0,
-        title: Text('Moods', style: AppText.displayM(color: kGreen).copyWith(fontSize: 20)),
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-              child: Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: _kMoods.map((m) {
-                  final selected = _selected?.label == m.label;
-                  return ChoiceChip(
-                    label: Text('${m.emoji}  ${m.label}'),
-                    selected: selected,
-                    onSelected: (_) => _pickMood(m),
-                    backgroundColor: kSurface,
-                    selectedColor: kGreen,
-                    labelStyle: AppText.bodyS(color: selected ? kBg : kText).copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  );
-                }).toList(),
-              ),
-            ),
-            const SizedBox(height: 4),
-            Expanded(child: _buildBody()),
-          ],
+  void initState() {
+    super.initState();
+    _loadSelection();
+  }
+
+  Future<void> _loadSelection() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getStringList(_prefsKey) ?? [];
+    final valid = RadioLanguageSelectScreen.languages.map((e) => e.code).toSet();
+    if (!mounted) return;
+    setState(() {
+      _selectedLanguages
+        ..clear()
+        ..addAll(saved.where(valid.contains));
+      _loading = false;
+    });
+  }
+
+  void _toggleLanguage(String code) {
+    setState(() {
+      if (_selectedLanguages.contains(code)) {
+        _selectedLanguages.remove(code);
+      } else {
+        _selectedLanguages.add(code);
+      }
+    });
+  }
+
+  Future<void> _continueToMood() async {
+    if (_selectedLanguages.isEmpty || _saving) return;
+    setState(() => _saving = true);
+    final ordered = RadioLanguageSelectScreen.languages
+        .where((language) => _selectedLanguages.contains(language.code))
+        .map((language) => language.code)
+        .toList();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_prefsKey, ordered);
+    RadioService.instance.setSelectedLanguages(ordered);
+    if (!mounted) return;
+    setState(() {
+      _selectedLanguages
+        ..clear()
+        ..addAll(ordered);
+      _saving = false;
+      _showMoodStep = true;
+    });
+  }
+
+  void _startMood(MoodProfile mood) {
+    final languages = RadioLanguageSelectScreen.languages
+        .where((language) => _selectedLanguages.contains(language.code))
+        .map((language) => language.code)
+        .toList();
+    if (languages.isEmpty) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => RadioPlayerScreen(
+          languages: languages,
+          moodCode: mood.code,
+          moodLabel: mood.label,
         ),
       ),
     );
   }
 
-  Widget _buildBody() {
-    if (_selected == null) {
-      return ListView(
-        padding: const EdgeInsets.symmetric(vertical: 80),
-        children: [
-          Center(
-            child: Column(
-              children: [
-                Icon(Icons.mood, color: kTextDim, size: 48),
-                const SizedBox(height: 10),
-                Text(
-                  'Ek mood tap karo — playlist khud ban jaayegi',
-                  style: AppText.bodyM(color: kTextDim),
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
-          ),
-        ],
-      );
-    }
+  @override
+  Widget build(BuildContext context) {
     if (_loading) {
-      return ListView(
-        padding: const EdgeInsets.all(16),
-        children: List.generate(5, (_) => const ShimmerSongCard()),
+      return Scaffold(
+        backgroundColor: kBg,
+        body: const Center(child: CircularProgressIndicator()),
       );
     }
-    if (_songs.isEmpty) {
-      return ListView(
-        padding: const EdgeInsets.symmetric(vertical: 80),
-        children: [
-          Center(
-            child: Text(
-              'Is mood ke liye kuch nahi mila',
-              style: AppText.bodyM(color: kTextDim),
-            ),
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(
+        backgroundColor: kBg,
+        elevation: 0,
+        title: Text(_showMoodStep ? 'Choose Mood' : 'Mood Mode', style: AppText.titleL()),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () {
+            if (_showMoodStep) {
+              setState(() => _showMoodStep = false);
+            } else {
+              Navigator.of(context).pop();
+            }
+          },
+        ),
+      ),
+      body: SafeArea(
+        child: _showMoodStep ? _buildMoodStep() : _buildLanguageStep(),
+      ),
+    );
+  }
+
+  Widget _buildLanguageStep() {
+    final canContinue = _selectedLanguages.isNotEmpty && !_saving;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Pehle languages chuno', style: AppText.displayL()),
+              const SizedBox(height: 8),
+              Text(
+                'Radio ki tarah ek ya jitni chaaho languages select karo. Uske baad mood choose karna hai.',
+                style: AppText.bodyM(),
+              ),
+              const SizedBox(height: 8),
+              Text('${_selectedLanguages.length} selected', style: AppText.bodyS(color: kGreen)),
+            ],
           ),
-        ],
-      );
-    }
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: _songs.length,
-      itemBuilder: (context, i) {
-        final song = _songs[i];
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 6),
-          child: SongCard(
-            song: song,
-            isLiked: _likedIds.contains(song.id),
-            isCached: _cachedIds.contains(song.id),
-            onTap: () => _playFrom(i),
-            onPlay: () => _playFrom(i),
-            onDownload: () => _download(song),
-            onLike: () async {
-              await context.read<LikeService>().toggleLike(song);
-              if (!mounted) return;
-              setState(() {
-                if (_likedIds.contains(song.id)) {
-                  _likedIds.remove(song.id);
-                } else {
-                  _likedIds.add(song.id);
-                }
-              });
+        ),
+        const SizedBox(height: 18),
+        Expanded(
+          child: ListView.separated(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+            itemCount: RadioLanguageSelectScreen.languages.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 12),
+            itemBuilder: (_, index) {
+              final language = RadioLanguageSelectScreen.languages[index];
+              final selected = _selectedLanguages.contains(language.code);
+              return Semantics(
+                button: true,
+                selected: selected,
+                label: '${language.name} language',
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(18),
+                  onTap: () => _toggleLanguage(language.code),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: selected ? kGreen.withOpacity(.12) : kBgElev,
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: selected ? kGreen : Colors.transparent,
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 50,
+                          height: 50,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(color: kSurface, borderRadius: BorderRadius.circular(14)),
+                          child: Text(language.emoji, style: const TextStyle(fontSize: 26)),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(language.name, style: AppText.bodyL()),
+                              const SizedBox(height: 3),
+                              Text(language.nativeName, style: AppText.bodyS()),
+                            ],
+                          ),
+                        ),
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 150),
+                          child: selected
+                              ? const Icon(Icons.check_circle, key: ValueKey(true), color: kGreen, size: 27)
+                              : Icon(Icons.radio_button_unchecked, key: const ValueKey(false), color: kTextDim, size: 27),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
             },
           ),
-        );
-      },
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: canContinue ? _continueToMood : null,
+              icon: _saving
+                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.arrow_forward),
+              label: Text(_saving ? 'Saving...' : 'Next — Choose Mood', style: AppText.button()),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: kGreen,
+                disabledBackgroundColor: kSurface,
+                disabledForegroundColor: kTextDim,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMoodStep() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+          child: Text('Ab mood chuno', style: AppText.displayL()),
+        ),
+        const SizedBox(height: 8),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Text(
+            'Sirf selected mood se strict-match gaane aayenge. Latest/new songs ko pehle priority milegi.',
+            style: AppText.bodyM(),
+          ),
+        ),
+        const SizedBox(height: 18),
+        Expanded(
+          child: ListView.separated(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+            itemCount: kMoodProfiles.length,
+            separatorBuilder: (_, __) => const SizedBox(height: 12),
+            itemBuilder: (_, index) {
+              final mood = kMoodProfiles[index];
+              return InkWell(
+                borderRadius: BorderRadius.circular(18),
+                onTap: () => _startMood(mood),
+                child: Container(
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: kBgElev,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: kSurface),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 56,
+                        height: 56,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(color: kSurface, borderRadius: BorderRadius.circular(16)),
+                        child: Text(mood.emoji, style: const TextStyle(fontSize: 30)),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(mood.label, style: AppText.bodyL()),
+                            const SizedBox(height: 4),
+                            Text('Strict ${mood.label} Radio • latest first • continuous play', style: AppText.bodyS(color: kTextDim)),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.chevron_right, color: kTextDim),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }

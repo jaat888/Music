@@ -106,9 +106,9 @@ class RadioHistoryStore {
 
   static const String _kPrefsKey = 'radio_history';
 
-  // Roadmap section 5: "4-6 mahine tak koi gana repeat nahi" — 150 din
-  // (~5 mahine) is range ke beech ka safe default.
-  static const Duration maxAge = Duration(days: 150);
+  // Roadmap section 5: "3 mahine tak koi gana repeat nahi" — 90 din
+  // (~3 mahine) is range ke beech ka safe default.
+  static const Duration maxAge = Duration(days: 90);
 
   final List<RadioHistoryEntry> _entries = [];
   bool _initialized = false;
@@ -134,7 +134,7 @@ class RadioHistoryStore {
     }
     _initialized = true;
     // App start pe hi purani entries purge kar do (roadmap: "app start pe
-    // ya periodically 4-6 mahine se purane entries auto-delete").
+    // ya periodically 3 mahine se purane entries auto-delete").
     await purgeOld();
   }
 
@@ -194,7 +194,8 @@ class RadioHistoryStore {
   /// ke andar already bajaya ja chuka hai (skip ho ya poora suna ho, dono
   /// count hoti hain — dobara nahi bajana).
   bool wasPlayedRecently(String songId) {
-    return _entries.any((e) => e.songId == songId);
+    final cutoff = DateTime.now().subtract(maxAge);
+    return _entries.any((e) => e.songId == songId && e.playedAt.isAfter(cutoff));
   }
 
   /// Fallback (roadmap section 5): pool bahut chhota pad jaaye to "sabse
@@ -302,7 +303,7 @@ class RadioHistoryStore {
   }
 
   /// Counts recently heard artists so the ranker can apply short-term
-  /// artist fatigue without changing the hard 150-day exact-song rule.
+  /// artist fatigue without changing the hard 90-day exact-song rule.
   Map<String, int> recentArtistCounts({
     Duration within = const Duration(minutes: 45),
     Set<String> excludeSongIds = const <String>{},

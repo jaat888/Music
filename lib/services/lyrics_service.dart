@@ -5,11 +5,14 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
+
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
 import 'innertube_client.dart';
+import 'app_logger.dart';
 
 class LyricLine {
   final Duration time;
@@ -43,10 +46,14 @@ class LyricsService {
   static const _kugouDownloadBase = 'https://lyrics.kugou.com/download';
   static const _userAgent = 'SurSathi/55 RadioLyrics';
 
-  // v4: naya priority order (YT Music -> BetterLyrics -> LRCLIB -> Kugou)
-  // pichhle v3 cache se conflict kar sakta hai (alag source/timing), isliye
-  // key bump.
-  String _cacheKey(String songId) => 'lyrics_v4_$songId';
+  // v115: Radio ab best-timed-source selection karta hai, isliye cache key
+  // bump ki gayi hai taaki purana first-source result is naye scan ko bypass
+  // na kare.
+  // Normal LyricsScreen cache and Radio's strict best-synced cache must stay
+  // physically separate. Otherwise a normal-screen first-source result can
+  // short-circuit Radio's all-provider quality scan for the same song.
+  String _cacheKey(String songId) => 'lyrics_v5_$songId';
+  String _syncedCacheKey(String songId) => 'lyrics_v5_synced_$songId';
 
   // BUG FIX (Radio "subtitle" stuck-loading — v58): Radio was calling
   // getForSong() for the SAME current song from more than one place at
@@ -62,6 +69,53 @@ class LyricsService {
   // every concurrent call for the same songId share one underlying fetch
   // instead of starting a new one.
   final Map<String, Future<LyricsResult?>> _inFlight = {};
+
+  // Radio needs a stricter contract than the full lyrics screen: it must
+  // show ONLY genuinely time-synced lyrics. A plain-only cached result must
+  // never make Radio stop searching for a timed version. This second map
+  // also prevents a normal plain-lyrics request from racing a Radio timed
+  // request and deciding the wrong result.
+  final Map<String, Future<LyricsResult?>> _syncedInFlight = {};
+
+  /// Radio-specific lyrics lookup.
+  ///
+  /// All providers that can return timing are scanned before a winner is
+  /// chosen. The source with the strongest timing coverage is selected, not
+  /// simply the first provider that replies. If none of the timed providers
+  /// returns usable synchronized lyrics, this returns null so Radio can show
+  /// "Lyrics not available" rather than pretending plain text is synced.
+  Future<LyricsResult?> getSyncedForSong({
+    required String songId,
+    required String title,
+    required String artist,
+    required int durationSeconds,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final cached = prefs.getString(_syncedCacheKey(songId));
+    if (cached != null) {
+      final decoded = _decode(cached);
+      if (decoded != null && decoded.hasSynced) return decoded;
+    }
+
+    final existing = _syncedInFlight[songId];
+    if (existing != null) return existing;
+
+    final future = _fetchBestSyncedSource(
+      title: title,
+      artist: artist,
+      durationSeconds: durationSeconds,
+    );
+    _syncedInFlight[songId] = future;
+    try {
+      final result = await future;
+      if (result != null && result.hasSynced) {
+        await prefs.setString(_syncedCacheKey(songId), _encode(result));
+      }
+      return result;
+    } finally {
+      _syncedInFlight.remove(songId);
+    }
+  }
 
   Future<LyricsResult?> getForSong({
     required String songId,
@@ -125,14 +179,95 @@ class LyricsService {
     }
   }
 
-  // v96 priority order (user request): YT Music internal -> BetterLyrics ->
-  // LRCLIB -> Kugou -> JioSaavn -> lyrics.ovh. A source higher in this list
-  // that returns SYNCED lyrics wins immediately (best possible experience).
+  /// Radio look-ahead must use the same strict synchronized contract as the
+  /// current-song lookup. Plain-only lyrics are intentionally not prefetched
+  /// for Radio because they cannot be time-mapped onto the audio timeline.
+  Future<void> prefetchSyncedForSongs(
+    Iterable<Song> songs, {
+    int maxSongs = 10,
+    bool Function()? isCancelled,
+  }) async {
+    for (final song in songs.take(maxSongs)) {
+      if (isCancelled?.call() ?? false) return;
+      await getSyncedForSong(
+        songId: song.id,
+        title: song.title,
+        artist: song.artist,
+        durationSeconds: song.duration,
+      );
+      if (isCancelled?.call() ?? false) return;
+      await Future.delayed(const Duration(milliseconds: 220));
+    }
+  }
+
+  // Normal LyricsScreen keeps the v96 fallback order (YT Music internal ->
+  // BetterLyrics -> LRCLIB -> Kugou -> JioSaavn -> lyrics.ovh). Radio uses
+  // the strict method above, which scans all timing-capable sources first.
   // A source that only has PLAIN text is kept as a fallback candidate but
   // does not stop the search — we keep trying lower sources in case one of
   // them has synced timing. Among plain-only results, the FIRST one found
   // in priority order is kept (matches the user's requested ordering for
   // the plain case too).
+  Future<LyricsResult?> _fetchBestSyncedSource({
+    required String title,
+    required String artist,
+    required int durationSeconds,
+  }) async {
+    // Do the timing-capable providers together so a slow provider cannot
+    // block the whole Radio lyric decision. We still inspect EVERY returned
+    // timed result before picking one.
+    final results = await Future.wait<LyricsResult?>([
+      _fetchBetterLyrics(title, artist, durationSeconds),
+      _fetchLrclibExact(title, artist, durationSeconds),
+      _fetchLrclibSearch(title, artist, durationSeconds),
+      _fetchKugou(title, artist, durationSeconds),
+    ], eagerError: false);
+
+    LyricsResult? best;
+    var bestScore = double.negativeInfinity;
+    for (final result in results) {
+      if (result == null || !result.hasSynced) continue;
+      final score = _syncedQualityScore(result.synced!, durationSeconds);
+      if (score > bestScore) {
+        best = result;
+        bestScore = score;
+      }
+    }
+
+    if (best != null) {
+      AppLogger.instance.log(
+        '[LYRICS] Radio timed scan selected ${best.source} — '
+        '${best.synced!.length} timed lines, quality=${bestScore.toStringAsFixed(3)}',
+      );
+    } else {
+      AppLogger.instance.log('[LYRICS] Radio timed scan found no usable synced lyrics');
+    }
+    return best;
+  }
+
+  static double _syncedQualityScore(List<LyricLine> lines, int durationSeconds) {
+    if (lines.length < 2) return double.negativeInfinity;
+
+    final sorted = [...lines]..sort((a, b) => a.time.compareTo(b.time));
+    final durationMs = durationSeconds > 0 ? durationSeconds * 1000 : 0;
+    final valid = durationMs > 0
+        ? sorted.where((line) => line.time.inMilliseconds <= durationMs + 15000).toList()
+        : sorted;
+    if (valid.length < 2) return double.negativeInfinity;
+
+    final lastMs = valid.last.time.inMilliseconds;
+    final coverage = durationMs > 0
+        ? (lastMs / durationMs).clamp(0.0, 1.0).toDouble()
+        : (valid.length / 40.0).clamp(0.0, 1.0).toDouble();
+    final lineDensity = (valid.length / 60.0).clamp(0.0, 1.0).toDouble();
+
+    // Prefer lyrics that actually cover the song timeline. A tiny timed
+    // snippet should not beat a nearly complete source just because it
+    // happens to respond first. Line count is a secondary completeness
+    // signal; source priority is deliberately NOT used as a winner rule.
+    return coverage * 0.78 + lineDensity * 0.22;
+  }
+
   Future<LyricsResult?> _fetchMultiSource({
     required String songId,
     required String title,
@@ -225,8 +360,9 @@ class LyricsService {
       final ttml = map['ttml']?.toString();
       if (ttml == null || ttml.isEmpty) return null;
       final synced = _parseTtml(ttml);
-      final plainText =
-          synced.map((l) => l.text).where((t) => t.trim().isNotEmpty).join('\n');
+      final plainText = _normalizeMultiLineText(
+        synced.map((l) => l.text).where((t) => t.trim().isNotEmpty).join('\n'),
+      );
       return LyricsResult(
         synced: synced.isNotEmpty ? synced : null,
         plain: plainText.isNotEmpty ? plainText : null,
@@ -253,15 +389,20 @@ class LyricsService {
       final beginMs = _parseTtmlTime(match.group(1) ?? '');
       if (beginMs == null) continue;
       final inner = match.group(2) ?? '';
-      final buffer = StringBuffer();
+      final segments = <String>[];
       for (final span in _ttmlSpanText.allMatches(inner)) {
-        buffer.write(_decodeXmlEntities(span.group(1) ?? ''));
+        final segment = _normalizeSingleLineText(
+          _decodeXmlEntities(span.group(1) ?? ''),
+        );
+        if (segment.isNotEmpty) segments.add(segment);
       }
-      var text = buffer.toString().trim();
+      var text = _joinTimedSegments(segments);
       if (text.isEmpty) {
         // Some lines have no nested <span> (rare) — fall back to the raw
         // inner text with tags stripped.
-        text = _decodeXmlEntities(inner.replaceAll(RegExp(r'<[^>]+>'), '')).trim();
+        text = _normalizeSingleLineText(
+          _decodeXmlEntities(inner.replaceAll(RegExp(r'<[^>]+>'), '')),
+        );
       }
       if (text.isEmpty) continue;
       lines.add(LyricLine(Duration(milliseconds: beginMs), text));
@@ -547,7 +688,7 @@ class LyricsService {
       final rawLyrics = body['lyrics']?.toString();
       final clean = _cleanHtmlLyrics(rawLyrics);
       if (clean == null || clean.isEmpty) return null;
-      return LyricsResult(plain: clean, source: 'JioSaavn');
+      return LyricsResult(plain: _normalizeMultiLineText(clean), source: 'JioSaavn');
     } catch (_) {
       return null;
     }
@@ -564,7 +705,7 @@ class LyricsService {
       if (map is! Map) return null;
       final lyrics = map['lyrics']?.toString().trim();
       if (lyrics == null || lyrics.isEmpty) return null;
-      return LyricsResult(plain: lyrics, source: 'lyrics.ovh');
+      return LyricsResult(plain: _normalizeMultiLineText(lyrics), source: 'lyrics.ovh');
     } catch (_) {
       return null;
     }
@@ -653,7 +794,8 @@ class LyricsService {
 
   LyricsResult _fromJsonMap(Map<String, dynamic> map, {required String source}) {
     final syncedRaw = map['syncedLyrics'] as String?;
-    final plain = map['plainLyrics'] as String?;
+    final rawPlain = map['plainLyrics'] as String?;
+    final plain = rawPlain == null ? null : _normalizeMultiLineText(rawPlain);
     final synced = (syncedRaw != null && syncedRaw.trim().isNotEmpty)
         ? _parseLrc(syncedRaw)
         : null;
@@ -681,11 +823,61 @@ class LyricsService {
         final fraction = (match.group(3) ?? '0').padRight(3, '0').substring(0, 3);
         final ms = int.tryParse(fraction) ?? 0;
         final corrected = math.max(0, Duration(minutes: min, seconds: sec, milliseconds: ms).inMilliseconds + offsetMs).toInt();
-        lines.add(LyricLine(Duration(milliseconds: corrected), text));
+        lines.add(
+          LyricLine(
+            Duration(milliseconds: corrected),
+            _normalizeSingleLineText(text),
+          ),
+        );
       }
     }
     lines.sort((a, b) => a.time.compareTo(b.time));
     return lines;
+  }
+
+  static String _normalizeSingleLineText(String text) {
+    return text
+        .replaceAll('\u00A0', ' ')
+        .replaceAll(RegExp(r'[\t\f\v]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  static String _normalizeMultiLineText(String text) {
+    final lines = text
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '\n')
+        .split('\n')
+        .map(_normalizeSingleLineText)
+        .where((line) => line.isNotEmpty)
+        .toList();
+    return lines.join('\n').trim();
+  }
+
+  @visibleForTesting
+  static String joinTimedSegmentsForTest(List<String> segments) =>
+      _joinTimedSegments(segments);
+
+  @visibleForTesting
+  static double syncedQualityScoreForTest(List<LyricLine> lines, int durationSeconds) =>
+      _syncedQualityScore(lines, durationSeconds);
+
+  static String _joinTimedSegments(List<String> segments) {
+    final buffer = StringBuffer();
+    for (final segment in segments) {
+      final cleaned = _normalizeSingleLineText(segment);
+      if (cleaned.isEmpty) continue;
+      if (buffer.isNotEmpty) {
+        // Also treat the ASCII apostrophe as punctuation. Some TTML
+        // providers split a contraction into spans like `don` + `'t`; that
+        // must become `don't`, not `don 't`.
+        final rightStartsPunctuation = RegExp(r"^[,.;:!?%\)\]\}'\u2019\u201d]")
+            .hasMatch(cleaned);
+        if (!rightStartsPunctuation) buffer.write(' ');
+      }
+      buffer.write(cleaned);
+    }
+    return _normalizeSingleLineText(buffer.toString());
   }
 
   String _encode(LyricsResult r) => jsonEncode({
@@ -702,12 +894,14 @@ class LyricsService {
           ?.whereType<Map>()
           .map((e) => LyricLine(
                 Duration(milliseconds: (e['ms'] as num).toInt()),
-                e['t'].toString(),
+                _normalizeSingleLineText(e['t'].toString()),
               ))
           .toList();
       return LyricsResult(
         synced: (synced != null && synced.isNotEmpty) ? synced : null,
-        plain: map['plain'] as String?,
+        plain: (map['plain'] as String?) == null
+            ? null
+            : _normalizeMultiLineText(map['plain'] as String),
         source: map['source']?.toString() ?? 'cache',
       );
     } catch (_) {

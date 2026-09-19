@@ -78,7 +78,7 @@ import 'storage_service.dart';
 // UploadDateFilter consts) use karte hain — isliye in sabke liye YT Music
 // layer (InnerTube) skip ho jaata hai, kyunki uska search API date-filter
 // support hi nahi karta.
-enum YtDateFilter { relevance, hour, today, week, month, year }
+enum YtDateFilter { relevance, hour, today, week, month, year, twoYears }
 
 class _SearchPaginationState {
   String? continuation;
@@ -392,9 +392,25 @@ class YoutubeService {
         return UploadDateFilter.lastMonth;
       case YtDateFilter.year:
         return UploadDateFilter.lastYear;
+      case YtDateFilter.twoYears:
+        // youtube_explode_dart has no built-in two-year UploadDateFilter.
+        // Radio supplies an `after:` cutoff below and keeps TypeFilters.video.
+        return TypeFilters.video;
       case YtDateFilter.relevance:
         return null;
     }
+  }
+
+  String _twoYearCutoffDate() {
+    final now = DateTime.now();
+    final cutoff = DateTime(now.year - 2, now.month, now.day);
+    String two(int value) => value.toString().padLeft(2, '0');
+    return '${cutoff.year}-${two(cutoff.month)}-${two(cutoff.day)}';
+  }
+
+  String _queryForUploadDateFilter(String query, YtDateFilter dateFilter) {
+    if (dateFilter != YtDateFilter.twoYears) return query;
+    return '$query after:${_twoYearCutoffDate()}';
   }
 
   // YouTube/YT Music jaisa "Upload date" filter — InnerTube (YT Music) ka
@@ -409,13 +425,14 @@ class YoutubeService {
     YtDateFilter dateFilter, {
     int max = 30,
   }) async {
+    final effectiveQuery = _queryForUploadDateFilter(query, dateFilter);
     _dateFilterQuery = query;
     _dateFilterActive = dateFilter;
     _dateFilterList = null;
     try {
       final filter = _uploadDateFilterFor(dateFilter) ?? TypeFilters.video;
       final yt = await _getYt();
-      final list = await yt.search.search(query, filter: filter);
+      final list = await yt.search.search(effectiveQuery, filter: filter);
       _dateFilterList = list;
       final results = <YtResult>[];
       for (final dynamic v in list) {
@@ -491,11 +508,33 @@ class YoutubeService {
   // "X — aur gaane" categories ko chahiye) — `loadMoreSearchResults()`
   // (upar) sirf EK active query ka continuation track karta hai (Search
   // screen ke liye theek hai, jahan ek waqt me sirf ek hi query hoti hai).
-  // Ye naya method STATELESS hai — caller khud apna continuation token
-  // sambhal ke rakhta hai (per-category Map), isliye 12 alag categories
-  // apna-apna alag "next page" state independently maintain kar sakte
-  // hain, bina ek-dusre ka continuation overwrite kiye.
-  Future<YtSearchPage> searchPage(String query, {String? continuation}) async {
+  // Relevance-mode path STATELESS hai — caller khud apna continuation token
+  // sambhal ke rakhta hai. Date-filter mode, however, intentionally reuses
+  // the existing single filtered-search paginator owned by this service.
+  Future<YtSearchPage> searchPage(
+    String query, {
+    String? continuation,
+    YtDateFilter dateFilter = YtDateFilter.relevance,
+  }) async {
+    if (dateFilter != YtDateFilter.relevance) {
+      // Date-filter searches use youtube_explode_dart pagination because the
+      // InnerTube YT Music endpoint has no upload-date filter support. The
+      // continuation value is intentionally opaque to the caller; this
+      // singleton tracks the current filtered search internally.
+      try {
+        final items = continuation == null
+            ? await _searchByUploadDate(query, dateFilter, max: 30)
+            : await _loadMoreByUploadDate(query, dateFilter);
+        return YtSearchPage(
+          items,
+          items.isNotEmpty ? '__date_filter__' : null,
+        );
+      } catch (e) {
+        print('YT date-filter searchPage ERROR ($query, $dateFilter): $e');
+        return YtSearchPage(const [], null);
+      }
+    }
+
     try {
       final page =
           await _innertube.searchSongs(query, continuation: continuation);

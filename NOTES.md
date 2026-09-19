@@ -1,3 +1,116 @@
+## V114 (2026-09-19) — Radio freshness + strict language + duration gates
+
+See `V114_RADIO_90DAY_2YEAR_LANGUAGE_DURATION_FIX.md` for exact policy, root cause, implementation, date limitation, and validation.
+
+**Current Radio policy in V114 supersedes older 150-day notes below: the hard repeat window is 90 days. Historical sections retain their original values for changelog accuracy.**
+
+## V113 (2026-09-19) — Deep playback-race hardening + Radio completion/history safety
+
+V112/V111 ke static re-scan me kuch residual race conditions mile. Is build me
+unhe alag-alag patch kiya gaya hai. Goal ye hai ki **purane async result ko
+naye gaane ki state par likhne ka chance minimum ho**, bina proven playback
+pipeline ko unnecessarily rewrite kiye.
+
+### 1) Timed-out `setUrl()` / `setAudioSource()` handle ab lost nahi hota
+**File:** `lib/services/background_service.dart`
+
+**Bug:** Dart ka `Future.timeout()` sirf caller ka `await` timeout karta hai;
+underlying just_audio/native prepare zaroori nahi ki usi waqt cancel ho. Purane
+code me timeout ke `finally` me `_activeSetUrlOperation = null` ho jaata tha.
+Isliye next retry ko pata hi nahi hota tha ki purana native prepare abhi
+zinda ho sakta hai.
+
+**Fix:** operation reference ab tabhi clear hota hai jab original Future
+actually success/error ke saath complete hota hai. Timeout par reference
+retain hota hai; next source replacement `_abortInFlightSetUrl()` ke through
+`player.stop()` karke short unwind window deta hai.
+
+**Kyun:** late native completion ko current retry ke saath compete karne se
+rokna aur stale prepare ko trackable rakhna.
+
+### 2) Global playback-error ko healthy current playback par apply hone se rokna
+**File:** `lib/services/background_service.dart`
+
+**Bug:** `playbackEventStream.onError` source-id ke saath error nahi deta.
+Song A ka delayed error Song B ke start hone ke baad aa sakta tha; sirf token
+check se ise 100% identify nahi kiya ja sakta.
+
+**Fix:** source-switch settle window ke saath ab actual `positionStream`
+progress bhi track hota hai. Agar current token ki playback genuinely start
+ho chuki hai aur position abhi recently advance hui hai, delayed error ko
+stale maana jaata hai aur recovery trigger nahi hoti. Genuine current-source
+drop me position progress rukti hai, isliye recovery path available rehta hai.
+
+**Kyun:** fixed delay se stronger evidence-based guard; smooth playback ko
+late old-source error se restart/glitch hone se bachana.
+
+### 3) `durationStream` stale duration guard
+**File:** `lib/services/background_service.dart`
+
+**Bug:** shared player ka `durationStream` source id nahi deta. Purane song ka
+delayed duration naye `MediaItem` par lag sakta tha.
+
+**Fix:** duration update ko current `_playToken`, current Song id aur current
+`MediaItem.id` se bind kiya gaya.
+
+**Kyun:** notification/lock-screen/seekbar me purane gaane ka duration naye
+gaane par overwrite na ho.
+
+### 4) Radio `completed` event ki candidate identity harden
+**File:** `lib/screens/radio_player_screen.dart`
+
+**Bug:** Radio completion listener global `ProcessingState.completed` sunta
+hai. Sirf "near end" + old start timestamp se same shared player par late
+completion ko current candidate ka completion samajhne ka residual chance tha.
+
+**Fix:** har Radio candidate transition par purani completion identity clear
+hotii hai. Successful start ke baad Song id + candidate-generation + start
+time bind hote hain. `completed` tabhi auto-advance karega jab tino current
+candidate se match karein aur real duration available ho aur position end ke
+paas ho.
+
+**Kyun:** stale completion se Radio ka achanak unwanted Next/skip band karna.
+
+### 5) `RadioHistoryStore.init()` concurrent-call safe
+**File:** `lib/services/radio_history_store.dart`
+
+**Bug:** pehle `_initialized` true hone se pehle do callers ek saath `init()`
+chala sakte the.
+
+**Fix:** shared `_initFuture` single-flight initialization use karta hai.
+
+**Kyun:** ek hi history load/purge pipeline chale aur parallel callers same
+result await karein.
+
+### 6) Radio history writes serialize
+**File:** `lib/services/radio_history_store.dart`
+
+**Bug:** record/skip/replay/purge ki async SharedPreferences writes overlap kar
+sakti thi. Ek older snapshot late finish karke newer write ko overwrite kar
+sakta tha.
+
+**Fix:** `_writeTail` FIFO persistence chain. JSON snapshot queue ke andar
+banaya jaata hai, isliye queued writes stale pre-queue snapshot nahi likhti.
+
+**Kyun:** rapid Next/skip/replay events me learning history lose na ho.
+
+### 7) V109 learning fixes preserve kiye gaye
+`recentArtistCounts()` abhi bhi Radio ranking me persisted 45-minute history
++ current-session tail ke saath wired hai. `tagAffinity`/`artistAffinity`
+skipped rows ko separately `tagSkipTimingAffinity`/
+`artistSkipTimingAffinity` se double-count nahi karte.
+
+### 8) Release signing note
+Debug keystore ko fake production-release signing se replace nahi kiya gaya,
+kyunki project me private release keystore/credentials nahi hain. Is build me
+is limitation ko document kiya gaya hai; real release ke liye developer-owned
+keystore configure karna hoga.
+
+### Validation
+Static source inspection + targeted unit test added. Flutter SDK/device
+runtime is environment me available nahi tha, isliye APK/device playback test
+claim nahi kiya gaya.
+
 # SurSathi — Notes / Known Issues
 
 ## Post-v75 Batch (2026-09-18) — Caching consolidation + subtitle-listener fix + first tests
@@ -3045,3 +3158,70 @@ Added regression tests for both fixes.
 
 ### Version
 `1.0.0+557` → `1.0.0+558`
+
+
+## V115 — 2026-09-19 — Radio lyrics strict timing scan + word-spacing fix
+
+### User-reported Radio lyrics problems
+
+1. Kuch songs me lyrics source milta tha, lekin **time-synced lyrics** available hain ya nahi ye Radio strictly verify nahi karta tha. Plain lyrics aane par Radio unhe bhi display kar sakta tha.
+2. Multiple lyric providers me synced versions ho sakte hain, lekin old flow **first synced response par return** kar deta tha; isliye kisi doosre provider ki zyada complete timing ko compare nahi kiya jaata tha.
+3. BetterLyrics TTML me `<span>` text ko direct concatenate kiya ja raha tha. Jab provider word spans ke beech whitespace nahi deta tha, result `meradilyeh` jaisa mix ho sakta tha.
+
+### Fix
+
+- Radio ke liye naya strict `getSyncedForSong()` path add kiya.
+- Timing-capable providers ko scan kiya jaata hai: BetterLyrics, LRCLIB exact, LRCLIB search, Kugou.
+- Saare returned timed results ko compare karke **timeline coverage + line completeness** ke basis par source select hota hai.
+- Radio ko plain-only lyrics intentionally nahi diye jaate. Koi usable timed lyrics nahi mile to UI seedha **"Lyrics not available for this song"** dikhata hai.
+- Radio look-ahead prefetch bhi strict synced path use karta hai, isliye future songs ke plain lyrics bandwidth waste karke timed lookup ko mask nahi karte.
+- TTML timed word spans ke beech automatic whitespace normalization add ki gayi; punctuation ke pehle unnecessary space nahi dala jaata.
+- LRC/plain/cached lyric text me whitespace normalization add ki gayi, taaki old cached malformed spacing dobara mix na ho.
+
+### Important behavior
+
+Radio abhi bhi normal Lyrics screen se alag strict hai: normal Lyrics screen plain fallback dikha sakti hai, lekin Radio me bina timestamps ke lyrics nahi dikhengi.
+
+### Validation
+
+- Added unit tests for timed-word spacing, punctuation spacing aur timing coverage scoring.
+- Flutter SDK/device runtime is environment me available nahi tha, isliye `flutter test`, `flutter analyze`, APK build aur real-device playback validation run nahi ki gayi.
+
+### Version
+
+`1.0.0+561` → `1.0.0+562`
+
+
+--- V116 ---
+# V116 — Mood Mode + iTunes daily snapshot + lyrics cache isolation
+
+## Included
+
+1. **Lyrics strict-cache isolation**
+   - Normal LyricsScreen keeps `lyrics_v5_<songId>` cache.
+   - Radio strict synced lookup now uses `lyrics_v5_synced_<songId>`.
+   - A normal-screen cached first provider can no longer bypass Radio’s all-provider timed quality scan.
+   - Timed lyric word joins now keep ASCII apostrophe contractions tight (`don` + `'t` -> `don't`).
+
+2. **Mood Mode two-step flow**
+   - Moods opens with the same Radio language choices first.
+   - Next screen asks for Chill / Workout / Party / Sad / Focus.
+   - Selecting a mood launches the hardened Radio player in strict Mood mode.
+   - Mood candidates must match an explicit mood keyword in title/artist metadata.
+   - Language hard gates, <=7 minute duration, 90-day exact-song history exclusion, failed-session exclusion, and <=2-year YouTube-upload freshness gates are reused from Radio.
+   - Latest-month candidates are a hard first phase; broader <=2-year candidates are used only after the latest pool is exhausted.
+   - Mood query seeds rotate across refills so long sessions do not depend on one deterministic first search page.
+   - Playback remains continuous through the existing Radio advance/look-ahead pipeline.
+
+3. **iTunes India Top Songs daily snapshot**
+   - Home no longer re-downloads the iTunes chart every time the screen opens.
+   - Cache window is anchored to local device 06:00 -> 06:00.
+   - First Home load after 06:00 performs at most one refresh for that daily window.
+   - Previous good snapshot is kept on network/API failure.
+   - This is an on-open refresh/cache policy; Android may defer background work when the app is fully closed, so an exact 06:00 background network fetch is not claimed.
+
+## Validation
+
+Flutter/Dart SDK is not installed in the sandbox, so `flutter analyze`, `flutter test`, APK build, and real-device playback were not run here. Static source review and targeted test additions were performed.
+
+Version: `1.0.0+563`
