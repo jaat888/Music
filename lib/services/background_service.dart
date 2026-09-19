@@ -375,6 +375,20 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // max 3 attempts, har attempt se pehle 1s ka chhota gap — total budget
   // ~30s tak (fresh resolve + retries), tabhi jaake final error aata hai.
   int _streamErrorRetries = 0;
+  // BUG FIX (user report: "network jaata/switch hota hai to gaana ka time
+  // hat jaata hai" — mid-song CDN drop ke baad gaana 0:00 se dobara shuru
+  // ho jaata tha): jab bhi stream drop hota hai, uss waqt ka `player.
+  // position` yahan capture karte hain — SIRF is drop-cycle ke PEHLE
+  // attempt pe (neeche `_handleStreamDrop()` me `_streamErrorRetries == 0`
+  // check dekho), kyunki uske baad `_playSong()` khud position 0 pe reset
+  // kar deta hai (normal fresh-play guarantee — dekho `_playSong()` ka
+  // apna comment) — agar har retry pe dobara capture karte to 0 hi capture
+  // hota. `_streamDropSongId` isi position ko GALAT gaane pe lagne se
+  // rokta hai — agar is beech user khud koi doosra gaana chala de
+  // (skip/naya tap), wo ek bilkul NAYA `playWithRetry()` hai, uska apna
+  // fresh-start (0 se) hona hi sahi hai.
+  Duration? _streamDropResumePosition;
+  String? _streamDropSongId;
   static const int _maxStreamErrorRetries = 3;
 
   // BUG FIX (2026-09-18, v59 — "pause karo to 2-3 sec baad khud hi wapas
@@ -626,6 +640,13 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     final token = _playToken;
     final song = _activePlaybackSong ?? QueueService.instance.currentSong;
 
+    if (song != null && _streamErrorRetries == 0) {
+      // Ye pehla drop hai is cycle ka — `player.position` abhi bhi asli
+      // "gaana yahan tak baja tha" wali value hai, isse aage kisi bhi
+      // retry/seek(0) se pehle capture kar lo.
+      _streamDropResumePosition = player.position;
+      _streamDropSongId = song.id;
+    }
     if (song != null && _streamErrorRetries < _maxStreamErrorRetries) {
       _streamErrorRetries++;
       print('YT STREAM DROP: "${song.title}" — retry ${_streamErrorRetries}/'
@@ -719,6 +740,8 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       url,
       token,
       useHeaders: _useHeadersForAttempt(_streamErrorRetries),
+      resumeAt:
+          _streamDropSongId == song.id ? _streamDropResumePosition : null,
     );
   }
 
@@ -1234,6 +1257,11 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // sahi MIME-type force karne ke liye chahiye. `useChunking: false` ke
     // liye irrelevant (setUrl khud sniff karta hai).
     String? format,
+    // BUG FIX (network drop resume): dekho upar `_streamDropResumePosition`
+    // ka comment. Null hone par (normal fresh play — user ne khud gaana
+    // choose kiya, ya recovery kisi PURANE/alag gaane ke liye thi) purana
+    // hamesha-0-se-shuru behavior bilkul waisa hi rehta hai.
+    Duration? resumeAt,
   }) async {
     if (token != _playToken) return; // ek naya request already aa chuka hai
     mediaItem.add(_toMediaItem(song));
@@ -1299,10 +1327,19 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       // jaisa lagta tha (asal mein play ho ke turant khatam ho jaata tha).
       // Fix: har naye source ke baad explicit seek(0) — guarantee karta hai
       // ki har gaana HAMESHA shuru se bajta hai, chahe internal player
-      // state kuch bhi carry kar raha ho.
+      // state kuch bhi carry kar raha ho. EXCEPT: jab ye ek network-drop
+      // RECOVERY hai isi gaane ke liye (`resumeAt` set), tab 0 pe nahi,
+      // us purani position pe seek karte hain jahan se gaana cut hua tha.
       try {
-        await player.seek(Duration.zero);
+        await player.seek(resumeAt ?? Duration.zero);
       } catch (_) {}
+      // Consume karke turant clear — agli koi bhi call (chahe isi gaane
+      // ka agla retry ho ya bilkul naya gaana) is purani position ko
+      // dobara galti se reuse na kare.
+      if (resumeAt != null && _streamDropSongId == song.id) {
+        _streamDropResumePosition = null;
+        _streamDropSongId = null;
+      }
       if (token != _playToken) return;
       // IMPORTANT: just_audio's `play()` Future is NOT a "started" signal.
       // Its Future completes when playback later finishes/pauses/stops.
@@ -1535,14 +1572,20 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           completer.complete();
           return;
         }
-        await _resolveAndPlay(song, token);
+        // Agar ye Radio ki OUTER recovery hai (`_ensureRecovery`, jo
+        // `_handleStreamDrop()` ke apne 3 internal attempts fail hone ke
+        // baad chalti hai) usi gaane ke liye jiska drop hua tha, tab bhi
+        // wahi captured position use karo — na ki 0.
+        final resumeAt =
+            _streamDropSongId == song.id ? _streamDropResumePosition : null;
+        await _resolveAndPlay(song, token, resumeAt: resumeAt);
         completer.complete();
       },
     );
     return completer.future;
   }
 
-  Future<void> _resolveAndPlay(Song song, int token) async {
+  Future<void> _resolveAndPlay(Song song, int token, {Duration? resumeAt}) async {
     _setPhase(token, PlaybackPhase.resolving, 'Stream dhoonda ja raha hai...');
 
     // BUG FIX (v37 — "next/previous cache se nahi, seedha net se dubara
@@ -1569,10 +1612,15 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         await player.setFilePath(localPath);
         if (token != _playToken) return;
         // Dekho _playSong() ka isi tarah ka fix — same guarantee yahan bhi:
-        // local cache/download file se bhi HAMESHA position 0 se shuru ho.
+        // local cache/download file se bhi HAMESHA position 0 se shuru ho —
+        // SIRF jab ye ek network-drop recovery na ho (`resumeAt` null).
         try {
-          await player.seek(Duration.zero);
+          await player.seek(resumeAt ?? Duration.zero);
         } catch (_) {}
+        if (resumeAt != null && _streamDropSongId == song.id) {
+          _streamDropResumePosition = null;
+          _streamDropSongId = null;
+        }
         if (token != _playToken) return;
         // Do not await play(): its Future completes when playback ends/pauses.
         // We only need the immediate command plus a start-state confirmation.
@@ -1626,6 +1674,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         // disabled, real-device pe ~100% fail hoti thi.
         useChunking: false,
         format: cached.format,
+        resumeAt: resumeAt,
       );
       return;
     }
@@ -1678,6 +1727,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           // saara buffering-stuck/notification-flicker/Radio-crash issue).
           useChunking: false,
           format: format,
+          resumeAt: resumeAt,
         );
         return;
       }

@@ -20,6 +20,9 @@ import '../services/radio_service.dart';
 import '../services/youtube_service.dart';
 import '../theme/colors.dart';
 import '../theme/typography.dart';
+import '../widgets/animated_play_button.dart';
+import '../widgets/loading_ring.dart';
+import '../widgets/radio_swipe_stage.dart';
 import 'radio_language_select_screen.dart';
 
 class RadioPlayerScreen extends StatefulWidget {
@@ -65,12 +68,13 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   String? _pendingNav; // 'next' | 'previous' | null
   bool? _pendingPlayIntent; // true=resume chahiye, false=pause chahiye, null=koi pending intent nahi
 
-  // Reels-jaisa swipe animation ke liye — kis taraf se swipe hua, taaki
-  // naya content sahi direction se slide-in ho (up-swipe → neeche se aaye,
-  // down-swipe → upar se aaye). Default true (up) taaki pehla load bhi
-  // consistent lage.
+  // `RadioSwipeStage` ke andar inner content-crossfade (AnimatedSwitcher)
+  // ki direction ke liye — sirf non-drag navigation (auto-advance, media
+  // notification ka next/prev, pending-nav drain) ke liye use hota hai;
+  // asli drag-swipe ki animation ab poori tarah `RadioSwipeStage` khud
+  // sambhalta hai (live finger-follow + peek-preview), niche `build()`
+  // dekho. Default true (up) taaki pehla load bhi consistent lage.
   bool _swipedUp = true;
-  double _verticalSwipeDelta = 0;
   String? _recoveringSongId;
   Future<bool>? _recoveryFuture;
   final Map<String, int> _recentLanguageCounts = <String, int>{};
@@ -441,6 +445,29 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
           try {
             await audioHandler.playWithRetry(candidate.song);
           } catch (_) {}
+          // BUG FIX (user report: "Next karo to agla nahi, PICHLA gaana
+          // baj jaata hai" jab current gaana stuck/buffering ho): upar
+          // wala `await audioHandler.playWithRetry(...)` kaafi der (network
+          // resolve) le sakta hai. Agar is AWAIT ke DAURAAN hi user ne
+          // khud Next/Previous kar diya, `_candidateGeneration`/`_current`
+          // tab tak NAYE gaane pe move ho chuke hote hain — lekin ye
+          // OLD candidate ka playWithRetry() call abhi bhi return hone ke
+          // baad seedha "recovered=true" maan ke `_loading=false` set kar
+          // deta (state confuse ho jaata, aur agar iska apna audio-commit
+          // naye wale se REKE aa jaaye to purana/OLD gaana hi sunayi
+          // deta — "previous" jaisa lagta hai). Fix: yahan bhi VAHI
+          // staleness check jo LOOP ke top pe hai — agar is await ke
+          // dauraan naya candidate/generation aa chuka hai, ye result
+          // bilkul discard karo, kuch mat badlo (naya candidate ka apna
+          // playWithRetry() already chal/chuk raha hoga, use hi jeetne do).
+          if (!mounted ||
+              token != _candidateGeneration ||
+              _current?.song.id != candidate.song.id) {
+            AppLogger.instance.log(
+              '[RADIO] _ensureRecovery("${candidate.song.title}") — playWithRetry() ke AWAIT ke dauraan hi stale ho gaya (user aage badh chuka), result discard.',
+            );
+            break;
+          }
           if (audioHandler.player.playing) {
             recovered = true;
           } else {
@@ -930,57 +957,48 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     return false; // Radio screen kabhi back-button se pop/exit nahi hoti.
   }
 
+  // Radio ke `_upcoming`/`_playedStack` mein next/previous candidate ready
+  // hote hi (prefetch/artwork-cache samet) rehte hain — `_advance()` khud
+  // exactly `_upcoming.first` uthata hai aur `_previous()` exactly
+  // `_playedStack.last`, isliye ye "peek" hamesha usi se match karta hai
+  // jo drag-commit hone par asal mein bajega.
+  RadioCandidate? _peekNext() => _upcoming.isEmpty ? null : _upcoming.first;
+  RadioCandidate? _peekPrevious() =>
+      _playedStack.isEmpty ? null : _playedStack.last;
+
   @override
   Widget build(BuildContext context) {
     final current = _current;
+    final nextPeek = _peekNext();
+    final prevPeek = _peekPrevious();
     return WillPopScope(
       onWillPop: _onBackPressed,
       child: Scaffold(
         backgroundColor: Colors.black,
         body: current == null
             ? _loadingBody()
-            // FIX (user report: "swipe up/down poori screen pe kaam kare,
-            // caption/lyrics wala chhota area tak limited na ho"): pehle
-            // ye GestureDetector sirf andar `_buildContent()` ke ek
-            // `Expanded` (topBar se lyrics tak) ke around tha — neeche
-            // wali seekbar aur Next/Play/Favorite buttons wala poora
-            // hissa iske BAHAR tha, isliye wahan swipe kaam hi nahi karta
-            // tha. Ab poori Stack (poori screen) ke around hai — Slider
-            // (seekbar) horizontal-drag use karta hai aur buttons tap use
-            // karte hain, dono is VERTICAL-only drag detector se conflict
-            // nahi karte (Flutter alag-alag gesture-axis independently
-            // handle karta hai), isliye seekbar scrub aur button taps
-            // bilkul pehle jaise hi kaam karte rahenge.
-            : GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                // Radio navigation is intentionally swipe-only: UP = next,
-                // DOWN = previous. Track distance as well as velocity so a
-                // normal deliberate swipe works even when it is slow.
-                onVerticalDragStart: (_) => _verticalSwipeDelta = 0,
-                onVerticalDragUpdate: (details) {
-                  _verticalSwipeDelta += details.primaryDelta ?? 0;
+            // NEW (Reels/Shorts-jaisa live swipe): pehle swipe sirf
+            // release pe fire hota tha aur ek chhoti crossfade dikhti
+            // thi. Ab `RadioSwipeStage` poori screen ko finger ke saath
+            // real-time drag karta hai, aur agla/pichla gaana (jo
+            // `_upcoming`/`_playedStack` se pehle se pata hota hai) turant
+            // peek ke roop mein slide-in hota hai — asli gaana load hone
+            // ka wait nahi karna padta. Seekbar (horizontal-drag) aur
+            // buttons (tap) is VERTICAL-only gesture se conflict nahi
+            // karte, pehle jaisa hi.
+            : RadioSwipeStage(
+                contentId: current.song.id,
+                canGoNext: nextPeek != null,
+                canGoPrevious: prevPeek != null,
+                onCommitNext: () {
+                  _swipedUp = true;
+                  unawaited(_advance(auto: false)); // swipe up → next
                 },
-                onVerticalDragEnd: (details) {
-                  final distance = _verticalSwipeDelta;
-                  final velocity = details.primaryVelocity ?? 0;
-                  _verticalSwipeDelta = 0;
-
-                  // Require a meaningful vertical gesture. Either a clear
-                  // swipe distance or a fast fling is enough.
-                  final isSwipe = distance.abs() >= 55 || velocity.abs() >= 350;
-                  if (!isSwipe) return;
-
-                  final goingUp = distance < -20 ||
-                      (distance.abs() < 20 && velocity < 0);
-                  if (goingUp) {
-                    _swipedUp = true;
-                    unawaited(_advance(auto: false)); // swipe up → next
-                  } else {
-                    _swipedUp = false;
-                    unawaited(_previous()); // swipe down → previous
-                  }
+                onCommitPrevious: () {
+                  _swipedUp = false;
+                  unawaited(_previous()); // swipe down → previous
                 },
-                child: Stack(
+                current: Stack(
                   fit: StackFit.expand,
                   children: [
                     _buildArtwork(current),
@@ -990,8 +1008,75 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
                     ),
                   ],
                 ),
+                peekNext: nextPeek == null ? null : _buildPeekPage(nextPeek),
+                peekPrevious:
+                    prevPeek == null ? null : _buildPeekPage(prevPeek),
               ),
       ),
+    );
+  }
+
+  // Halka preview-page — sirf artwork + title/artist/language, koi
+  // controls/timeline/lyrics nahi (wo sirf asli "current" candidate ke
+  // saath judi hoti hain: buffering-text, seekbar position, waghera). Ye
+  // sirf drag ke dauraan, ya commit ke baad asli switch hone tak, dikhta
+  // hai — halka spinner reassure karta hai ki agla gaana load ho raha hai.
+  Widget _buildPeekPage(RadioCandidate candidate) {
+    final provider = _artworkFor(candidate);
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (provider != null)
+          Image(
+            image: provider,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+          )
+        else
+          Container(color: const Color(0xFF141414)),
+        Container(color: Colors.black.withOpacity(.55)),
+        SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 28),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    candidate.language.toUpperCase(),
+                    style: AppText.bodyS(color: Colors.white70),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    candidate.song.title,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppText.displayL(color: Colors.white),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    candidate.song.artist,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppText.bodyM(color: Colors.white70),
+                  ),
+                  const SizedBox(height: 20),
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white54,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -1039,23 +1124,35 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
                     SizedBox(height: compact ? 14 : 24),
                     Expanded(
                       child: AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 280),
-                          switchInCurve: Curves.easeOut,
+                          duration: const Duration(milliseconds: 320),
+                          switchInCurve: Curves.easeOutCubic,
                           switchOutCurve: Curves.easeIn,
                           transitionBuilder: (child, animation) {
-                            // Reels jaisa hi: agla gaana (swipe up) neeche
-                            // se upar aata hai, pichla gaana (swipe down)
-                            // upar se neeche aata hai — fade ke saath.
+                            // Ye sirf NON-drag navigation (auto-advance,
+                            // notification next/prev, pending-nav drain)
+                            // ke liye chalta hai — asli finger-drag swipe
+                            // ki animation `RadioSwipeStage` khud karta
+                            // hai (poori screen ke saath, live).
                             final offsetAnim = Tween<Offset>(
-                              begin: Offset(0, _swipedUp ? 0.12 : -0.12),
+                              begin: Offset(0, _swipedUp ? 0.18 : -0.18),
                               end: Offset.zero,
                             ).animate(animation);
+                            final scaleAnim = Tween<double>(
+                              begin: 0.94,
+                              end: 1.0,
+                            ).animate(CurvedAnimation(
+                              parent: animation,
+                              curve: Curves.easeOutCubic,
+                            ));
                             return ClipRect(
                               child: SlideTransition(
                                 position: offsetAnim,
                                 child: FadeTransition(
                                   opacity: animation,
-                                  child: child,
+                                  child: ScaleTransition(
+                                    scale: scaleAnim,
+                                    child: child,
+                                  ),
                                 ),
                               ),
                             );
@@ -1213,56 +1310,40 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
                 return Semantics(
                   button: true,
                   label: resolving ? 'Buffering' : (playing ? 'Pause' : 'Play'),
-                  child: InkResponse(
-                    // Pause is always immediate once audio has started. A
-                    // stale transition/loading flag must never block it.
-                    onTap: () {
-                      if (playing) {
+                  // BUG FIX (user: "normal mode wala hi animation is button
+                  // pe bhi laga do"): Radio ka button pehle apna alag
+                  // hand-rolled AnimatedContainer+icon-swap tha (jismein
+                  // pichle 2 patches mein dikkatein aayi — scale-stuck,
+                  // etc.). Ab EXACTLY wahi widgets use kar rahe hain jo
+                  // full player ("normal mode") ka MAIN play/pause button
+                  // use karta hai — `LoadingRing` (ghumta hua ring +
+                  // loading ke dauraan taps absorb) ke andar
+                  // `AnimatedPlayButton` (tap-bounce + playing-pulse,
+                  // koi icon-swap animation nahi — seedha Icon badalta
+                  // hai, isliye pichli "icon invisible ho gaya" jaisi
+                  // dikkat yahan structurally ho hi nahi sakti). Ek hi
+                  // shared component — dono jagah hamesha same behave
+                  // karenge, alag se maintain nahi karna padega.
+                  child: LoadingRing(
+                    isLoading: resolving,
+                    size: 72,
+                    child: AnimatedPlayButton(
+                      isPlaying: playing,
+                      size: 72,
+                      onTap: () {
+                        if (playing) {
+                          unawaited(_togglePlay());
+                          return;
+                        }
+                        if (_transitioning || _loading) {
+                          setState(() => _pendingPlayIntent = true);
+                          AppLogger.instance.log(
+                            '[RADIO] Play/Pause tapped during transition/loading — queued: play',
+                          );
+                          return;
+                        }
                         unawaited(_togglePlay());
-                        return;
-                      }
-                      if (_transitioning || _loading) {
-                        setState(() => _pendingPlayIntent = true);
-                        AppLogger.instance.log(
-                          '[RADIO] Play/Pause tapped during transition/loading — queued: play',
-                        );
-                        return;
-                      }
-                      unawaited(_togglePlay());
-                    },
-                    radius: 40,
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 180),
-                      curve: Curves.easeOut,
-                      width: 72,
-                      height: 72,
-                      decoration: BoxDecoration(
-                        color: kGreen,
-                        shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: kGreen.withOpacity(.28),
-                            blurRadius: resolving ? 18 : 10,
-                            spreadRadius: resolving ? 2 : 0,
-                          ),
-                        ],
-                      ),
-                      child: resolving
-                          ? const SizedBox(
-                              width: 28,
-                              height: 28,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 3,
-                                valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                              ),
-                            )
-                          : Icon(
-                              playing
-                                  ? Icons.pause_rounded
-                                  : Icons.play_arrow_rounded,
-                              size: 40,
-                              color: Colors.white,
-                            ),
+                      },
                     ),
                   ),
                 );
