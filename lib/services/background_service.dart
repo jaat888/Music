@@ -400,7 +400,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     }
     _prefetchQueuedIds.add(song.id);
     _prefetchQueue.add(song);
-    unawaited(_drainPrefetchQueue());
+    _drainPrefetchQueue();
   }
 
   void _retainPrefetchQueue(Set<String> keepIds) {

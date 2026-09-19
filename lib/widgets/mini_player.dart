@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:audio_service/audio_service.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:provider/provider.dart';
 
 import '../theme/colors.dart';
 import '../services/background_service.dart';
@@ -75,7 +76,7 @@ class _MiniPlayerState extends State<MiniPlayer> {
         // available hota hai, jabki audio_service.mediaItem stream resolve
         // ke dauraan thodi der baad publish ho sakta hai. Queue fallback se
         // playlist screen par MiniPlayer us gap me bhi visible rehta hai.
-        final queueSong = context.watch<QueueService>().currentSong;
+        final queueSong = Provider.of<QueueService>(context, listen: true).currentSong;
         final streamItem = mediaSnap.data;
         final item = streamItem ??
             (queueSong == null
