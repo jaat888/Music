@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
+import 'innertube_client.dart';
 
 class LyricLine {
   final Duration time;
@@ -34,10 +35,18 @@ class LyricsService {
   static const _lrcBase = 'https://lrclib.net/api';
   static const _jioBase = 'https://www.jiosaavn.com/api.php';
   static const _ovhBase = 'https://api.lyrics.ovh/v1';
+  // v96: BetterLyrics (TTML, word-by-word) aur Kugou (per-line synced,
+  // Chinese source — Hindi/regional ke liye kam useful lekin decent
+  // fallback) naye add kiye.
+  static const _betterLyricsBase = 'https://lyrics-api.boidu.dev/getLyrics';
+  static const _kugouSearchBase = 'https://mobileservice.kugou.com/api/v3/lyric/search';
+  static const _kugouDownloadBase = 'https://lyrics.kugou.com/download';
   static const _userAgent = 'SurSathi/55 RadioLyrics';
 
-  // v3 deliberately invalidates v2's single-provider/negative cache.
-  String _cacheKey(String songId) => 'lyrics_v3_$songId';
+  // v4: naya priority order (YT Music -> BetterLyrics -> LRCLIB -> Kugou)
+  // pichhle v3 cache se conflict kar sakta hai (alag source/timing), isliye
+  // key bump.
+  String _cacheKey(String songId) => 'lyrics_v4_$songId';
 
   // BUG FIX (Radio "subtitle" stuck-loading — v58): Radio was calling
   // getForSong() for the SAME current song from more than one place at
@@ -71,6 +80,7 @@ class LyricsService {
     if (existing != null) return existing;
 
     final future = _fetchMultiSource(
+      songId: songId,
       title: title,
       artist: artist,
       durationSeconds: durationSeconds,
@@ -115,34 +125,251 @@ class LyricsService {
     }
   }
 
+  // v96 priority order (user request): YT Music internal -> BetterLyrics ->
+  // LRCLIB -> Kugou -> JioSaavn -> lyrics.ovh. A source higher in this list
+  // that returns SYNCED lyrics wins immediately (best possible experience).
+  // A source that only has PLAIN text is kept as a fallback candidate but
+  // does not stop the search — we keep trying lower sources in case one of
+  // them has synced timing. Among plain-only results, the FIRST one found
+  // in priority order is kept (matches the user's requested ordering for
+  // the plain case too).
   Future<LyricsResult?> _fetchMultiSource({
+    required String songId,
     required String title,
     required String artist,
     required int durationSeconds,
   }) async {
-    // 1) LRCLIB exact signature -> best source for synchronized LRC.
+    LyricsResult? plain;
+
+    // 1) YouTube Music's own "Lyrics" tab (InnerTube, same source the
+    // official app shows). Plain-text only (see innertube_client.dart's
+    // getLyrics() comment) but usually the most accurate match since it's
+    // tied to this exact videoId rather than a title/artist guess.
+    final ytMusic = await _fetchYouTubeMusicLyrics(songId);
+    if (ytMusic?.hasPlain == true) plain ??= ytMusic;
+
+    // 2) BetterLyrics — Apple-Music-style TTML, word-by-word timing. We
+    // flatten it to line-level LyricLines (our model doesn't carry
+    // per-word timing yet) but it's still real synced data.
+    final better = await _fetchBetterLyrics(title, artist, durationSeconds);
+    if (better?.hasSynced == true) return better;
+    if (better?.hasPlain == true) plain ??= better;
+
+    // 3) LRCLIB exact signature -> best/most reliable source for
+    // synchronized LRC.
     final exact = await _fetchLrclibExact(title, artist, durationSeconds);
     if (exact?.hasSynced == true) return exact;
 
-    // 2) LRCLIB title/artist search -> catches remasters, regional releases,
-    // duration mismatches and Indian catalogue variants.
+    // 4) LRCLIB title/artist search -> catches remasters, regional
+    // releases, duration mismatches and Indian catalogue variants.
     final searched = await _fetchLrclibSearch(title, artist, durationSeconds);
     if (searched?.hasSynced == true) return searched;
+    if (exact?.hasPlain == true) plain ??= exact;
+    if (searched?.hasPlain == true) plain ??= searched;
 
-    // Keep a useful plain result while the next providers are queried.
-    LyricsResult? plain = exact?.hasPlain == true ? exact : searched;
+    // 5) Kugou — Chinese source, per-line synced lyrics. Less useful for
+    // Hindi/Haryanvi/Punjabi catalogue but a decent extra synced fallback
+    // before we drop to plain-only sources.
+    final kugou = await _fetchKugou(title, artist, durationSeconds);
+    if (kugou?.hasSynced == true) return kugou;
+    if (kugou?.hasPlain == true) plain ??= kugou;
 
-    // 3) JioSaavn's public web API. This is particularly useful for Hindi,
-    // Punjabi, Haryanvi and other Indian catalogue songs. Its lyrics endpoint
-    // is plain-text rather than guaranteed LRC, so never invent timestamps.
+    // 6) JioSaavn's public web API. Particularly useful for Hindi, Punjabi,
+    // Haryanvi and other Indian catalogue songs. Plain-text only, so never
+    // invent timestamps.
     final jio = await _fetchJioSaavn(title, artist);
     if (jio?.hasPlain == true) plain ??= jio;
 
-    // 4) Generic plain-lyrics fallback.
+    // 7) Generic plain-lyrics fallback.
     final ovh = await _fetchLyricsOvh(title, artist);
     if (ovh?.hasPlain == true) plain ??= ovh;
 
     return plain;
+  }
+
+  Future<LyricsResult?> _fetchYouTubeMusicLyrics(String songId) async {
+    if (songId.isEmpty) return null;
+    try {
+      final result = await InnertubeClient.instance
+          .getLyrics(songId)
+          .timeout(const Duration(seconds: 10));
+      if (result == null) return null;
+      return LyricsResult(
+        plain: result.text,
+        source: result.source != null
+            ? 'YouTube Music (${result.source})'
+            : 'YouTube Music',
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<LyricsResult?> _fetchBetterLyrics(
+    String title,
+    String artist,
+    int durationSeconds,
+  ) async {
+    try {
+      final uri = Uri.parse(_betterLyricsBase).replace(queryParameters: {
+        's': title,
+        'a': artist,
+        if (durationSeconds > 0) 'd': '$durationSeconds',
+      });
+      final response = await http.get(uri, headers: _headers).timeout(
+            const Duration(seconds: 8),
+          );
+      if (response.statusCode != 200) return null;
+      final map = jsonDecode(response.body);
+      if (map is! Map) return null;
+      final ttml = map['ttml']?.toString();
+      if (ttml == null || ttml.isEmpty) return null;
+      final synced = _parseTtml(ttml);
+      final plainText =
+          synced.map((l) => l.text).where((t) => t.trim().isNotEmpty).join('\n');
+      return LyricsResult(
+        synced: synced.isNotEmpty ? synced : null,
+        plain: plainText.isNotEmpty ? plainText : null,
+        source: 'BetterLyrics',
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // TTML -> line-level LyricLines. Each <p begin="..."> is one line; the
+  // line's own text is every <span> inside it joined together (spans carry
+  // per-word timing which we don't have a model for yet, but joining their
+  // text back together reconstructs the full line correctly).
+  static final _ttmlP = RegExp(
+    r'<p\b[^>]*\bbegin="([^"]+)"[^>]*>(.*?)</p>',
+    dotAll: true,
+  );
+  static final _ttmlSpanText = RegExp(r'<span\b[^>]*>([^<]*)</span>', dotAll: true);
+
+  List<LyricLine> _parseTtml(String ttml) {
+    final lines = <LyricLine>[];
+    for (final match in _ttmlP.allMatches(ttml)) {
+      final beginMs = _parseTtmlTime(match.group(1) ?? '');
+      if (beginMs == null) continue;
+      final inner = match.group(2) ?? '';
+      final buffer = StringBuffer();
+      for (final span in _ttmlSpanText.allMatches(inner)) {
+        buffer.write(_decodeXmlEntities(span.group(1) ?? ''));
+      }
+      var text = buffer.toString().trim();
+      if (text.isEmpty) {
+        // Some lines have no nested <span> (rare) — fall back to the raw
+        // inner text with tags stripped.
+        text = _decodeXmlEntities(inner.replaceAll(RegExp(r'<[^>]+>'), '')).trim();
+      }
+      if (text.isEmpty) continue;
+      lines.add(LyricLine(Duration(milliseconds: beginMs), text));
+    }
+    lines.sort((a, b) => a.time.compareTo(b.time));
+    return lines;
+  }
+
+  // Handles both "HH:MM:SS.mmm" and "M:SS.mmm" per the BetterLyrics docs.
+  static int? _parseTtmlTime(String raw) {
+    final parts = raw.trim().split(':');
+    try {
+      double seconds;
+      if (parts.length == 3) {
+        seconds = int.parse(parts[0]) * 3600 +
+            int.parse(parts[1]) * 60 +
+            double.parse(parts[2]);
+      } else if (parts.length == 2) {
+        seconds = int.parse(parts[0]) * 60 + double.parse(parts[1]);
+      } else {
+        seconds = double.parse(parts[0]);
+      }
+      return (seconds * 1000).round();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String _decodeXmlEntities(String text) => text
+      .replaceAll('&amp;', '&')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&apos;', "'")
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>');
+
+  Future<LyricsResult?> _fetchKugou(
+    String title,
+    String artist,
+    int durationSeconds,
+  ) async {
+    try {
+      final keyword = artist.trim().isNotEmpty ? '$artist - $title' : title;
+      final searchUri =
+          Uri.parse(_kugouSearchBase).replace(queryParameters: {
+        'ver': '1',
+        'man': 'yes',
+        'client': 'mobi',
+        'keyword': keyword,
+        if (durationSeconds > 0) 'duration': '${durationSeconds * 1000}',
+        'hash': '',
+      });
+      final searchResponse = await http.get(searchUri, headers: _headers).timeout(
+            const Duration(seconds: 8),
+          );
+      if (searchResponse.statusCode != 200) return null;
+      final searchMap = jsonDecode(searchResponse.body);
+      if (searchMap is! Map) return null;
+      final candidates = searchMap['candidates'];
+      if (candidates is! List || candidates.isEmpty) return null;
+
+      // Pick the candidate whose own duration is closest to ours (Kugou
+      // returns several song/lyric versions — covers, remixes etc.).
+      Map? best;
+      var bestDelta = double.infinity;
+      for (final c in candidates) {
+        if (c is! Map) continue;
+        final candDuration = (c['duration'] as num?)?.toDouble() ?? 0;
+        final delta = durationSeconds > 0 && candDuration > 0
+            ? (durationSeconds * 1000 - candDuration).abs()
+            : 0.0;
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          best = c;
+        }
+      }
+      best ??= candidates.first as Map?;
+      if (best == null) return null;
+      final id = best['id']?.toString();
+      final accesskey = best['accesskey']?.toString();
+      if (id == null || accesskey == null || id.isEmpty || accesskey.isEmpty) {
+        return null;
+      }
+
+      final downloadUri =
+          Uri.parse(_kugouDownloadBase).replace(queryParameters: {
+        'ver': '1',
+        'client': 'pc',
+        'id': id,
+        'accesskey': accesskey,
+        'fmt': 'lrc',
+        'charset': 'utf8',
+      });
+      final downloadResponse =
+          await http.get(downloadUri, headers: _headers).timeout(
+                const Duration(seconds: 8),
+              );
+      if (downloadResponse.statusCode != 200) return null;
+      final downloadMap = jsonDecode(downloadResponse.body);
+      if (downloadMap is! Map) return null;
+      final contentB64 = downloadMap['content']?.toString();
+      if (contentB64 == null || contentB64.isEmpty) return null;
+      final lrcText = utf8.decode(base64.decode(contentB64), allowMalformed: true);
+      final synced = _parseLrc(lrcText);
+      if (synced.isEmpty) return null;
+      return LyricsResult(synced: synced, source: 'Kugou');
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<LyricsResult?> _fetchLrclibExact(

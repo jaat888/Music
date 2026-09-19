@@ -88,7 +88,10 @@ class RadioEngine {
   static const double behaviourWeight = 3.5;
   static const double artistWeight = 2.5;
   static const double languageAffinityWeight = 1.5;
-  static const double explorationWeight = 1.2;
+  static const double explorationWeight = 2.4;
+  static const double skipTimingWeight = 2.0;
+  static const double artistFatigueWeight = 3.2;
+  static const double diversityWeight = 2.2;
   static const double scoreFloor = 0.1;
 
   // Radio-session failures are hard blocked until the screen/session is reset.
@@ -150,21 +153,35 @@ class RadioEngine {
     int count = 10,
     Set<String> excludeIds = const {},
     Map<String, int> recentLanguageCounts = const {},
+    Map<String, int> recentArtistCounts = const {},
+    Map<String, int> recentTagCounts = const {},
   }) {
     final result = <RadioCandidate>[];
     final used = <String>{...excludeIds, ..._failedSessionIds};
     final source = candidates.toList();
+    final languageCounts = <String, int>{...recentLanguageCounts};
+    final artistCounts = <String, int>{...recentArtistCounts};
+    final tagCounts = <String, int>{...recentTagCounts};
 
     for (var i = 0; i < count; i++) {
       final next = pickNext(
         source,
         selectedLanguages: selectedLanguages,
         excludeIds: used,
-        recentLanguageCounts: recentLanguageCounts,
+        recentLanguageCounts: languageCounts,
+        recentArtistCounts: artistCounts,
+        recentTagCounts: tagCounts,
       );
       if (next == null) break;
       result.add(next);
       used.add(next.song.id);
+      final language = next.language.trim().toLowerCase();
+      if (language.isNotEmpty) languageCounts[language] = (languageCounts[language] ?? 0) + 1;
+      final artist = next.song.artist.trim().toLowerCase();
+      if (artist.isNotEmpty) artistCounts[artist] = (artistCounts[artist] ?? 0) + 1;
+      for (final tag in next.tags) {
+        tagCounts[tag] = (tagCounts[tag] ?? 0) + 1;
+      }
     }
     return result;
   }
@@ -177,6 +194,8 @@ class RadioEngine {
     required List<String> selectedLanguages,
     Set<String> excludeIds = const {},
     Map<String, int> recentLanguageCounts = const {},
+    Map<String, int> recentArtistCounts = const {},
+    Map<String, int> recentTagCounts = const {},
   }) {
     final pool = buildPool(
       candidates,
@@ -196,6 +215,8 @@ class RadioEngine {
     final tagAffinity = _history.tagAffinity();
     final artistAffinity = _history.artistAffinity();
     final languageAffinity = _history.languageAffinity();
+    final tagSkipTiming = _history.tagSkipTimingAffinity();
+    final artistSkipTiming = _history.artistSkipTimingAffinity();
     for (final candidate in pool) {
       // 1) Mood score, including the existing temporary skip penalty.
       final tags = candidate.tags.isEmpty ? const ['mixed'] : candidate.tags;
@@ -223,6 +244,38 @@ class RadioEngine {
       score += _boundedBehaviour(tagSignal + songAffinity * .5) * behaviourWeight;
       score += _boundedBehaviour(artistSignal) * artistWeight;
       score += _boundedBehaviour(languageSignal) * languageAffinityWeight;
+
+      // Resso-style behavioural timing signal: the exact point where the
+      // listener tends to leave tracks influences related tags/artists.
+      final skipTimingTagSignal = tags.fold<double>(
+            0,
+            (sum, tag) => sum + (tagSkipTiming[tag] ?? 0),
+          ) /
+          tags.length;
+      final skipTimingArtistSignal =
+          artistSkipTiming[candidate.song.artist.trim().toLowerCase()] ?? 0;
+      score += _boundedBehaviour(
+            skipTimingTagSignal * .6 + skipTimingArtistSignal * .4,
+          ) *
+          skipTimingWeight;
+
+      // Short-term artist fatigue keeps Radio from serving the same artist
+      // repeatedly even when the long-term affinity is high.
+      final artistKey = candidate.song.artist.trim().toLowerCase();
+      final recentArtistHits = recentArtistCounts[artistKey] ?? 0;
+      if (recentArtistHits > 0) {
+        score -= math.min(10.0, recentArtistHits * artistFatigueWeight);
+      }
+
+      // Upcoming-list diversity: repeated tags are mildly penalized so a
+      // ten-song look-ahead does not collapse into the same mood.
+      final recentTagHits = tags.fold<int>(
+        0,
+        (sum, tag) => sum + (recentTagCounts[tag] ?? 0),
+      );
+      if (recentTagHits > 0) {
+        score -= math.min(6.0, recentTagHits * diversityWeight);
+      }
 
       // 4) Search-rank popularity and latest/newness remain soft hints.
       score += _clamp01(candidate.popularity) * popularityWeight;
@@ -299,4 +352,5 @@ class RadioEngine {
   double _clamp01(double value) => value.clamp(0.0, 1.0).toDouble();
 
   double _boundedBehaviour(double value) => value.clamp(-4.0, 4.0).toDouble();
+
 }

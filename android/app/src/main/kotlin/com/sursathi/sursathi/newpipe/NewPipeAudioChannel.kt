@@ -34,7 +34,8 @@ import java.util.concurrent.Executors
 object NewPipeAudioChannel {
     const val CHANNEL_NAME = "com.sursathi.sursathi/newpipe"
 
-    private val executor = Executors.newCachedThreadPool()
+    // Bounded resolver workers: stale/retry bursts must not create an unbounded thread pool.
+    private val executor = Executors.newFixedThreadPool(2)
     private val mainHandler = Handler(Looper.getMainLooper())
 
     @Volatile

@@ -30,6 +30,9 @@ class RadioHistoryEntry {
   final DateTime playedAt;
   final bool wasSkipped;
   final int? skipPositionSec;
+  final int listenSeconds;
+  final double completionRatio;
+  final int replayCount;
 
   const RadioHistoryEntry({
     required this.songId,
@@ -41,21 +44,41 @@ class RadioHistoryEntry {
     required this.playedAt,
     required this.wasSkipped,
     this.skipPositionSec,
+    this.listenSeconds = 0,
+    this.completionRatio = 0,
+    this.replayCount = 0,
   });
 
   factory RadioHistoryEntry.fromJson(Map<String, dynamic> json) {
+    final duration = (json['duration'] as num?)?.toInt() ?? 0;
+    final wasSkipped = json['wasSkipped'] as bool? ?? false;
+    final skipPosition = (json['skipPositionSec'] as num?)?.toInt();
+    final hasLearningFields = json.containsKey('completionRatio') ||
+        json.containsKey('listenSeconds') ||
+        json.containsKey('replayCount');
+    final legacyListenSeconds = wasSkipped
+        ? (skipPosition ?? 0)
+        : duration;
+    final legacyCompletion = (!wasSkipped && duration > 0) ? 1.0 : 0.0;
     return RadioHistoryEntry(
       songId: json['songId'] as String,
       title: json['title'] as String? ?? '',
       tags: (json['tags'] as List?)?.cast<String>() ?? const [],
       language: json['language'] as String? ?? '',
       artist: json['artist'] as String? ?? '',
-      duration: (json['duration'] as num?)?.toInt() ?? 0,
+      duration: duration,
       playedAt: DateTime.fromMillisecondsSinceEpoch(
         (json['playedAt'] as num?)?.toInt() ?? 0,
       ),
-      wasSkipped: json['wasSkipped'] as bool? ?? false,
-      skipPositionSec: (json['skipPositionSec'] as num?)?.toInt(),
+      wasSkipped: wasSkipped,
+      skipPositionSec: skipPosition,
+      listenSeconds: hasLearningFields
+          ? (json['listenSeconds'] as num?)?.toInt() ?? 0
+          : legacyListenSeconds,
+      completionRatio: hasLearningFields
+          ? (((json['completionRatio'] as num?)?.toDouble() ?? 0).clamp(0.0, 1.0)).toDouble()
+          : legacyCompletion,
+      replayCount: (json['replayCount'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -70,6 +93,9 @@ class RadioHistoryEntry {
       'playedAt': playedAt.millisecondsSinceEpoch,
       'wasSkipped': wasSkipped,
       'skipPositionSec': skipPositionSec,
+      'listenSeconds': listenSeconds,
+      'completionRatio': completionRatio,
+      'replayCount': replayCount,
     };
   }
 }
@@ -155,6 +181,10 @@ class RadioHistoryStore {
         playedAt: DateTime.now(),
         wasSkipped: wasSkipped,
         skipPositionSec: skipPositionSec,
+        listenSeconds: skipPositionSec ?? 0,
+        completionRatio: duration > 0 && skipPositionSec != null
+            ? (skipPositionSec / duration).clamp(0.0, 1.0).toDouble()
+            : 0,
       ),
     );
     await _persist();
@@ -181,7 +211,73 @@ class RadioHistoryStore {
   Future<void> markLatestAsSkipped({
     required String songId,
     required int skipPositionSec,
+    int? duration,
   }) async {
+    if (!_initialized) await init();
+    for (var i = _entries.length - 1; i >= 0; i--) {
+      final entry = _entries[i];
+      if (entry.songId != songId) continue;
+      final total = duration ?? entry.duration;
+      _entries[i] = RadioHistoryEntry(
+        songId: entry.songId,
+        title: entry.title,
+        tags: entry.tags,
+        language: entry.language,
+        artist: entry.artist,
+        duration: total,
+        playedAt: entry.playedAt,
+        wasSkipped: true,
+        skipPositionSec: math.max(0, skipPositionSec),
+        listenSeconds: math.max(entry.listenSeconds, skipPositionSec),
+        completionRatio: total > 0
+            ? (skipPositionSec / total).clamp(0.0, 1.0).toDouble()
+            : entry.completionRatio,
+        replayCount: entry.replayCount,
+      );
+      await _persist();
+      return;
+    }
+  }
+
+  /// Updates the latest Radio play with the amount actually listened to.
+  /// This separates a real near-complete listen from an early skip so the
+  /// recommendation layer can learn from *when* the user left a song.
+  Future<void> markLatestAsCompleted({
+    required String songId,
+    required int listenSeconds,
+    int? duration,
+  }) async {
+    if (!_initialized) await init();
+    for (var i = _entries.length - 1; i >= 0; i--) {
+      final entry = _entries[i];
+      if (entry.songId != songId) continue;
+      final total = duration ?? entry.duration;
+      final seconds = math.max(0, listenSeconds);
+      _entries[i] = RadioHistoryEntry(
+        songId: entry.songId,
+        title: entry.title,
+        tags: entry.tags,
+        language: entry.language,
+        artist: entry.artist,
+        duration: total,
+        playedAt: entry.playedAt,
+        wasSkipped: false,
+        skipPositionSec: null,
+        listenSeconds: seconds,
+        completionRatio: total > 0
+            ? (seconds / total).clamp(0.0, 1.0).toDouble()
+            : 1.0,
+        replayCount: entry.replayCount,
+      );
+      await _persist();
+      return;
+    }
+  }
+
+  /// Explicit replay signal (for example Previous on a song already heard in
+  /// the current Radio session). Replays stay out of the hard-repeat pool,
+  /// but they become a positive learning signal for that song's artist/tags.
+  Future<void> markReplay(String songId) async {
     if (!_initialized) await init();
     for (var i = _entries.length - 1; i >= 0; i--) {
       final entry = _entries[i];
@@ -194,12 +290,60 @@ class RadioHistoryStore {
         artist: entry.artist,
         duration: entry.duration,
         playedAt: entry.playedAt,
-        wasSkipped: true,
-        skipPositionSec: math.max(0, skipPositionSec),
+        wasSkipped: entry.wasSkipped,
+        skipPositionSec: entry.skipPositionSec,
+        listenSeconds: entry.listenSeconds,
+        completionRatio: entry.completionRatio,
+        replayCount: entry.replayCount + 1,
       );
       await _persist();
       return;
     }
+  }
+
+  /// Counts recently heard artists so the ranker can apply short-term
+  /// artist fatigue without changing the hard 150-day exact-song rule.
+  Map<String, int> recentArtistCounts({
+    Duration within = const Duration(minutes: 45),
+    Set<String> excludeSongIds = const <String>{},
+  }) {
+    final cutoff = DateTime.now().subtract(within);
+    final out = <String, int>{};
+    for (final entry in _entries) {
+      if (entry.playedAt.isBefore(cutoff) || excludeSongIds.contains(entry.songId)) {
+        continue;
+      }
+      final artist = entry.artist.trim().toLowerCase();
+      if (artist.isEmpty) continue;
+      out[artist] = (out[artist] ?? 0) + 1;
+    }
+    return out;
+  }
+
+  /// Separate skip-timing signal: early exits are negative, late exits are
+  /// mildly positive. This lets Radio learn from the exact point where the
+  /// listener skipped even when they never pressed Like.
+  Map<String, double> tagSkipTimingAffinity() {
+    final out = <String, double>{};
+    for (final entry in _entries) {
+      if (!entry.wasSkipped || entry.tags.isEmpty) continue;
+      final signal = _skipTimingSignal(entry);
+      for (final tag in entry.tags) {
+        out[tag] = (out[tag] ?? 0) + signal;
+      }
+    }
+    return out;
+  }
+
+  Map<String, double> artistSkipTimingAffinity() {
+    final out = <String, double>{};
+    for (final entry in _entries) {
+      if (!entry.wasSkipped) continue;
+      final artist = entry.artist.trim().toLowerCase();
+      if (artist.isEmpty) continue;
+      out[artist] = (out[artist] ?? 0) + _skipTimingSignal(entry);
+    }
+    return out;
   }
 
   /// Lightweight persisted behaviour signals for Radio ranking.
@@ -208,6 +352,10 @@ class RadioHistoryStore {
   Map<String, double> tagAffinity() {
     final out = <String, double>{};
     for (final entry in _entries) {
+      // Skipped-entry timing is learned separately by tagSkipTimingAffinity.
+      // Keeping skipped rows out here prevents the same early/mid/late skip
+      // signal from being added twice to tag ranking.
+      if (entry.wasSkipped) continue;
       final signal = _entrySignal(entry);
       for (final tag in entry.tags) {
         out[tag] = (out[tag] ?? 0) + signal;
@@ -219,7 +367,7 @@ class RadioHistoryStore {
   Map<String, double> artistAffinity() {
     final out = <String, double>{};
     for (final entry in _entries) {
-      if (entry.artist.trim().isEmpty) continue;
+      if (entry.wasSkipped || entry.artist.trim().isEmpty) continue;
       final key = entry.artist.trim().toLowerCase();
       out[key] = (out[key] ?? 0) + _entrySignal(entry);
     }
@@ -245,16 +393,39 @@ class RadioHistoryStore {
   }
 
   double _entrySignal(RadioHistoryEntry entry) {
-    if (!entry.wasSkipped) return 1.0;
+    final replayBoost = 1.0 + math.min(2.0, entry.replayCount * 0.35);
+    if (!entry.wasSkipped) {
+      final completion = entry.completionRatio.clamp(0.0, 1.0).toDouble();
+      final listenSignal = completion >= .85
+          ? 1.0
+          : completion >= .60
+              ? .65
+              : completion >= .30
+                  ? .25
+                  : .05;
+      return listenSignal * replayBoost;
+    }
     final duration = entry.duration;
     final position = entry.skipPositionSec ?? 0;
     if (duration > 0) {
       final ratio = (position / duration).clamp(0.0, 1.0);
-      if (ratio >= .85) return .45;
-      if (ratio >= .60) return .10;
+      if (ratio >= .85) return .45 * replayBoost;
+      if (ratio >= .60) return .10 * replayBoost;
       if (ratio >= .30) return -.35;
       if (ratio >= .10) return -.80;
     }
+    return -1.0;
+  }
+
+  double _skipTimingSignal(RadioHistoryEntry entry) {
+    final duration = entry.duration;
+    final position = entry.skipPositionSec ?? entry.listenSeconds;
+    if (duration <= 0) return -1.0;
+    final ratio = (position / duration).clamp(0.0, 1.0).toDouble();
+    if (ratio >= .85) return .45;
+    if (ratio >= .60) return .10;
+    if (ratio >= .30) return -.35;
+    if (ratio >= .10) return -.80;
     return -1.0;
   }
 

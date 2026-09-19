@@ -38,6 +38,7 @@ class RadioService extends ChangeNotifier {
   final Map<String, DateTime> _lastSkippedAt = {};
   // tag -> lagatar kitni baar skip hua (poora sunte/na-skip karte hi reset)
   final Map<String, int> _consecutiveSkips = {};
+  final Map<String, int> _favoriteBoostCounts = {};
 
   // radio_session (section 3.3)
   List<String> _selectedLanguages = [];
@@ -108,8 +109,27 @@ class RadioService extends ChangeNotifier {
   /// (skip-penalty ka opposite), taaki similar-mood gaane thode zyada aayein.
   void recordFavorite(List<String> tags) {
     for (final tag in tags) {
+      _favoriteBoostCounts[tag] = (_favoriteBoostCounts[tag] ?? 0) + 1;
       _baseScores[tag] = _baseScoreFor(tag) + kFavoriteBoost;
       _consecutiveSkips[tag] = 0;
+    }
+    notifyListeners();
+  }
+
+  void removeFavorite(List<String> tags) {
+    for (final tag in tags) {
+      final count = _favoriteBoostCounts[tag] ?? 0;
+      if (count <= 0) continue;
+      final next = count - 1;
+      if (next == 0) {
+        _favoriteBoostCounts.remove(tag);
+      } else {
+        _favoriteBoostCounts[tag] = next;
+      }
+      _baseScores[tag] = _baseScoreFor(tag) - kFavoriteBoost;
+      if ((_baseScores[tag] ?? kNeutralScore) <= kNeutralScore) {
+        _baseScores.remove(tag);
+      }
     }
     notifyListeners();
   }
@@ -123,6 +143,7 @@ class RadioService extends ChangeNotifier {
     _lastSkippedAt.clear();
     _activePenalties.clear();
     _consecutiveSkips.clear();
+    _favoriteBoostCounts.clear();
     notifyListeners();
   }
 

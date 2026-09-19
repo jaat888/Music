@@ -172,7 +172,20 @@ class DownloadQueueService extends ChangeNotifier {
         _progress[song.id] = 0;
         _statusText.remove(song.id);
         notifyListeners();
-        unawaited(_pushNotification());
+        // BUG FIX (v99 — user report: "40 gaane 1 min se kam me download
+        // ho gaye, par notification ek-ek karke der tak aate rahe, jaisa
+        // pehle wale infinite-loop bug me hota tha"): Android notification
+        // manager ek hi channel/ID pe bahut jaldi-jaldi update calls aane
+        // par unhe khud apni taraf se queue/throttle karta hai — bahut
+        // saare gaane parallel/jaldi download hone par (har 10% progress
+        // pe + har naya gaana shuru hone pe ek call) ye calls itni jaldi
+        // ban rahi thi ki asli download poora hone ke kaafi der baad tak
+        // bhi OS in updates ko drain karta rehta tha — isliye "kaam to ho
+        // chuka, par notification abhi bhi ek-ek karke aa rahi hai" jaisa
+        // lagta tha. User ke explicit request par ye poori download-
+        // progress notification hata di gayi hai — neeche `_pushNotification()`
+        // ab kahin call nahi hoti.
+        // unawaited(_pushNotification());
 
         var success = false;
         var lastNotifiedPct = -1;
@@ -193,7 +206,9 @@ class DownloadQueueService extends ChangeNotifier {
               // parallel downloads ke saath UI rebuild bahut zyada baar
               // fire hoke ulta lag/stutter kar deta.
               _notifyThrottled();
-              if (pct % 10 == 0) unawaited(_pushNotification());
+              // BUG FIX (v99): dekho upar wala comment — download-progress
+              // notification poori tarah hata di gayi hai.
+              // if (pct % 10 == 0) unawaited(_pushNotification());
             },
             // NEW (2026-09-17): resolve-phase status text — progress abhi
             // 0% hi hai to bhi UI ko pata chalta rehta hai kya chal raha
@@ -227,20 +242,6 @@ class DownloadQueueService extends ChangeNotifier {
     }
   }
 
-  Future<void> _pushNotification() async {
-    try {
-      final active = _active.values.toList();
-      if (active.isEmpty) return;
-      final first = active.first;
-      await NotificationService.instance.showDownloadProgress(
-        songTitle: active.length > 1
-            ? '${first.title} +${active.length - 1} aur'
-            : first.title,
-        progressPercent: ((_progress[first.id] ?? 0) * 100).round(),
-        queuedCount: _queue.length,
-      );
-    } catch (_) {
-      // Notification fail ho to bhi download ruknа nahi chahiye.
-    }
-  }
+  // BUG FIX (v99): download-progress notification poori tarah hata di gayi
+  // hai (user request) — is method ki ab zaroorat nahi.
 }

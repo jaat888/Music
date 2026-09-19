@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'services/app_logger.dart';
+import 'services/audio_focus_service.dart';
 import 'services/background_service.dart';
 import 'services/cache_service.dart';
 import 'services/download_queue_service.dart';
@@ -99,6 +100,27 @@ void main() {
         // SleepTimerService ka state/icon wapas "off" karta hai.
         audioHandler.onSleepAtEndOfTrackFired =
             SleepTimerService.instance.notifyEndOfTrackFired;
+
+        double? volumeBeforeDuck;
+        await AudioFocusService.configure(
+          onCallPause: () => unawaited(audioHandler.pause()),
+          onCallResume: () {},
+          onDuck: (duck) {
+            if (duck) {
+              volumeBeforeDuck ??= audioHandler.player.volume;
+              unawaited(audioHandler.player.setVolume(
+                (audioHandler.player.volume * 0.35).clamp(0.0, 1.0).toDouble(),
+              ));
+            } else {
+              final restore = volumeBeforeDuck;
+              volumeBeforeDuck = null;
+              if (restore != null) {
+                unawaited(audioHandler.player.setVolume(restore));
+              }
+            }
+          },
+          onHeadphoneUnplug: () => unawaited(audioHandler.pause()),
+        );
       } catch (e) {
         _startupError = 'Audio init failed: $e';
         AppLogger.instance.logError('Audio init failed', e, StackTrace.current);
@@ -177,14 +199,7 @@ class SurSathiApp extends StatelessWidget {
           AppColorTheme.isLight = isLight;
 
           return MaterialApp(
-            // Naya `key` — theme badalte hi Flutter poore MaterialApp
-            // (Navigator + saari pushed screens samet) ko fresh rebuild
-            // karta hai, taaki jo screens abhi khuli hain unke andar bhi
-            // naya theme turant, correctly dikhe (na ki sirf agli baar
-            // khulne par). Trade-off: toggle karte hi navigation stack
-            // reset ho jaata hai (Home pe wapas) — chhota sa cost, poore
-            // app me instant-correct theming ke liye.
-            key: ValueKey(isLight),
+            // Theme changes rebuild ThemeData without resetting Navigator state.
             title: 'SurSathi',
             navigatorKey: navigatorKey,
             scaffoldMessengerKey: scaffoldMessengerKey,

@@ -80,6 +80,18 @@ import 'storage_service.dart';
 // support hi nahi karta.
 enum YtDateFilter { relevance, hour, today, week, month, year }
 
+class _SearchPaginationState {
+  String? continuation;
+  bool exhausted = false;
+  int generation = 0;
+}
+
+class _RadioPaginationState {
+  String? continuation;
+  bool exhausted = false;
+  int generation = 0;
+}
+
 // Search/playlist result ka lightweight model — Song se pehle ka staging data
 class YtResult {
   final String id;
@@ -352,9 +364,8 @@ class YoutubeService {
   // isliye pehla page ho ya paanchwa, sabka ranking/source same (YT Music)
   // rehta hai.
   final InnertubeClient _innertube = InnertubeClient.instance;
-  String? _moreSearchQuery;
-  String? _moreSearchContinuation;
-  bool _moreSearchExhausted = false;
+  final Map<String, _SearchPaginationState> _searchPagination = <String, _SearchPaginationState>{};
+  int _searchGeneration = 0;
 
   // NEW (2026-09-16, v21): "Upload date" filter (relevance ke alawa) ke
   // liye alag pagination state — InnerTube (YT Music) is filter ko support
@@ -510,62 +521,29 @@ class YoutubeService {
     String query, {
     YtDateFilter dateFilter = YtDateFilter.relevance,
   }) async {
-    if (query.trim().isEmpty) return [];
-    // NEW (v21): date-filter mode InnerTube continuation use nahi karta —
-    // apna alag paginated path hai (dekho _loadMoreByUploadDate).
+    final key = query.trim();
+    if (key.isEmpty) return [];
     if (dateFilter != YtDateFilter.relevance) {
-      return _loadMoreByUploadDate(query, dateFilter);
+      return _loadMoreByUploadDate(key, dateFilter);
     }
+    final state = _searchPagination[key];
+    if (state == null || state.exhausted || state.continuation == null) return [];
+    final generation = state.generation;
     try {
-      if (_moreSearchQuery != query) {
-        _moreSearchQuery = query;
-        _moreSearchContinuation = null;
-        _moreSearchExhausted = false;
+      final page = await _innertube.searchSongs(key, continuation: state.continuation);
+      if (!identical(_searchPagination[key], state) || generation != state.generation) return [];
+      if (page.items.isEmpty) {
+        state.continuation = null;
+        state.exhausted = true;
+        return [];
       }
-      if (_moreSearchExhausted) return [];
-
-      final page = await _innertube.searchSongs(
-        query,
-        continuation: _moreSearchContinuation,
-      );
-      _moreSearchContinuation = page.continuation;
-      if (page.continuation == null) _moreSearchExhausted = true;
-
-      if (page.items.isNotEmpty) {
-        return page.items
-            .map((s) => YtResult(
-                  id: s.id,
-                  title: s.title,
-                  author: s.author,
-                  thumb: s.thumb,
-                  duration: s.duration,
-                ))
-            .toList();
-      }
-
-      // InnerTube se kuch na mila (pehli baar hi fail ho gaya ya token
-      // expire ho gaya) — purane youtube_explode_dart generic search pe
-      // fallback, taaki "load more" bilkul khaali na reh jaaye.
-      final yt = await _getYt();
-      final videos = await yt.search.getVideos(query);
-      _moreSearchExhausted = true; // is fallback path me age continuation nahi
-      final results = <YtResult>[];
-      for (final dynamic v in videos) {
-        try {
-          results.add(YtResult(
-            id: v.id.value as String,
-            title: v.title as String,
-            author: v.author as String,
-            thumb: v.thumbnails.highResUrl as String,
-            duration: (v.duration as Duration?)?.inSeconds ?? 0,
-          ));
-        } catch (_) {
-          continue; // ek item ka shape alag nikla to bas usko skip karo
-        }
-      }
-      return results;
+      state.continuation = page.continuation;
+      state.exhausted = page.continuation == null;
+      return page.items.map((s) => YtResult(
+        id: s.id, title: s.title, author: s.author, thumb: s.thumb, duration: s.duration,
+      )).toList();
     } catch (e) {
-      print('LOAD MORE SEARCH ERROR ($query): $e');
+      print('LOAD MORE SEARCH ERROR ($key): $e');
       return [];
     }
   }
@@ -648,18 +626,18 @@ class YoutubeService {
     }
 
     // BUG FIX (2026-09-16, v20): "search unlimited nahi, hamesha limited
-    // gaane hi aate hain" — asli root cause. `_moreSearchQuery`/
-    // `_moreSearchContinuation`/`_moreSearchExhausted` teeno singleton
+    // gaane hi aate hain" — asli root cause. `_searchPagination` per-query state teeno singleton
     // instance fields hain (poore app me ek hi YoutubeService.instance),
     // lekin pehle:
     // (1) Agar `_innertube.searchSongs(query)` (Layer 0) THROW kar jaata
     //     (network flaky, ya YouTube ka internal endpoint kabhi-kabhi
     //     signature change kar de — ye poora Layer 0 hi "assumption/early
-    //     stage" hai), to `_moreSearchQuery` already naye query pe set ho
-    //     chuka hota tha (exception se PEHLE hi), lekin `_moreSearchContinuation`/
-    //     `_moreSearchExhausted` PURANI (kisi bilkul alag pichli query ki)
+    //     stage" hai), to search-state object naye query ke liye replace ho
+    //     chuka hota tha (exception se PEHLE hi), isliye purani query ka
+    //     `state.continuation`/
+    //     `state.exhausted` PURANI (kisi bilkul alag pichli query ki)
     //     value pe hi reh jaate the. `loadMoreSearchResults()` ka
-    //     `if (_moreSearchQuery != query)` check isliye galti se "match"
+    //     `if (the current pagination state is still owned by this query)` check isliye galti se "match"
     //     maan leta tha (query naam to same hai), aur purani query ka
     //     stale continuation/exhausted-flag naye query pe reuse ho jaata
     //     tha — matlab agar purani query exhausted thi, naya query bhi
@@ -682,9 +660,9 @@ class YoutubeService {
     // karo jab Layer 0 ka page.items khud display ho raha ho (i.e. andar
     // wale `if` ke andar) — taaki pagination state hamesha wahi reflect
     // kare jo user ko screen pe dikh raha hai.
-    _moreSearchQuery = query;
-    _moreSearchContinuation = null;
-    _moreSearchExhausted = false;
+    final searchKey = query.trim();
+    final searchState = _SearchPaginationState()..generation = ++_searchGeneration;
+    _searchPagination[searchKey] = searchState;
 
     // Layer 0 (NEW, v18): apna InnertubeClient — YT Music ka wahi endpoint
     // jo dart_ytmusic_api internally use karta hai, par yahan pagination
@@ -694,9 +672,9 @@ class YoutubeService {
     try {
       onProgress?.call('Searching (innertube)...');
       final page = await _innertube.searchSongs(query);
-      if (page.items.isNotEmpty) {
-        _moreSearchContinuation = page.continuation;
-        _moreSearchExhausted = page.continuation == null;
+      if (page.items.isNotEmpty && identical(_searchPagination[searchKey], searchState)) {
+        searchState.continuation = page.continuation;
+        searchState.exhausted = page.continuation == null;
         onProgress?.call('Innertube: OK, ${page.items.length} results');
         return page.items
             .take(max)
@@ -712,6 +690,12 @@ class YoutubeService {
       print('Innertube search: 0 usable results, dart_ytmusic_api try kar rahe hain');
     } catch (e) {
       print('Innertube search failed: $e');
+    }
+
+    if (identical(_searchPagination[searchKey], searchState)) {
+      // Fallback search results have no compatible InnerTube continuation.
+      searchState.continuation = null;
+      searchState.exhausted = true;
     }
 
     // Layer 1: YT Music native search (music-specific ranking), dart_ytmusic_api ke zariye
@@ -870,9 +854,9 @@ class YoutubeService {
   // on kare, uska continuation stale ho sakta hai (radio phir bhi kaam
   // karega, bas fresh seed se shuru hoga). Real conflict-window bahut
   // chhota hai (mixes sirf app-open/din-me-ek-baar generate hote hain).
-  String? _radioSeedId;
-  String? _radioContinuation;
-  bool _radioExhausted = false;
+  final Map<String, _RadioPaginationState> _radioPagination = <String, _RadioPaginationState>{};
+  String? _lastRadioSeedId;
+  int _radioGeneration = 0;
 
   Song _songFromInnertube(InnertubeSong s) => Song(
         id: s.id,
@@ -888,34 +872,30 @@ class YoutubeService {
     String seedArtist, {
     int count = 25,
   }) async {
-    // Naya radio shuru — purana continuation state reset karo.
-    _radioSeedId = seedVideoId;
-    _radioContinuation = null;
-    _radioExhausted = false;
-
+    final seed = seedVideoId.trim();
+    final state = _RadioPaginationState()..generation = ++_radioGeneration;
+    _radioPagination[seed] = state;
+    _lastRadioSeedId = seed;
     try {
-      final page = await _innertube.radioQueue(seedVideoId);
-      _radioContinuation = page.continuation;
-      _radioExhausted = page.continuation == null;
-      final filtered = page.items.where((s) => s.id != seedVideoId).toList();
-      if (filtered.isNotEmpty) {
-        return filtered.take(count).map(_songFromInnertube).toList();
-      }
+      final page = await _innertube.radioQueue(seed);
+      if (!identical(_radioPagination[seed], state)) return [];
+      state.continuation = page.continuation;
+      state.exhausted = page.continuation == null;
+      final filtered = page.items.where((s) => s.id != seed).toList();
+      if (filtered.isNotEmpty) return filtered.take(count).map(_songFromInnertube).toList();
       print('INNERTUBE RADIO: 0 usable results, purana approximation try kar rahe hain');
     } catch (e) {
       print('INNERTUBE RADIO FAILED: $e');
     }
-
-    // Fallback (purana approximation) — ye "unlimited" nahi hai, isliye
-    // exhausted mark kar diya taaki loadMoreRadioQueue() seedhe khaali de
-    // (QueueService khud-ba-khud refill karna band kar dega, jo already
-    // chal raha hai use disturb kiye bina).
-    _radioExhausted = true;
+    if (identical(_radioPagination[seed], state)) {
+      state.continuation = null;
+      state.exhausted = true;
+    }
     try {
       final query = seedArtist.trim().isNotEmpty ? seedArtist.trim() : seedTitle;
       final results = await search(query, max: 30);
-      final filtered = results.where((r) => r.id != seedVideoId).toList()
-        ..shuffle();
+      if (!identical(_radioPagination[seed], state)) return [];
+      final filtered = results.where((r) => r.id != seed).toList()..shuffle();
       return filtered.take(count).map((r) => r.toSong()).toList();
     } catch (e) {
       print('RADIO ERROR: $e');
@@ -923,28 +903,20 @@ class YoutubeService {
     }
   }
 
-  // Radio "unlimited" banane wala asli hissa — QueueService (radio-mode
-  // on hone par) khud isko call karta hai jab queue khatam hone wali ho.
-  // Same seed ka agla batch, asli continuation token se. Khaali list ka
-  // matlab: ya continuation khatam ho gaya (YouTube ke paas is radio ke
-  // aur gaane nahi bache), ya getRadioQueue() fallback approximation pe
-  // gaya tha (jahan continuation hota hi nahi) — dono case me
-  // QueueService bas aage refill try karna rok dega.
-  Future<List<Song>> loadMoreRadioQueue() async {
-    if (_radioSeedId == null || _radioExhausted) return [];
+  Future<List<Song>> loadMoreRadioQueue({String? seedVideoId}) async {
+    final seed = (seedVideoId ?? _lastRadioSeedId)?.trim();
+    if (seed == null || seed.isEmpty) return [];
+    final state = _radioPagination[seed];
+    if (state == null || state.exhausted || state.continuation == null) return [];
+    final generation = state.generation;
     try {
-      final page = await _innertube.radioQueue(
-        _radioSeedId!,
-        continuation: _radioContinuation,
-      );
-      _radioContinuation = page.continuation;
-      if (page.continuation == null) _radioExhausted = true;
-      final filtered =
-          page.items.where((s) => s.id != _radioSeedId).toList();
-      return filtered.map(_songFromInnertube).toList();
+      final page = await _innertube.radioQueue(seed, continuation: state.continuation);
+      if (!identical(_radioPagination[seed], state) || generation != state.generation) return [];
+      state.continuation = page.continuation;
+      state.exhausted = page.continuation == null;
+      return page.items.where((s) => s.id != seed).map(_songFromInnertube).toList();
     } catch (e) {
-      print('LOAD MORE RADIO ERROR: $e');
-      _radioExhausted = true;
+      print('LOAD MORE RADIO ERROR ($seed): $e');
       return [];
     }
   }

@@ -3,6 +3,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -51,6 +52,8 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   String? _error;
   int _sessionGeneration = 0;
   int _candidateGeneration = 0;
+  int _candidateFetchGeneration = 0;
+  DateTime? _currentPlaybackStartedAt;
   bool _transitioning = false;
   int? _radioOwnerId;
 
@@ -77,6 +80,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   bool _swipedUp = true;
   String? _recoveringSongId;
   Future<bool>? _recoveryFuture;
+  int? _recoveringCandidateGeneration;
   final Map<String, int> _recentLanguageCounts = <String, int>{};
 
   @override
@@ -88,12 +92,20 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       onError: _onRadioPlaybackError,
     );
     _completionSub = audioHandler.player.processingStateStream.listen((state) {
-      if (state == ProcessingState.completed &&
-          mounted &&
-          _current != null &&
-          !_transitioning) {
-        unawaited(_advance(auto: true));
+      if (state != ProcessingState.completed || !mounted || _current == null || _transitioning) return;
+      final startedAt = _currentPlaybackStartedAt;
+      final duration = audioHandler.player.duration;
+      final position = audioHandler.player.position;
+      final nearEnd = duration == null ||
+          duration <= Duration.zero ||
+          position >= duration - const Duration(seconds: 2);
+      final ownsCompletedSource = startedAt != null && nearEnd;
+      if (!ownsCompletedSource) {
+        AppLogger.instance.log('[RADIO] completed signal ignored — current candidate ki confirmed playback identity nahi mili; stale completion suspect.');
+        return;
       }
+      AppLogger.instance.log('[RADIO] current candidate completed after confirmed playback start (${DateTime.now().difference(startedAt!).inMilliseconds}ms).');
+      unawaited(_advance(auto: true));
     });
     _start();
   }
@@ -215,56 +227,165 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   }
 
   Future<void> _fetchCandidates() async {
-    _candidates.clear();
+    final fetchGeneration = ++_candidateFetchGeneration;
+    final sessionGeneration = _sessionGeneration;
+    final localCandidates = <RadioCandidate>[];
     final byId = <String, int>{};
     final languages = widget.languages.toSet();
+    final targetCandidateCount = (languages.length * 12).clamp(24, 60).toInt();
 
-    for (final language in languages) {
-      final option = RadioLanguageSelectLookup.byCode(language);
-      if (option == null) continue;
-      final queries = [option.hitsQuery, option.latestQuery];
-      for (var qi = 0; qi < queries.length; qi++) {
-        try {
-          final results = await YoutubeService.instance.search(
-            queries[qi],
-            max: 30,
-            dateFilter: qi == 1 ? YtDateFilter.month : YtDateFilter.relevance,
+    int eligibleCount() => _engine
+        .buildPool(localCandidates, selectedLanguages: widget.languages)
+        .length;
+
+    void addResults(
+      Iterable<YtResult> results,
+      String language,
+      RadioLanguageSelectLookup option,
+      int queryIndex,
+    ) {
+      var rank = 0;
+      for (final item in results) {
+        final rankSignal = (1.0 - (rank / 30.0)).clamp(0.0, 1.0).toDouble();
+        rank++;
+        final candidate = RadioCandidate.fromSong(
+          item.toSong(),
+          language: language,
+          categoryHint: option.categoryHint,
+          popularity: queryIndex == 0 ? rankSignal : rankSignal * 0.35,
+          recency: queryIndex == 1 ? (0.30 + rankSignal * 0.50) : 0.12,
+          isLatest: queryIndex == 1,
+        );
+        final existingIndex = byId[item.id];
+        if (existingIndex == null) {
+          byId[item.id] = localCandidates.length;
+          localCandidates.add(candidate);
+        } else {
+          final existing = localCandidates[existingIndex];
+          localCandidates[existingIndex] = existing.copyWith(
+            popularity: existing.popularity > candidate.popularity ? existing.popularity : candidate.popularity,
+            recency: existing.recency > candidate.recency ? existing.recency : candidate.recency,
+            isLatest: existing.isLatest || candidate.isLatest,
           );
-          for (var i = 0; i < results.length; i++) {
-            final item = results[i];
-            final rankSignal =
-                (1.0 - (i / 30.0)).clamp(0.0, 1.0).toDouble();
-            final candidate = RadioCandidate.fromSong(
-              item.toSong(),
-              language: language,
-              categoryHint: option.categoryHint,
-              popularity: qi == 0 ? rankSignal : rankSignal * 0.35,
-              recency: qi == 1 ? (0.30 + rankSignal * 0.50) : 0.12,
-              isLatest: qi == 1,
-            );
-            final existingIndex = byId[item.id];
-            if (existingIndex == null) {
-              byId[item.id] = _candidates.length;
-              _candidates.add(candidate);
-            } else {
-              final existing = _candidates[existingIndex];
-              _candidates[existingIndex] = existing.copyWith(
-                popularity: existing.popularity > candidate.popularity
-                    ? existing.popularity
-                    : candidate.popularity,
-                recency: existing.recency > candidate.recency
-                    ? existing.recency
-                    : candidate.recency,
-                isLatest: existing.isLatest || candidate.isLatest,
-              );
-            }
-          }
-        } catch (_) {
-          // A single language/query failure must not kill the session.
         }
       }
     }
-    if (_candidates.isEmpty) throw StateError('No radio candidates');
+
+    final queryList = <({String language, RadioLanguageSelectLookup option, String query, int index})>[];
+    for (final language in languages) {
+      final option = RadioLanguageSelectLookup.byCode(language);
+      if (option == null) continue;
+      queryList.add((language: language, option: option, query: option.hitsQuery, index: 0));
+      queryList.add((language: language, option: option, query: option.latestQuery, index: 1));
+    }
+
+    // Pass 1: fast YT Music search. This preserves the curated first-page
+    // ranking users normally expect from Radio.
+    for (final item in queryList) {
+      try {
+        final results = await YoutubeService.instance.search(
+          item.query,
+          max: 30,
+          dateFilter: item.index == 1 ? YtDateFilter.month : YtDateFilter.relevance,
+        );
+        if (!mounted ||
+            sessionGeneration != _sessionGeneration ||
+            fetchGeneration != _candidateFetchGeneration) return;
+        addResults(results, item.language, item.option, item.index);
+      } catch (_) {}
+    }
+
+    // Pass 2: when the hard-history/failed/duplicate filters have eaten much
+    // of the first page, walk real InnerTube continuations to obtain fresh
+    // candidate material instead of repeatedly searching the same page.
+    if (eligibleCount() < targetCandidateCount) {
+      for (final item in queryList) {
+        if (eligibleCount() >= targetCandidateCount) break;
+        try {
+          var page = await YoutubeService.instance.searchPage(item.query);
+          if (!mounted ||
+              sessionGeneration != _sessionGeneration ||
+              fetchGeneration != _candidateFetchGeneration) return;
+          // The first page normally overlaps the fast search above; consume it
+          // only for dedupe/metadata merge, then follow its continuation.
+          addResults(page.items, item.language, item.option, item.index);
+          var pageCount = 0;
+          while (page.continuation != null &&
+              pageCount < 2 &&
+              eligibleCount() < targetCandidateCount) {
+            page = await YoutubeService.instance.searchPage(
+              item.query,
+              continuation: page.continuation,
+            );
+            if (!mounted ||
+                sessionGeneration != _sessionGeneration ||
+                fetchGeneration != _candidateFetchGeneration) return;
+            addResults(page.items, item.language, item.option, item.index);
+            pageCount++;
+          }
+        } catch (_) {}
+      }
+    }
+
+    if (!mounted ||
+        sessionGeneration != _sessionGeneration ||
+        fetchGeneration != _candidateFetchGeneration) return;
+    if (localCandidates.isEmpty) throw StateError('No radio candidates');
+    _candidates
+      ..clear()
+      ..addAll(localCandidates);
+  }
+
+  Map<String, int> _recentArtistCountsForRanking({int window = 8}) {
+    // Persisted 45-minute history is the short-term memory; merge the
+    // in-memory session tail so just-played artists are counted immediately
+    // even while the async history write is still pending.
+    final sessionCandidates = [
+      ...(_playedStack.length > window
+          ? _playedStack.sublist(_playedStack.length - window)
+          : _playedStack),
+      if (_current != null) _current!,
+    ];
+    final sessionSongIds = sessionCandidates.map((c) => c.song.id).toSet();
+    final out = <String, int>{
+      ...RadioHistoryStore.instance.recentArtistCounts(
+        within: const Duration(minutes: 45),
+        excludeSongIds: sessionSongIds,
+      ),
+    };
+    final start = _playedStack.length > window
+        ? _playedStack.length - window
+        : 0;
+    for (final candidate in _playedStack.sublist(start)) {
+      final artist = candidate.song.artist.trim().toLowerCase();
+      if (artist.isEmpty) continue;
+      out[artist] = (out[artist] ?? 0) + 1;
+    }
+    final current = _current;
+    if (current != null) {
+      final artist = current.song.artist.trim().toLowerCase();
+      if (artist.isNotEmpty) out[artist] = (out[artist] ?? 0) + 1;
+    }
+    return out;
+  }
+
+  Map<String, int> _recentTagCountsForRanking({int window = 8}) {
+    final out = <String, int>{};
+    final start = _playedStack.length > window
+        ? _playedStack.length - window
+        : 0;
+    for (final candidate in _playedStack.sublist(start)) {
+      for (final tag in candidate.tags) {
+        out[tag] = (out[tag] ?? 0) + 1;
+      }
+    }
+    final current = _current;
+    if (current != null) {
+      for (final tag in current.tags) {
+        out[tag] = (out[tag] ?? 0) + 1;
+      }
+    }
+    return out;
   }
 
   RadioCandidate? _pickNext({Set<String> excludeIds = const <String>{}}) {
@@ -273,6 +394,8 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       selectedLanguages: widget.languages,
       excludeIds: excludeIds,
       recentLanguageCounts: _recentLanguageCounts,
+      recentArtistCounts: _recentArtistCountsForRanking(),
+      recentTagCounts: _recentTagCountsForRanking(),
     );
   }
 
@@ -310,6 +433,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
 
     final started = await _playWithRecovery(candidate, token);
     if (!mounted || token != _candidateGeneration) return false;
+    if (started) _currentPlaybackStartedAt = DateTime.now();
 
     if (!started) {
       _engine.markFailed(candidate.song.id);
@@ -358,15 +482,12 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     }
 
     unawaited(_loadLyrics(candidate, token));
-    // Warm Radio's actual look-ahead only AFTER the current candidate has
-    // committed successfully. `_upcoming` belongs to Radio (not QueueService),
-    // so this is the point where the next two songs can reliably be resolved.
-    unawaited(_fillUpcoming().then((_) {
-      if (!mounted || token != _candidateGeneration) return;
-      unawaited(audioHandler.prefetchRadioSongs(
-        _upcoming.take(2).map((item) => item.song).toList(),
-      ));
-    }));
+    // Fill Radio's look-ahead only after the current candidate has
+    // committed successfully. `_fillUpcoming()` owns the single Radio
+    // preload pass, so we intentionally do NOT issue a second prefetch here.
+    // Keeping one owner avoids the old v108 mismatch where this path warmed
+    // 2 songs while `_preloadArtworkAndMetadata()` warmed 3.
+    unawaited(_fillUpcoming());
     return true;
   }
 
@@ -378,24 +499,19 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
 
     if (!mounted || token != _candidateGeneration) return false;
 
-    // IMPORTANT (v84): playWithRetry() can return a few milliseconds before
-    // just_audio flips `player.playing` to true. The old code checked the
-    // boolean immediately, treated a perfectly valid start as a failure,
-    // marked the song failed, and jumped to another candidate. The device log
-    // shows exactly this: a stream was obtained, then Radio immediately said
-    // "play nahi hua" even though playback became READY/PLAYING just after.
-    // Wait briefly for the authoritative playingStream before declaring a
-    // real failure.
-    if (audioHandler.player.playing) return true;
-    try {
-      await audioHandler.player.playingStream
-          .where((playing) => playing)
-          .first
-          .timeout(const Duration(seconds: 6));
-      if (mounted && token == _candidateGeneration) return true;
-    } catch (_) {}
-
+    // v106 (v84 ka follow-up): playWithRetry() just_audio ke `playing=true`
+    // publish karne se kuch ms pehle return kar sakta hai, aur ExoPlayer
+    // hand-off ke dauraan `player.playing` chhoti si der `false` bhi ho
+    // sakta hai. Raw `player.playing` / `playingStream.first` par tikne se
+    // ek valid start "failed candidate" ban jaata tha. Ab wahi effective
+    // signal jo UI/notification use karte hain: `playbackStarted` latch +
+    // position-advance fallback (dekho `waitForEffectiveStart`).
+    if (audioHandler.playbackStarted) return true;
+    final started = await audioHandler.waitForEffectiveStart(
+      timeout: const Duration(seconds: 6),
+    );
     if (!mounted || token != _candidateGeneration) return false;
+    if (started) return true;
     return _ensureRecovery(candidate, token, autoAdvanceOnFailure: false);
   }
 
@@ -422,12 +538,15 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     int token, {
     required bool autoAdvanceOnFailure,
   }) async {
-    if (_recoveringSongId == candidate.song.id && _recoveryFuture != null) {
+    if (_recoveringSongId == candidate.song.id &&
+        _recoveringCandidateGeneration == token &&
+        _recoveryFuture != null) {
       return _recoveryFuture!;
     }
 
     final completer = Completer<bool>();
     _recoveringSongId = candidate.song.id;
+    _recoveringCandidateGeneration = token;
     _recoveryFuture = completer.future;
 
     () async {
@@ -468,19 +587,23 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
             );
             break;
           }
-          if (audioHandler.player.playing) {
-            recovered = true;
-          } else {
-            try {
-              await audioHandler.player.playingStream
-                  .where((playing) => playing)
-                  .first
-                  .timeout(const Duration(seconds: 6));
-              recovered = true;
-            } catch (_) {
-              recovered = false;
-            }
+          // v106: raw `player.playing` / `playingStream.first` ki jagah wahi
+          // effective start signal (latch + position-advance) — dekho
+          // `_playWithRecovery` ka comment. Wait ke DAURAAN user aage badh
+          // gaya ho to result discard (upar wala staleness-check yahan bhi).
+          final started = audioHandler.playbackStarted ||
+              await audioHandler.waitForEffectiveStart(
+                timeout: const Duration(seconds: 6),
+              );
+          if (!mounted ||
+              token != _candidateGeneration ||
+              _current?.song.id != candidate.song.id) {
+            AppLogger.instance.log(
+              '[RADIO] _ensureRecovery("${candidate.song.title}") — start-wait ke dauraan hi stale ho gaya, result discard.',
+            );
+            break;
           }
+          recovered = started;
           if (recovered) {
             AppLogger.instance.log('[RADIO] _ensureRecovery("${candidate.song.title}") TASK COMPLETE — retry $retry pe recover ho gaya.');
             if (mounted) setState(() => _loading = false);
@@ -498,8 +621,10 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         }
       } finally {
         if (!completer.isCompleted) completer.complete(recovered);
-        if (_recoveringSongId == candidate.song.id) {
+        if (_recoveringSongId == candidate.song.id &&
+            _recoveringCandidateGeneration == token) {
           _recoveringSongId = null;
+          _recoveringCandidateGeneration = null;
           _recoveryFuture = null;
         }
       }
@@ -538,6 +663,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   }
 
   Future<void> _preloadArtworkAndMetadata() async {
+    final gen = _candidateGeneration;
     final songs = <Song>[];
     if (_current != null) songs.add(_current!.song);
     songs.addAll(_upcoming.map((c) => c.song));
@@ -546,8 +672,9 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     for (final song in next) {
       if (song.thumb.isEmpty) continue;
       final provider = _artworkCache.putIfAbsent(song.id, () => NetworkImage(song.thumb));
+      if (!mounted || gen != _candidateGeneration) return;
       try {
-        if (mounted) await precacheImage(provider, context);
+        await precacheImage(provider, context);
       } catch (_) {}
     }
     _trimArtworkCache();
@@ -558,7 +685,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     // this now-stale pass stops instead of continuing to burn bandwidth —
     // and compete with the *new* current song's own lyrics/audio fetch —
     // for songs nobody is listening to anymore.
-    final gen = _candidateGeneration;
+    if (!mounted || gen != _candidateGeneration) return;
     unawaited(
       LyricsService.instance.prefetchForSongs(
         next,
@@ -577,8 +704,9 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     // while Radio owns playback. Use the actual Radio look-ahead here so
     // the next songs really get their URL warmed. Full downloads are still
     // NOT started — only the serialized URL warm-up in BackgroundService.
+    if (!mounted || gen != _candidateGeneration) return;
     unawaited(audioHandler.prefetchRadioSongs(
-      _upcoming.take(2).map((candidate) => candidate.song).toList(),
+      _upcoming.take(3).map((candidate) => candidate.song).toList(),
     ));
   }
 
@@ -601,24 +729,55 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
 
   Future<void> _fillUpcoming() async {
     if (_loadingNext || _candidates.isEmpty) return;
+    final sessionGeneration = _sessionGeneration;
+    final candidateGeneration = _candidateGeneration;
     _loadingNext = true;
     try {
-      final used = <String>{
-        if (_current != null) _current!.song.id,
-        ..._upcoming.map((e) => e.song.id),
-      };
-      final fresh = _engine.buildLookAhead(
-        _candidates,
-        selectedLanguages: widget.languages,
-        count: 10 - _upcoming.length,
-        excludeIds: used,
-        recentLanguageCounts: _recentLanguageCounts,
-      );
+      List<RadioCandidate> buildFresh() {
+        final used = <String>{
+          if (_current != null) _current!.song.id,
+          ..._upcoming.map((e) => e.song.id),
+        };
+        final artistCounts = _recentArtistCountsForRanking();
+        final tagCounts = _recentTagCountsForRanking();
+        final desired = (10 - _upcoming.length).clamp(0, 10).toInt();
+        final result = _engine.buildLookAhead(
+          _candidates,
+          selectedLanguages: widget.languages,
+          count: desired,
+          excludeIds: used,
+          recentLanguageCounts: _recentLanguageCounts,
+          recentArtistCounts: artistCounts,
+          recentTagCounts: tagCounts,
+        );
+        return result;
+      }
+
+      var fresh = buildFresh();
+
+      // If the current candidate pool cannot fill the look-ahead, refresh the
+      // pool before giving up. This is the key guard against long Radio
+      // sessions exhausting the initial search batch.
+      if (fresh.length < (10 - _upcoming.length) &&
+          sessionGeneration == _sessionGeneration &&
+          candidateGeneration == _candidateGeneration) {
+        try {
+          await _fetchCandidates();
+        } catch (_) {}
+        if (sessionGeneration != _sessionGeneration ||
+            candidateGeneration != _candidateGeneration) return;
+        fresh = buildFresh();
+      }
+
+      if (sessionGeneration != _sessionGeneration ||
+          candidateGeneration != _candidateGeneration) return;
       _upcoming.addAll(fresh);
     } finally {
       _loadingNext = false;
     }
-    if (!mounted) return;
+    if (!mounted ||
+        sessionGeneration != _sessionGeneration ||
+        candidateGeneration != _candidateGeneration) return;
     setState(() {});
     unawaited(_preloadArtworkAndMetadata());
   }
@@ -664,15 +823,31 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
       final old = _current!;
       if (failedSongId == old.song.id) {
         _engine.markFailed(old.song.id);
-      } else if (!auto) {
-        final seconds = audioHandler.player.position.inSeconds;
-        await RadioHistoryStore.instance.markLatestAsSkipped(
-          songId: old.song.id,
-          skipPositionSec: seconds,
-        );
-        RadioService.instance.recordSkip(old.tags);
       } else {
-        RadioService.instance.recordCompleted(old.tags);
+        final seconds = audioHandler.player.position.inSeconds;
+        final playerDuration = audioHandler.player.duration?.inSeconds ?? 0;
+        final total = playerDuration > 0 ? playerDuration : old.song.duration;
+        final ratio = total > 0 ? seconds / total : 0.0;
+
+        // A manual Next very close to the end is treated as a successful
+        // listen, not as a negative skip. This prevents Resso-style learning
+        // from punishing a song the listener effectively finished.
+        final completed = auto || ratio >= .90;
+        if (completed) {
+          await RadioHistoryStore.instance.markLatestAsCompleted(
+            songId: old.song.id,
+            listenSeconds: auto ? total : seconds,
+            duration: total > 0 ? total : old.song.duration,
+          );
+          RadioService.instance.recordCompleted(old.tags);
+        } else {
+          await RadioHistoryStore.instance.markLatestAsSkipped(
+            songId: old.song.id,
+            skipPositionSec: seconds,
+            duration: total > 0 ? total : old.song.duration,
+          );
+          RadioService.instance.recordSkip(old.tags);
+        }
       }
 
       _playedStack.add(old);
@@ -772,61 +947,61 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
   }
 
   Future<void> _previous() async {
-    // STABILITY FIX (v89): invalidate any still-running startup/resume loop
-    // for the same reason as `_advance()` — Previous is a new Radio intent.
     _sessionGeneration++;
-    // BUG FIX (v80, #1 — dekho `_pendingNav` field ka poora comment):
-    // transition chal rahi ho to pehle seedha discard hota tha, ab queue
-    // karte hain.
     if (_transitioning) {
       _pendingNav = 'previous';
-      AppLogger.instance.log(
-        '[RADIO] _previous() — transition already in-progress, "previous" queued for after.',
-      );
+      AppLogger.instance.log('[RADIO] _previous() — transition already in-progress, "previous" queued for after.');
       return;
     }
-    // BUG FIX (v80, #5 — user-verified: "history empty ho to tap ka koi
-    // feedback nahi"): pehle yahan bhi chup-chaap `return` hota tha, user
-    // ko pata hi nahi chalta tha ki Previous kaam kyun nahi kar raha
-    // (button khud disabled nahi hota — dekho niche _controls() — isliye
-    // ye genuinely "dead tap" jaisa lagta tha). Ab ek chhota SnackBar
-    // bata deta hai ki ye pehla gaana hai.
     if (_playedStack.isEmpty) {
       AppLogger.instance.log('[RADIO] _previous() — _playedStack khaali hai, ye pehla gaana hai.');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Ye is session ka pehla gaana hai'),
-            duration: Duration(seconds: 2),
-          ),
+          const SnackBar(content: Text('Ye is session ka pehla gaana hai'), duration: Duration(seconds: 2)),
         );
       }
       return;
     }
-    setState(() => _transitioning = true); // FIX: dekho _advance() comment
-    final previous = _playedStack.last;
-    AppLogger.instance.log('[RADIO] _previous() called — jaa rahe hain: "${previous.song.title}"');
+
+    _candidateGeneration++;
+    setState(() => _transitioning = true);
+    final current = _current;
+    if (current != null) _upcoming.insert(0, current);
     try {
-      final previousCandidate = _playedStack.removeLast();
-      final current = _current;
-      if (current != null) _upcoming.insert(0, current);
-      if (!await _playCandidate(previousCandidate, addToHistory: false)) {
-        AppLogger.instance.log('[RADIO] _previous() FAILED — "${previousCandidate.song.title}" play nahi hua.', level: 'ERROR');
+      for (var attempt = 0; attempt < 12 && _playedStack.isNotEmpty; attempt++) {
+        final previousCandidate = _playedStack.removeLast();
+        AppLogger.instance.log('[RADIO] _previous() attempt ${attempt + 1}/12 — "${previousCandidate.song.title}" try kar rahe hain.');
+        final started = await _playCandidate(previousCandidate, addToHistory: false);
+        if (started) {
+          await RadioHistoryStore.instance.markReplay(previousCandidate.song.id);
+          AppLogger.instance.log('[RADIO] _previous() TASK COMPLETE — "${previousCandidate.song.title}" pe move hua; replay signal recorded.');
+          return;
+        }
         _engine.markFailed(previousCandidate.song.id);
-      } else {
-        AppLogger.instance.log('[RADIO] _previous() TASK COMPLETE — "${previousCandidate.song.title}" pe move hua.');
+        _upcoming.removeWhere((item) => item.song.id == previousCandidate.song.id);
+      }
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'Pichhle gaane me se koi play nahi ho paya.';
+        });
       }
     } finally {
-      if (mounted) setState(() => _transitioning = false); // FIX: dekho upar
-      // BUG FIX (v80, #1/#3/#4): dekho _advance()'s finally ka comment —
-      // yahan bhi wahi drain zaroori hai.
+      if (mounted) setState(() => _transitioning = false);
       scheduleMicrotask(_drainPendingRadioCommand);
     }
   }
 
+  // v106 (v100 ka follow-up): v100 ne raw `player.playing` ki jagah
+  // `playbackStarted` liya, lekin icon abhi bhi usse broad signal (`playing ||
+  // playbackStarted || (ready && position>250ms)`) se decide hota tha — to
+  // hand-off gap mein icon "Pause" dikhta aur yahan `playbackStarted` false
+  // milne par tap `play()` ban jaata. Ab icon, onTap AUR yeh function teeno
+  // `audioHandler.effectivelyPlaying` (ek hi getter) se chalte hain.
   Future<void> _togglePlay() async {
-    AppLogger.instance.log('[RADIO] _togglePlay() called — abhi playing=${audioHandler.player.playing}');
-    if (audioHandler.player.playing) {
+    final isPlaying = audioHandler.effectivelyPlaying;
+    AppLogger.instance.log('[RADIO] _togglePlay() called — effectivelyPlaying=$isPlaying (playbackStarted=${audioHandler.playbackStarted}, raw player.playing=${audioHandler.player.playing})');
+    if (isPlaying) {
       await audioHandler.pause();
       if (mounted) setState(() => _paused = true);
     } else {
@@ -917,7 +1092,11 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
     if (!mounted || _current?.song.id != current.song.id) return;
     _liked = await LikeService.instance.isLiked(current.song.id);
     _engine.setLiked(current.song.id, _liked);
-    if (_liked) RadioService.instance.recordFavorite(current.tags);
+    if (_liked) {
+      RadioService.instance.recordFavorite(current.tags);
+    } else {
+      RadioService.instance.removeFavorite(current.tags);
+    }
     setState(() {});
   }
 
@@ -1224,6 +1403,7 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
               RadioPlayerProgress(
                 key: ValueKey('progress-${current.song.id}'),
                 player: audioHandler.player,
+                isEffectivelyPlaying: () => audioHandler.effectivelyPlaying,
                 // Player state is authoritative. Once the new source is
                 // READY, the seekbar should become usable even if a small
                 // Radio bookkeeping/transition task is still unwinding.
@@ -1288,19 +1468,15 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
         StreamBuilder<bool>(
           stream: audioHandler.player.playingStream,
           initialData: audioHandler.player.playing,
-          builder: (_, playingSnapshot) {
+          builder: (_, playingTick) {
             return StreamBuilder<Duration>(
               stream: audioHandler.player.positionStream,
               initialData: audioHandler.player.position,
-              builder: (_, positionSnapshot) {
-                final rawPlaying =
-                    playingSnapshot.data ?? audioHandler.player.playing;
-                final position = positionSnapshot.data ?? Duration.zero;
+              builder: (_, positionTick) {
+                // v106: icon, onTap aur `_togglePlay()` ka EK hi signal.
+                // (StreamBuilders sirf rebuild trigger karte hain.)
                 final processing = audioHandler.player.processingState;
-                final playing = rawPlaying ||
-                    audioHandler.playbackStarted ||
-                    (processing == ProcessingState.ready &&
-                        position > const Duration(milliseconds: 250));
+                final playing = audioHandler.effectivelyPlaying;
                 final resolving = !playing &&
                     (_loading ||
                         _transitioning ||
@@ -1331,7 +1507,9 @@ class _RadioPlayerScreenState extends State<RadioPlayerScreen> {
                       isPlaying: playing,
                       size: 72,
                       onTap: () {
-                        if (playing) {
+                        // Live read (build-time snapshot nahi) — _togglePlay()
+                        // bhi isi getter ko padhta hai.
+                        if (audioHandler.effectivelyPlaying) {
                           unawaited(_togglePlay());
                           return;
                         }
@@ -1403,10 +1581,12 @@ class RadioPlayerProgress extends StatefulWidget {
   // call ho sakta tha, jo either kaam nahi karta ya galat gaane pe seek
   // kar deta).
   final bool enabled;
+  final bool Function()? isEffectivelyPlaying;
   const RadioPlayerProgress({
     super.key,
     required this.player,
     this.enabled = true,
+    this.isEffectivelyPlaying,
   });
 
   @override
@@ -1449,7 +1629,7 @@ class _RadioPlayerProgressState extends State<RadioPlayerProgress>
   }
 
   void _onFrame() {
-    if (!mounted || _dragging || !widget.player.playing) return;
+    if (!mounted || _dragging || !(widget.isEffectivelyPlaying?.call() ?? widget.player.playing)) return;
     setState(() {});
   }
 
@@ -1620,7 +1800,7 @@ class _RadioLyricsState extends State<RadioLyrics> {
 
   void _centerActive(int index) {
     if (index < 0 || !_scrollController.hasClients) return;
-    const itemExtent = 40.0;
+    const itemExtent = 56.0;
     const viewportHeight = 165.0;
     final target = (index * itemExtent) - (viewportHeight / 2) + (itemExtent / 2);
     final maxScroll = _scrollController.position.maxScrollExtent;
@@ -1661,8 +1841,8 @@ class _RadioLyricsState extends State<RadioLyrics> {
           child: ListView.builder(
             controller: _scrollController,
             physics: const NeverScrollableScrollPhysics(),
-            padding: const EdgeInsets.symmetric(vertical: 68),
-            itemExtent: 40,
+            padding: const EdgeInsets.symmetric(vertical: 60),
+            itemExtent: 56,
             itemCount: _lines.length,
             itemBuilder: (_, index) {
               final active = index == _activeIndex;

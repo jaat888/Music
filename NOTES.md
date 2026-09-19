@@ -2834,3 +2834,214 @@ toolchain nahi hai yahan). JioSaavn ka shape sabse zyada risky hissa hai
 aana confirm karna; agar khaali aaye to endpoint response ka actual JSON
 shape dekh ke `jiosaavn_service.dart` ki parsing adjust karni padegi.
 iTunes wala Apple ka stable/official format hai, kam risk hai.
+
+## V96 — 3 naye lyrics sources (YT Music internal, BetterLyrics, Kugou)
+User request pe `lyrics_service.dart` mein 3 naye sources add kiye, user
+ki di hui priority order se (YT Music -> BetterLyrics -> LRCLIB -> Kugou
+-> JioSaavn -> lyrics.ovh). Dono modes (LyricsScreen + Radio) automatically
+cover — shared service hai. Poora detail: V96_LYRICS_SOURCES.md.
+STATUS: compile-test nahi ho paaya (koi Dart toolchain nahi is environment
+mein) — sirf manual review. Kugou ka JSON shape sabse risky hissa hai
+(undocumented API), agar khaali aaye to log me `source:` field check karna.
+
+## V97 — lyrics highlight/overflow fixes (screenshot report)
+Radio overlay: active-line itemExtent 40->56 (lambi lines cut ho rahi
+thi, ab nahi). Full LyricsScreen: padding aur auto-scroll target pehle
+alag-alag "viewport height" (poora screen vs asli list area) use karte
+the, isliye highlight kabhi visible hi nahi hota tha aur upar bada khaali
+gap tha — ab dono LayoutBuilder se same height source use karte hain.
+Detail: V97_LYRICS_UI_FIX.md. STATUS: compile-test nahi ho paaya.
+
+## V106 — Radio effective-start signal + real shuffle
+List ke pehle 3 items: (1) Radio recovery ab `playbackStarted`/position-latch
+(`AudioHandler.waitForEffectiveStart`) pe, raw `player.playing` pe nahi;
+(2) Radio icon + onTap + `_togglePlay()` ek hi `effectivelyPlaying` getter se
+(saath mein paused-icon-stuck bug fix: `_userPaused` guard); (3) Shuffle ab
+`QueueService._shuffleOrder` se chalta hai (next/previous/upcoming/queue
+screen/prefetch). Baaki: item 4 (per-operation continuation state) aur 5
+(Android completeness + release signing). Detail: V106_RADIO_SIGNAL_SHUFFLE_FIX.md.
+STATUS: compile/test nahi ho paaya (koi Dart toolchain nahi) — pehle
+`flutter analyze` + `flutter test`.
+
+
+# V107 — 2026-09-19 — Deep bug-fix pass by ChatGPT (OpenAI)
+
+**User request:** v106 ke deep audit me jo playback/Radio/search/queue bugs mile the, unko fix karo aur exact reason + change record karo.
+
+**Important validation note:** is environment me Flutter/Dart SDK available nahi tha, isliye `flutter analyze`, `flutter test`, APK build aur real-device playback test **run nahi ho sake**. V107 ko source-level review, diff checks aur cross-file race tracing se patch kiya gaya. Real device par final verification abhi bhi zaroori hai.
+
+## 17 fixes applied
+
+1. **Native `setUrl`/`setAudioSource` stale prepare race — FIXED.**
+   - **V106 problem:** `Future.timeout()` Dart ka wait timeout karta tha, lekin underlying just_audio/ExoPlayer prepare operation cancel nahi hota tha.
+   - **Why it happened:** naya retry same shared `AudioPlayer` par start ho raha tha jab purana native prepare abhi background me zinda tha.
+   - **V107 change:** active prepare Future track kiya, replacement se pehle `player.stop()` + short unwind wait kiya, aur source-generation guard rakha. Local `setFilePath()` path bhi isi protection me aa gaya.
+
+2. **`stop()` ke baad stale source recovery — FIXED.**
+   - **V106 problem:** explicit stop ke baad late native/error signal current playback context me recovery trigger kar sakta tha.
+   - **Why:** stop user intent tha, lekin in-flight source operation invalidate/cancel nahi hota tha.
+   - **V107 change:** stop ab play/source generations invalidate karta hai, active prepare abort karta hai, watchdog disarm karta hai aur `_userPaused` intent preserve karta hai.
+
+3. **Silent mid-play freeze watchdog — FIXED/strengthened.**
+   - **V106 problem:** watchdog mainly `ProcessingState.buffering` par dependent tha; silent `ready + position not advancing` freeze miss ho sakta tha.
+   - **Why:** network/CDN kabhi exception ya buffering state diye bina frozen playback leave kar sakta hai.
+   - **V107 change:** confirmed playback ke baad watchdog position advance track karta hai; READY ya BUFFERING dono me 8s tak no-progress par existing stream-drop recovery trigger hoti hai. Timer source-event spam se reset nahi hota.
+
+4. **Radio stale `completed` event — FIXED.**
+   - **V106 problem:** Radio screen apna `completed` listener current candidate ki confirmed completion identity ke bina auto-advance kar sakta tha.
+   - **Why:** shared player stream par stale native completion event aur current Radio candidate alag timelines the.
+   - **V107 change:** current candidate playback-start timestamp + near-end position validation ke bina completion ignore hoti hai; naya candidate start hote hi old completion context invalidate ho jata hai.
+
+5. **Radio candidate fetch stale session race — FIXED.**
+   - **V106 problem:** `_fetchCandidates()` direct `_candidates` mutate karta tha while async searches chal rahe the.
+   - **Why:** old Radio session ka slow search new session ke state me return kar sakta tha.
+   - **V107 change:** local candidate staging + fetch generation + session generation; commit sirf latest session ko hota hai.
+
+6. **Radio recovery same-song stale Future reuse — FIXED.**
+   - **V106 problem:** recovery lock sirf `songId` se identify hota tha.
+   - **Why:** same song later/new candidate generation me aaye to old recovery Future reuse ho sakta tha.
+   - **V107 change:** recovery key me candidate generation add kiya gaya.
+
+7. **Radio Previous single-attempt failure — FIXED.**
+   - **V106 problem:** Previous sirf ek old candidate try karta tha; fail hone par ruk jata tha.
+   - **Why:** previous path me Next jaisa bounded fallback loop nahi tha.
+   - **V107 change:** Previous ab up to 12 prior candidates fallback me try karta hai; failed entries mark/remove hoti hain.
+
+8. **QueueService stale Radio refill append — FIXED.**
+   - **V106 problem:** in-flight refill old queue mode/supplier ke results baad me active queue me append kar sakta tha.
+   - **Why:** supplier Future ke completion par queue state revalidated nahi hoti thi.
+   - **V107 change:** Radio generation + supplier identity check + duplicate song-ID filtering before append.
+
+9. **Search continuation singleton contamination — FIXED.**
+   - **V106 problem:** `_moreSearchQuery`, continuation aur exhausted state global singleton fields the.
+   - **Why:** app me multiple async queries/search screens/categories ek hi mutable pagination state share kar rahe the.
+   - **V107 change:** per-query `_SearchPaginationState` map + generation.
+
+10. **Radio continuation singleton contamination — FIXED.**
+    - **V106 problem:** radio seed/continuation/exhausted ek hi global state me the.
+    - **Why:** alag radio seeds/DailyMix calls ek doosre ka continuation overwrite kar sakte the.
+    - **V107 change:** per-seed `_RadioPaginationState` map; no-arg load-more latest seed use karta hai, explicit seed bhi accepted hai.
+
+11. **Audio focus service not wired at startup — FIXED.**
+    - **V106 problem:** `AudioFocusService` implementation thi, par app startup se configure call missing tha.
+    - **Why:** service code hone ke baad actual audio-session initialization nahi hui.
+    - **V107 change:** `main.dart` startup me configure kiya; interruption pause, duck/restore volume aur headphone-unplug pause wired hain.
+
+12. **Favorite boost repeated like/unlike se drift — FIXED.**
+    - **V106 problem:** every like `+10` add karta tha, unlike reverse nahi karta tha.
+    - **Why:** favorite boost ko reversible operation ke bajay one-way score mutation treat kiya gaya.
+    - **V107 change:** per-tag favorite boost counts + `removeFavorite()`; unlike sirf apna ek active boost reverse karta hai.
+
+13. **Radio artwork/metadata stale preload work — FIXED.**
+    - **V106 problem:** slow artwork/metadata preloads old Radio candidate ke liye continue kar sakte the.
+    - **Why:** candidate generation sirf lyrics prefetch me guard thi; artwork loop me nahi.
+    - **V107 change:** preload pass generation snapshot, per-item cancellation check aur final prefetch guard.
+
+14. **Radio progress ticker raw `player.playing` — FIXED.**
+    - **V106 problem:** button effective playback signal use karta tha, progress ticker raw `playing`.
+    - **Why:** playback-state sources unify nahi the; hand-off gap me progress temporarily ruk sakti thi.
+    - **V107 change:** `RadioPlayerProgress` optional effective-playing callback use karta hai, wired to `audioHandler.effectivelyPlaying`.
+
+15. **Native NewPipe unbounded executor — FIXED.**
+    - **V106 problem:** `newCachedThreadPool()` stale/retry bursts ke saath unlimited workers create kar sakta tha.
+    - **Why:** each resolver request ko bounded concurrency ke bina submit kiya ja raha tha.
+    - **V107 change:** native executor `newFixedThreadPool(2)` kiya gaya, taaki concurrency bounded rahe while one worker slow ho to doosra foreground request ko chance de.
+
+16. **Search Load More fallback page-1 duplicate risk — FIXED.**
+    - **V106 problem:** InnerTube continuation missing/fail hone par `youtube_explode_dart` generic search ko “Load More” ki tarah call kiya ja raha tha, jo page-1 data dubara la sakta tha.
+    - **Why:** initial fallback aur true continuation pagination ko same API path maan liya gaya.
+    - **V107 change:** relevance Load More ab sirf tracked InnerTube continuation use karta hai; compatible continuation nahi to exhausted/empty return hota hai, page-1 fallback nahi.
+
+17. **Theme toggle Navigation reset — FIXED.**
+    - **V106 problem:** `MaterialApp(key: ValueKey(isLight))` theme change par entire MaterialApp/Navigator identity reset karta tha.
+    - **Why:** instant theme refresh ke liye whole MaterialApp ko keyed recreation diya gaya tha.
+    - **V107 change:** key remove; ThemeData rebuild hota hai lekin Navigator stack preserve hota hai.
+
+## V106 ka already-existing fix jo preserve kiya gaya
+
+`playbackEventStream` stale-error ke liye v106 ka 1.8s source-switch settle logic retain kiya gaya. Is pass me use blanketly “remove” nahi kiya gaya, kyunki ye current-source async error aur old-source delayed error ke beech ek practical guard hai. Final runtime verification zaroori hai.
+
+## Items intentionally NOT changed in V107
+
+- Production release keystore/signing configuration.
+- `MANAGE_EXTERNAL_STORAGE` Play policy/product decision.
+- Play-history “listened seconds = full track duration” semantics.
+- Missing Gradle wrapper/project packaging files.
+- Dual Radio architectures (dedicated Radio Player vs QueueService radio mode) — ye larger architecture decision hai, automatic bug patch nahi.
+- Full AudioHandler `dispose()` lifecycle refactor — risky without runtime/build validation.
+
+## Version
+
+`pubspec.yaml`: `1.0.0+553` → `1.0.0+554`.
+
+## V107 source files changed
+
+- `lib/services/background_service.dart`
+- `lib/screens/radio_player_screen.dart`
+- `lib/services/queue_service.dart`
+- `lib/services/youtube_service.dart`
+- `lib/services/radio_service.dart`
+- `lib/main.dart`
+- `android/app/src/main/kotlin/com/sursathi/sursathi/newpipe/NewPipeAudioChannel.kt`
+- `pubspec.yaml`
+
+
+## V108 — 2026-09-19 — Radio candidate generation + preload hardening
+
+V107 ke baad Radio ke “next song kabhi generate nahi hota / preload miss hota hai” flow ko dobara trace karke hardening ki gayi. Ye pass specifically candidate exhaustion, warm-URL preload reliability aur stale preload work ko target karta hai.
+
+### Kya badla
+
+1. **Radio candidate pool top-up:** initial 2 searches ke baad agar pool chhota ho, real InnerTube continuation pages se extra candidates fetch kiye jaate hain; same first page ko sirf duplicate merge ke liye use kiya jaata hai.
+2. **Look-ahead refill self-heal:** 10-song upcoming window fill na ho to candidate pool refresh karke dobara selection hoti hai, isliye long sessions me initial finite batch par session dead nahi hota.
+3. **Radio URL warm window 1 → 3:** next 3 songs ke stream URLs warm kiye jaate hain; actual full-track downloads nahi kiye jaate.
+4. **Warm URL queue:** duplicate requests ko dedupe kiya gaya; stale queued jobs ko new Radio window ke bahar prune kiya jaata hai.
+5. **Warm URL retry:** har preload resolve ko max 2 attempts milte hain; failures ab silently swallow nahi hote, logs me reason/attempt dikhta hai.
+6. **Warm URL TTL:** URL cache 5 minutes se purana ho to fresh resolve kiya jaata hai, taaki stale signed media URL ko permanent valid na maana jaaye.
+7. **Serial extraction retained deliberately:** prefetch ek hi serialized worker se hota hai, taaki YouTube extraction/request burst na bane; foreground playback ko unlimited background resolver fan-out se compete nahi karna padta.
+8. **Prefetch is URL warm-up, not guaranteed player buffer:** current architecture shared AudioPlayer ko background me next URL ke liye `setUrl()` nahi karta, kyunki aisa karna current playback source replace kar dega. Isliye V108 “URL prefetch” guarantee karta hai, full decoded audio-buffer guarantee nahi.
+
+### Root cause note
+
+Radio me 3 alag stages hain: candidate generation → URL warm-up → actual player buffering. In teenon ko pehle ek hi “preload” naam se treat kiya ja raha tha. V108 in stages ko explicitly separate karta hai aur first two stages ko more resilient banata hai.
+
+### Validation
+
+Flutter/Dart SDK is environment me available nahi tha, isliye `flutter analyze`, `flutter test`, APK build aur real-device test run nahi hue. Static source/diff validation ki gayi.
+
+### Version
+
+`1.0.0+554` → `1.0.0+555`
+
+
+## v109 — ChatGPT Radio adaptive-learning patch (2026-09-19)
+
+ChatGPT ne Radio selection ko functional Resso-style behavioural feedback ke saath update kiya. v108 mein Radio ko like/mood/search-rank aur basic history signal mil raha tha, lekin exact completion ratio, replay signal, short-term artist fatigue aur separate skip-timing signal persisted/ranked nahi tha. Is vajah se Radio ko ye samajhne mein kam information milti thi ki user ne gaana 5 seconds mein reject kiya ya 90% suna, aur same artist short window mein baar-baar aa sakta tha. v109 mein `listenSeconds`, `completionRatio`, `replayCount`, skip-timing affinity, recent-artist fatigue aur look-ahead diversity add ki gayi; purani v108 history ke completed records ko backward-compatible completion signal milta hai. Manual Next agar final 10% ke andar ho to completed listen maana jata hai, taaki almost-finished song ko galti se skip penalty na mile. Previous se replay explicit positive signal banata hai.
+
+**Reason:** kaam karne wala adaptive Radio banana tha—sirf notes ya UI claim nahi. Implementation original SurSathi logic hai; Resso ka private/proprietary formula claim nahi kiya gaya.
+
+
+## V110 patch note — Radio preload caller mismatch fixed (ChatGPT)
+- Fixed a missed v108/v109 inconsistency in `radio_player_screen.dart`.
+- `_playCandidate()` previously triggered a second Radio prefetch with `_upcoming.take(2)`, while `_preloadArtworkAndMetadata()` used a 3-song warm window.
+- The duplicate prefetch caller has been removed. `_fillUpcoming()` now only fills the look-ahead, and its existing `_preloadArtworkAndMetadata()` path owns the Radio warm-up.
+- This gives one authoritative Radio preload window instead of two competing callers.
+- Version bumped to `1.0.0+557`.
+- Root cause: V108 changed the preload window to 3 in one path but left an older direct `take(2)` caller behind; V109 inherited that leftover.
+
+## V111 — 2026-09-19 — Radio recent-artist + skip-signal cleanup (ChatGPT)
+
+### Bug 1 — persisted `recentArtistCounts()` dead-code
+V110/V109 ke Radio ranking helper sirf current in-memory `_playedStack` use kar raha tha, jabki `RadioHistoryStore.recentArtistCounts()` 45-minute persisted short-term memory provide karta tha. Session/screen recreate hone par recent-artist fatigue isliye bhool ja sakti thi.
+
+**Fix:** Radio ranking ab persisted 45-minute artist counts ko base banata hai aur current in-memory session tail/current song ko merge karta hai; same in-memory song IDs ko persisted aggregate se exclude karta hai taaki count double na ho. Isse short-term artist fatigue restart/resume ke baad bhi retain hoti hai aur async history write pending hone par just-played artist turant count hota hai.
+
+### Bug 2 — skip-timing double count
+Skipped entries ka early/mid/late timing signal `_entrySignal()` me encoded tha aur `tagSkipTimingAffinity()` / `artistSkipTimingAffinity()` se ranking me dubara add hota tha. Isse tag/artist par same skip signal double-strength ho raha tha.
+
+**Fix:** `tagAffinity()` aur `artistAffinity()` ab skipped entries ignore karte hain. Skipped timing in dimensions me sirf dedicated skip-timing maps se aata hai. Completed/near-complete listens aur replays generic affinity me normal tarike se learn hote hain.
+
+Added regression tests for both fixes.
+
+### Version
+`1.0.0+557` → `1.0.0+558`

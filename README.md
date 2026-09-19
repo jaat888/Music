@@ -545,3 +545,83 @@ Documentation/status phase completed. Radio Mode Phases 1–9 are now recorded h
 - Fixed stale cache metadata: when a CacheDB row points to a missing audio file, the stale row is removed during local-cache lookup.
 - Existing 15-song recent cache and favorite-protected cache behavior remains intact.
 - Protected resolve/CDN pipeline remains unchanged apart from the additive Radio completion-ownership hook.
+
+
+## V107 — 2026-09-19 — Deep bug-fix pass by ChatGPT (OpenAI)
+
+V106 ke Radio signal + shuffle work ke baad ek second deep source audit kiya gaya. User-requested V107 pass me 17 concrete race/state bugs patch kiye gaye.
+
+### Kya fix hua, aur V106 me kyu hua
+
+1. **Native source-prepare race:** `Future.timeout()` underlying just_audio prepare ko cancel nahi karta tha. V107 active prepare ko track karke replacement se pehle stop/unwind + generation guard karta hai.
+2. **Stop ke baad stale recovery:** stop explicit user intent tha, lekin old source operation zinda reh sakta tha. V107 stop source/play generations invalidate karta hai aur active prepare abort karta hai.
+3. **Silent mid-play stall:** buffering-state-only watchdog silent READY freeze miss kar sakta tha. V107 position-progress watchdog use karta hai.
+4. **Radio stale completion:** shared player ka delayed `completed` event current Radio candidate par false auto-next kar sakta tha. V107 completion ko confirmed-start + near-end checks se gate karta hai.
+5. **Radio candidate fetch race:** async old search direct shared `_candidates` mutate karta tha. V107 local staging + session/fetch generations use karta hai.
+6. **Recovery Future collision:** recovery lock sirf song ID tha. V107 candidate generation ko identity me include karta hai.
+7. **Previous fallback gap:** Previous ek hi old candidate try karta tha. V107 bounded fallback loop use karta hai.
+8. **Queue radio refill race:** old supplier Future active queue me late results append kar sakta tha. V107 generation/supplier checks + ID dedupe lagata hai.
+9. **Search pagination singleton:** ek query ki continuation doosri query se clobber ho sakti thi. V107 per-query state map use karta hai.
+10. **Radio continuation singleton:** multiple radio seeds continuation overwrite kar sakte the. V107 per-seed state map use karta hai.
+11. **Audio focus not initialized:** service file thi, startup wiring missing thi. V107 phone interruption/duck/headphone callbacks configure karta hai.
+12. **Favorite score drift:** repeated like/unlike boost ko one-way add karta tha. V107 counted reversible boost use karta hai.
+13. **Stale artwork/metadata prefetch:** old Radio candidate ka slow preload continue hota tha. V107 generation cancellation checks add karta hai.
+14. **Progress raw playing:** button effective signal use karta tha, progress raw `player.playing`. V107 same effective signal wire karta hai.
+15. **NewPipe unbounded workers:** `newCachedThreadPool()` resolver bursts me unlimited workers bana sakta tha. V107 fixed 2-worker executor use karta hai.
+16. **Load More page-1 duplication:** continuation fail hone par generic search page-1 ko load-more maana ja sakta tha. V107 compatible InnerTube continuation ke bina relevance Load More stop karta hai.
+17. **Theme Navigation reset:** keyed `MaterialApp` theme switch par Navigator recreate karta tha. V107 key remove karta hai, navigation preserve hoti hai.
+
+### Validation
+
+Flutter/Dart SDK is environment me available nahi tha, isliye `flutter analyze`, `flutter test`, APK build aur real-device tests run nahi hue. V107 is source-level/diff-validated patch hai; final device test abhi required hai.
+
+### Version
+
+`1.0.0+554`
+
+Detailed root-cause/change notes: `V107_CHATGPT_BUGFIX.md` and `NOTES.md`.
+
+
+## V108 — 2026-09-19 — Radio candidate generation + preload hardening
+
+V107 ke baad Radio ke “next song kabhi generate nahi hota / preload miss hota hai” flow ko dobara trace karke hardening ki gayi. Ye pass specifically candidate exhaustion, warm-URL preload reliability aur stale preload work ko target karta hai.
+
+### Kya badla
+
+1. **Radio candidate pool top-up:** initial 2 searches ke baad agar pool chhota ho, real InnerTube continuation pages se extra candidates fetch kiye jaate hain; same first page ko sirf duplicate merge ke liye use kiya jaata hai.
+2. **Look-ahead refill self-heal:** 10-song upcoming window fill na ho to candidate pool refresh karke dobara selection hoti hai, isliye long sessions me initial finite batch par session dead nahi hota.
+3. **Radio URL warm window 1 → 3:** next 3 songs ke stream URLs warm kiye jaate hain; actual full-track downloads nahi kiye jaate.
+4. **Warm URL queue:** duplicate requests ko dedupe kiya gaya; stale queued jobs ko new Radio window ke bahar prune kiya jaata hai.
+5. **Warm URL retry:** har preload resolve ko max 2 attempts milte hain; failures ab silently swallow nahi hote, logs me reason/attempt dikhta hai.
+6. **Warm URL TTL:** URL cache 5 minutes se purana ho to fresh resolve kiya jaata hai, taaki stale signed media URL ko permanent valid na maana jaaye.
+7. **Serial extraction retained deliberately:** prefetch ek hi serialized worker se hota hai, taaki YouTube extraction/request burst na bane; foreground playback ko unlimited background resolver fan-out se compete nahi karna padta.
+8. **Prefetch is URL warm-up, not guaranteed player buffer:** current architecture shared AudioPlayer ko background me next URL ke liye `setUrl()` nahi karta, kyunki aisa karna current playback source replace kar dega. Isliye V108 “URL prefetch” guarantee karta hai, full decoded audio-buffer guarantee nahi.
+
+### Root cause note
+
+Radio me 3 alag stages hain: candidate generation → URL warm-up → actual player buffering. In teenon ko pehle ek hi “preload” naam se treat kiya ja raha tha. V108 in stages ko explicitly separate karta hai aur first two stages ko more resilient banata hai.
+
+### Validation
+
+Flutter/Dart SDK is environment me available nahi tha, isliye `flutter analyze`, `flutter test`, APK build aur real-device test run nahi hue. Static source/diff validation ki gayi.
+
+### Version
+
+`1.0.0+554` → `1.0.0+555`
+
+
+## v109 Radio learning update
+
+On 2026-09-19, ChatGPT added a functional adaptive Radio feedback loop. v108 mostly ranked by mood, likes, search rank and existing history. The missing signals were explicit completion ratio, replay count, skip timing and short-term artist fatigue. Those gaps could make a 5-second skip and a near-complete listen look too similar at ranking time, and could allow one artist to appear too frequently. v109 stores `listenSeconds`, `completionRatio`, and `replayCount`, learns from exact skip timing, preserves old v108 history defaults, penalizes recently repeated artists, and applies diversity while building the next-song window. This is an original SurSathi implementation inspired by public descriptions of behaviour-based recommendation, not a reproduction of Resso's private algorithm.
+
+
+### V110 preload consistency patch
+The Radio player no longer has two competing preload callers with different look-ahead sizes. The old `_playCandidate()` `take(2)` prefetch path was removed; `_fillUpcoming()` now owns the look-ahead and the existing 3-song Radio warm-up path. This corrects the V108/V109 implementation/documentation mismatch.
+
+## V111 — Radio learning correctness fix
+
+- Radio short-term artist fatigue now uses persisted 45-minute `recentArtistCounts()` plus the immediate in-memory session tail.
+- Skipped-song timing is no longer counted twice through generic tag/artist affinity and dedicated skip-timing affinity.
+- Added regression tests for both behaviours.
+
+Version: `1.0.0+558`

@@ -134,7 +134,12 @@ class _LyricsScreenState extends State<LyricsScreen> {
     return idx;
   }
 
-  void _maybeAutoScroll(int index, Duration position, List<LyricLine> lines) {
+  void _maybeAutoScroll(
+    int index,
+    Duration position,
+    List<LyricLine> lines,
+    double viewportHeight,
+  ) {
     if (index == _lastActiveIndex) return;
     _lastActiveIndex = index;
     // NEW (2026-09-18 — user report: "subtitle screen pe kab aaya, gaane
@@ -151,9 +156,12 @@ class _LyricsScreenState extends State<LyricsScreen> {
       );
     }
     if (!_scrollController.hasClients) return;
-    final target = (index * _lineHeight) -
-        (_scrollController.position.viewportDimension / 2) +
-        (_lineHeight / 2);
+    // FIX (dekho _buildSyncedLyrics() ka comment) — ab yahan wahi
+    // viewportHeight use hota hai jisse padding derive hui thi (poore
+    // screen height ki jagah), isliye target hamesha us padding ke saath
+    // match karta hai aur active line genuinely center/visible hoti hai.
+    final target =
+        (index * _lineHeight) - (viewportHeight / 2) + (_lineHeight / 2);
     _scrollController.animateTo(
       target.clamp(0, _scrollController.position.maxScrollExtent),
       duration: const Duration(milliseconds: 350),
@@ -170,51 +178,79 @@ class _LyricsScreenState extends State<LyricsScreen> {
   }
 
   Widget _buildSyncedLyrics(List<LyricLine> lines) {
-    return StreamBuilder<Duration>(
-      stream: audioHandler.player.positionStream,
-      initialData: Duration.zero,
-      builder: (context, snap) {
-        final pos = snap.data ?? Duration.zero;
-        final activeIndex = _activeIndexFor(pos, lines);
-        WidgetsBinding.instance
-            .addPostFrameCallback((_) => _maybeAutoScroll(activeIndex, pos, lines));
-        return ListView.builder(
-          controller: _scrollController,
-          padding: EdgeInsets.symmetric(
-            vertical: MediaQuery.of(context).size.height / 3,
-            horizontal: 28,
-          ),
-          itemCount: lines.length,
-          itemBuilder: (context, i) {
-            final isActive = i == activeIndex;
-            // BUG FIX (2026-09-18 — user report: "bahut badi subtitle hain,
-            // unko bhi thik karo"): pehle yahan ek FIXED height (52) wale
-            // Container me plain Text tha, bina maxLines/overflow ke — ek
-            // genuinely lambi lyric line yahan overflow karke agli/pichli
-            // line ke upar clip/overlap ho jaati thi. FittedBox(scaleDown)
-            // + maxLines:2 guarantee karta hai ki chahe line kitni bhi badi
-            // ho, wo hamesha apne fixed box ke andar hi fit hoga (font
-            // thoda chhota ho jayega, kabhi overflow/clip nahi hoga) — scroll
-            // math (_lineHeight based) bhi isi wajah se bilkul waisa hi
-            // rehta hai, kuch aur nahi badla.
-            return Container(
-              height: _lineHeight,
-              alignment: Alignment.center,
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                child: Text(
-                  lines[i].text,
-                  textAlign: TextAlign.center,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppText.bodyL(
-                    color: isActive ? kGreen : kTextDim,
-                  ).copyWith(
-                    fontSize: isActive ? 20 : 16,
-                    fontWeight: isActive ? FontWeight.w700 : FontWeight.w400,
-                  ),
-                ),
+    // BUG FIX (user report, v96 — screenshot: "live highlight wala vo
+    // dikhta hi nahi, cut jata hai, screen ke size ke hisab se set nahi
+    // hota"): padding pehle poore SCREEN height (MediaQuery.size.height)
+    // ka 1/3 hardcoded tha, jabki ye list Column ke andar Expanded me hai
+    // — AppBar + album art + title/artist ne upar kaafi jagah already le
+    // li hoti hai, isliye list ka ASLI available height poore screen
+    // height se kaafi kam hota hai. `_maybeAutoScroll()` ka scroll-target
+    // formula `_scrollController.position.viewportDimension` (list ka
+    // ASLI/sahi height) use karta hai, lekin padding us se bilkul alag,
+    // bahut zyada (poore screen ka 1/3) tha — matlab jo scroll-offset
+    // "active line center pe" ke liye calculate hota tha, wahi padding ke
+    // saath match nahi karta tha, isliye active/highlighted line scroll
+    // hoke kahin bahar chali jaati thi (dikhti hi nahi thi) aur upar ek
+    // bahut bada khaali gap ban jaata tha. Fix: `LayoutBuilder` se isi
+    // Expanded ka ASLI available height (`constraints.maxHeight`) lo, aur
+    // padding usi se derive karo — ab padding aur scroll-target dono
+    // EXACT same height source use karte hain, hamesha match karenge chahe
+    // screen/device kaisa bhi ho.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final viewportHeight = constraints.maxHeight;
+        final verticalPadding = (viewportHeight / 2 - _lineHeight / 2)
+            .clamp(0.0, viewportHeight)
+            .toDouble();
+        return StreamBuilder<Duration>(
+          stream: audioHandler.player.positionStream,
+          initialData: Duration.zero,
+          builder: (context, snap) {
+            final pos = snap.data ?? Duration.zero;
+            final activeIndex = _activeIndexFor(pos, lines);
+            WidgetsBinding.instance.addPostFrameCallback(
+              (_) => _maybeAutoScroll(activeIndex, pos, lines, viewportHeight),
+            );
+            return ListView.builder(
+              controller: _scrollController,
+              padding: EdgeInsets.symmetric(
+                vertical: verticalPadding,
+                horizontal: 28,
               ),
+              itemCount: lines.length,
+              itemBuilder: (context, i) {
+                final isActive = i == activeIndex;
+                // BUG FIX (2026-09-18 — user report: "bahut badi subtitle
+                // hain, unko bhi thik karo"): pehle yahan ek FIXED height
+                // (52) wale Container me plain Text tha, bina maxLines/
+                // overflow ke — ek genuinely lambi lyric line yahan
+                // overflow karke agli/pichli line ke upar clip/overlap ho
+                // jaati thi. FittedBox(scaleDown) + maxLines:2 guarantee
+                // karta hai ki chahe line kitni bhi badi ho, wo hamesha
+                // apne fixed box ke andar hi fit hoga (font thoda chhota ho
+                // jayega, kabhi overflow/clip nahi hoga) — scroll math
+                // (_lineHeight based) bhi isi wajah se bilkul waisa hi
+                // rehta hai, kuch aur nahi badla.
+                return Container(
+                  height: _lineHeight,
+                  alignment: Alignment.center,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      lines[i].text,
+                      textAlign: TextAlign.center,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppText.bodyL(
+                        color: isActive ? kGreen : kTextDim,
+                      ).copyWith(
+                        fontSize: isActive ? 20 : 16,
+                        fontWeight: isActive ? FontWeight.w700 : FontWeight.w400,
+                      ),
+                    ),
+                  ),
+                );
+              },
             );
           },
         );

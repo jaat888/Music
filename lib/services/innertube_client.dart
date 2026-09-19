@@ -602,4 +602,60 @@ class InnertubeClient {
     final nextToken = _findContinuationToken(data);
     return InnertubePage<InnertubeSong>(results, nextToken);
   }
+
+  // ---------------- Lyrics (YT Music "Lyrics" tab) ----------------
+  //
+  // NEW (v96, lyrics multi-source): yahi public/undocumented InnerTube
+  // flow jo ytmusicapi (Python) bhi apne get_lyrics() ke liye use karta
+  // hai — koi alag API key ya auth nahi chahiye. Do steps:
+  //   1) `next` call se is video ke "watch next" tabs me se "Lyrics" tab
+  //      ka browseId nikalo (tab title match ya "MPLYt" prefix se).
+  //   2) `browse` call us browseId pe — response ke
+  //      `musicDescriptionShelfRenderer.description.runs` hi lyrics text
+  //      hota hai, `footer.runs` me source attribution (jaise "Source:
+  //      Musixmatch").
+  // LIMITATION: ye sirf PLAIN text deta hai. YouTube Music ka apna
+  // real-time word-highlight wala synced mode is public endpoint se
+  // available nahi hai (ytmusicapi bhi nahi de paata) — isliye is source
+  // ko sirf plain-lyrics fallback ki tarah treat karo, synced ke liye
+  // nahi.
+  Future<String?> _lyricsBrowseId(String videoId) async {
+    final data = await _post('next', {'videoId': videoId});
+    if (data == null) return null;
+    for (final tab in _findAll(data, 'tabRenderer')) {
+      if (tab is! Map) continue;
+      final title = (tab['title'] as String?)?.toLowerCase() ?? '';
+      final browseId =
+          tab['endpoint']?['browseEndpoint']?['browseId'] as String?;
+      if (browseId == null || browseId.isEmpty) continue;
+      if (title.contains('lyrics') || browseId.startsWith('MPLYt')) {
+        return browseId;
+      }
+    }
+    return null;
+  }
+
+  Future<({String text, String? source})?> getLyrics(String videoId) async {
+    try {
+      final browseId = await _lyricsBrowseId(videoId);
+      if (browseId == null) return null;
+      final data = await _post('browse', {'browseId': browseId});
+      if (data == null) return null;
+      final shelves = _findAll(data, 'musicDescriptionShelfRenderer');
+      if (shelves.isEmpty) return null;
+      final shelf = shelves.first;
+      final descRuns = shelf['description']?['runs'] as List?;
+      final text = descRuns?.map((r) => r['text'] as String? ?? '').join().trim();
+      if (text == null || text.isEmpty) return null;
+      final footerRuns = shelf['footer']?['runs'] as List?;
+      final source =
+          footerRuns?.map((r) => r['text'] as String? ?? '').join().trim();
+      return (
+        text: text,
+        source: (source != null && source.isNotEmpty) ? source : null,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 }

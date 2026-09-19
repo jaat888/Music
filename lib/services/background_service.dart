@@ -104,6 +104,18 @@ Future<void> initAudioHandler() async {
 // poore lifecycle ko explicit states mein todte hain, taaki UI (mini
 // player, full player, notification) ko HAMESHA pata ho ki abhi kya ho
 // raha hai — generic "loading" ki jagah.
+class _WarmUrl {
+  final String url;
+  final String format;
+  final DateTime cachedAt;
+
+  const _WarmUrl({
+    required this.url,
+    required this.format,
+    required this.cachedAt,
+  });
+}
+
 enum PlaybackPhase {
   idle, // kuch bhi resolve/play nahi ho raha
   resolving, // NewPipe/explode/Piped se stream URL dhoonda ja raha hai
@@ -246,6 +258,49 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
           player.processingState != ProcessingState.idle &&
           player.processingState != ProcessingState.completed);
 
+  // v106 — EK hi "audio effectively bajh raha hai" signal (UI icon AUR tap
+  // action dono ke liye). Pehle Radio ka icon `playing || playbackStarted ||
+  // (ready && position>250ms)` se decide karta tha jabki `_togglePlay()`
+  // sirf `playbackStarted` dekhta tha — hand-off gap mein icon "Pause"
+  // dikhata aur tap `play()` call ho jaata. Ab dono isi getter se.
+  //
+  // `_userPaused` guard ZAROORI hai: paused player bhi `ready` rehta hai aur
+  // uski position >250ms hoti hai — bina is guard ke position-fallback
+  // paused gaane ko bhi "playing" dikhata (icon Pause pe atka rehta).
+  bool get effectivelyPlaying {
+    if (playbackStarted) return true;
+    if (_userPaused) return false;
+    return player.processingState == ProcessingState.ready &&
+        player.position > const Duration(milliseconds: 250);
+  }
+
+  // v106 — Radio recovery ke liye: CURRENT play request "genuinely start" hui
+  // ya nahi, `playbackStarted` latch + position-advance fallback se (raw
+  // `player.playing`/`playingStream.first` se nahi — wo hand-off gap mein
+  // chhoti si der `false` publish kar sakte hain aur ek valid start ko
+  // failed candidate bana dete the). Confirm hote hi latch set hota hai
+  // (`_waitUntilPlaying` jaisa). `false` = timeout YA request superseded
+  // (`_playToken` badal gaya).
+  Future<bool> waitForEffectiveStart({
+    Duration timeout = const Duration(seconds: 6),
+  }) async {
+    final token = _playToken;
+    final baseline = player.position;
+    final deadline = DateTime.now().add(timeout);
+    while (true) {
+      if (token != _playToken) return false;
+      final advanced = !_userPaused &&
+          player.processingState == ProcessingState.ready &&
+          player.position > baseline + const Duration(milliseconds: 150);
+      if (playbackStarted || advanced) {
+        _playbackStartedToken = token;
+        return true;
+      }
+      if (!DateTime.now().isBefore(deadline)) return false;
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+  }
+
   void _setPhase(int token, PlaybackPhase p, [String? message]) {
     // Stale request kabhi phase overwrite na kare — wahi `_playToken`
     // guard jo pehle se poore file mein use hota hai.
@@ -300,55 +355,144 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // pehle sirf URL string cache hoti thi, format discard ho jaata tha —
   // isi wajah se chunked playback ko format pata hi nahi chalta tha aur
   // wo galat MIME-type guess kar leta tha. Ab dono saath cache hote hain.
-  final Map<String, ({String url, String format})> _urlCache = {};
-  final Set<String> _prefetchingIds = {};
-  // STABILITY (v86): prefetching several YouTube streams concurrently was
-  // itself causing the device log's RequestLimitExceededException. Keep a
-  // single resolver pipeline for background prefetch; foreground playback
-  // remains independent and can start immediately.
-  Future<void> _prefetchTail = Future<void>.value();
+  // URL warm-cache is intentionally short-lived. YouTube media URLs are
+  // signed/ephemeral, so a URL that was resolved much earlier is not safe to
+  // assume playable later. Warm URLs are a latency optimisation, not a
+  // permanent credential/cache.
+  static const Duration _warmUrlTtl = Duration(minutes: 5);
+  static const int _warmUrlCacheLimit = 12;
+  static const int _prefetchWindow = 3;
 
-  // FIX (user request, 2026-09-17): pehle sirf agle 2 gaane prefetch hote
-  // the — ab agle 3 (jab tak current bajta rehta hai) chup-chaap disk pe
-  // download/cache ho jaate hain, taaki playback aur bhi smooth ho aur
-  // skip/next pe kabhi network-wait na dikhe. Pehle se download/cached
-  // gaana dobara nahi chhua jaata (koi duplicate network call/write nahi).
-  void _prefetchNext() {
-    final upcoming = QueueService.instance.upcoming;
-    // Only keep a small warm URL window. Downloading complete upcoming tracks
-    // in the background was unnecessarily consuming bandwidth and, more
-    // importantly, multiplying YouTube extraction requests. The current track
-    // is already cached by _playSong(); the next tracks only need a warm URL.
-    for (final next in upcoming.take(2)) {
-      _prefetchOne(next);
+  final Map<String, _WarmUrl> _urlCache = {};
+  final Set<String> _prefetchingIds = {};
+  final Set<String> _prefetchQueuedIds = {};
+  final List<Song> _prefetchQueue = <Song>[];
+  bool _prefetchWorkerRunning = false;
+
+  _WarmUrl? _freshWarmUrl(String id) {
+    final value = _urlCache[id];
+    if (value == null) return null;
+    if (DateTime.now().difference(value.cachedAt) >= _warmUrlTtl) {
+      _urlCache.remove(id);
+      return null;
+    }
+    return value;
+  }
+
+  void _trimWarmUrlCache() {
+    while (_urlCache.length > _warmUrlCacheLimit) {
+      final oldest = _urlCache.entries
+          .reduce((a, b) => a.value.cachedAt.isBefore(b.value.cachedAt) ? a : b)
+          .key;
+      _urlCache.remove(oldest);
     }
   }
 
-  void _prefetchOne(Song next) {
-    if (_urlCache.containsKey(next.id) || _prefetchingIds.contains(next.id)) {
+  void _enqueuePrefetch(Song song) {
+    if (_freshWarmUrl(song.id) != null ||
+        _prefetchingIds.contains(song.id) ||
+        _prefetchQueuedIds.contains(song.id)) {
       return;
     }
-    _prefetchingIds.add(next.id);
-    _prefetchTail = _prefetchTail.then((_) async {
-      try {
-        final already = await LocalMediaResolver.instance.getPath(next.id);
-        if (already != null) return;
-        final resolved = await YoutubeService.instance
-            .getAudioUrlAndFormat(next.id, title: next.title, author: next.artist)
-            .timeout(const Duration(seconds: 20));
-        if (resolved == null) return;
-        _urlCache[next.id] = resolved; // warm URL for instant next/previous
-      } catch (_) {
-        // Best-effort only; foreground playback has its own resolve/fallback.
-      } finally {
-        _prefetchingIds.remove(next.id);
-        if (_urlCache.length > 6) {
-          _urlCache.remove(_urlCache.keys.first);
+    _prefetchQueuedIds.add(song.id);
+    _prefetchQueue.add(song);
+    unawaited(_drainPrefetchQueue());
+  }
+
+  void _retainPrefetchQueue(Set<String> keepIds) {
+    if (_prefetchQueue.isEmpty) return;
+    _prefetchQueue.removeWhere((song) {
+      final remove = !keepIds.contains(song.id);
+      if (remove) _prefetchQueuedIds.remove(song.id);
+      return remove;
+    });
+  }
+
+  Future<void> _drainPrefetchQueue() async {
+    if (_prefetchWorkerRunning) return;
+    _prefetchWorkerRunning = true;
+    try {
+      while (_prefetchQueue.isNotEmpty) {
+        final next = _prefetchQueue.removeAt(0);
+        _prefetchQueuedIds.remove(next.id);
+        if (_freshWarmUrl(next.id) != null ||
+            _prefetchingIds.contains(next.id)) {
+          continue;
+        }
+        _prefetchingIds.add(next.id);
+        try {
+          final already = await LocalMediaResolver.instance.getPath(next.id);
+          if (already != null) continue;
+
+          _WarmUrl? resolved;
+          for (var attempt = 1; attempt <= 2; attempt++) {
+            try {
+              final value = await YoutubeService.instance
+                  .getAudioUrlAndFormat(
+                    next.id,
+                    title: next.title,
+                    author: next.artist,
+                  )
+                  .timeout(const Duration(seconds: 25));
+              if (value != null) {
+                resolved = _WarmUrl(
+                  url: value.url,
+                  format: value.format,
+                  cachedAt: DateTime.now(),
+                );
+                break;
+              }
+            } on TimeoutException {
+              AppLogger.instance.log(
+                '[PREFETCH] "${next.title}" attempt $attempt timed out after 25s.',
+              );
+            } catch (e, st) {
+              AppLogger.instance.logError(
+                '[PREFETCH] "${next.title}" attempt $attempt failed.',
+                e,
+                st,
+              );
+            }
+            if (attempt < 2) {
+              await Future.delayed(const Duration(milliseconds: 700));
+            }
+          }
+          if (resolved != null) {
+            _urlCache[next.id] = resolved;
+            _trimWarmUrlCache();
+            AppLogger.instance.log(
+              '[PREFETCH] READY — "${next.title}" warm URL cached.',
+            );
+          } else {
+            AppLogger.instance.log(
+              '[PREFETCH] FAILED — "${next.title}" foreground playback will resolve fresh.',
+            );
+          }
+        } finally {
+          _prefetchingIds.remove(next.id);
         }
       }
-    }).catchError((_) {
-      _prefetchingIds.remove(next.id);
-    });
+    } finally {
+      _prefetchWorkerRunning = false;
+      // A producer may have queued another item between the final while-check
+      // and setting the worker flag false.
+      if (_prefetchQueue.isNotEmpty) {
+        unawaited(_drainPrefetchQueue());
+      }
+    }
+  }
+
+  void _prefetchNext() {
+    // Dedicated RadioPlayerScreen owns its own upcoming list. QueueService can
+    // therefore contain a stale/normal queue while Radio is active; do not
+    // let the generic prefetch path prune or replace Radio's warm-up queue.
+    if (_radioPlaybackOwned) return;
+    final upcoming = QueueService.instance.upcoming;
+    final ids = upcoming.take(_prefetchWindow).map((song) => song.id).toSet();
+    _retainPrefetchQueue(ids);
+    for (final next in upcoming.take(_prefetchWindow)) {
+      _enqueuePrefetch(next);
+    }
   }
 
   // BUG FIX: pehle koi user-facing feedback nahi tha jab saare YouTube
@@ -390,6 +534,103 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   Duration? _streamDropResumePosition;
   String? _streamDropSongId;
   static const int _maxStreamErrorRetries = 3;
+  // BUG FIX (v101 — user-identified: "Future.timeout() sirf caller ki
+  // waiting timeout karta hai; underlying Future baad mein bhi complete ho
+  // sakta hai — purana setUrl()/resolver background mein chalta reh sakta
+  // hai aur naya retry uske upar aa sakta hai, rapid retries mein source
+  // competition/race ban sakta hai"): bilkul sahi — `player.setUrl()`/
+  // `setAudioSource()` par lagaya gaya `.timeout()` sirf Dart-side `await`
+  // ko turant fail kar deta hai; just_audio/ExoPlayer ka andar-hi-andar
+  // chal raha asli prepare-operation cancel NAHI hota, wo apni marzi se
+  // baad mein bhi complete ho sakta hai. Stream-drop retries `_playToken`
+  // REUSE karte hain (jaan-boojh kar — wahi ek playback-intent ka retry
+  // hai, naya nahi), isliye purana `if (token != _playToken) return;`
+  // guard is race ko pakad hi nahi sakta — dono attempts ka token same
+  // hota hai. Fix: ek ALAG, sirf-isi-liye generation counter — har
+  // setUrl/setAudioSource attempt se pehle increment hota hai; us attempt
+  // ka await (chahe success ho, chahe timeout ke baad bhi kabhi "complete"
+  // ho) khatam hone ke baad, agar generation aage badh chuka hai (matlab
+  // ek naya retry beech mein shuru ho chuka), to ye purana/stale attempt
+  // chup-chaap yahin ruk jaata hai — seek/play/state-update kuch bhi nahi
+  // karta, chahe uska apna setUrl call "successful" hi kyun na dikhe.
+  int _setUrlGeneration = 0;
+  Future<Duration?>? _activeSetUrlOperation;
+
+  // A timed-out just_audio prepare cannot be cancelled by Future.timeout().
+  // Stop the shared player first, then give the interrupted prepare a short
+  // chance to unwind before starting a replacement source.
+  Future<void> _abortInFlightSetUrl() async {
+    final active = _activeSetUrlOperation;
+    if (active == null) return;
+    try {
+      await player.stop();
+    } catch (_) {}
+    try {
+      await active.timeout(const Duration(seconds: 2));
+    } catch (_) {}
+  }
+  // BUG FIX (2026-09-19 — user-identified race: "Global playbackEventStream
+  // .onError current _playToken padhta hai. Error actually purane source ka
+  // ho, lekin tab tak token naye song ka ho chuka ho, to old error new song
+  // par retry trigger kar sakta hai. 700ms duplicate guard ye race fully
+  // solve nahi karta, kyunki token bhi change ho sakta hai."):
+  // Bilkul sahi pakda — `playbackEventStream` ek hi global stream hai (poore
+  // `player` object ke liye, kisi specific source/attempt se tagged nahi).
+  // Scenario: Song A baj raha hai, uske underlying HTTP connection ka drop
+  // just_audio ko turant nahi, THODI DER BAAD pata chalta hai (network stack
+  // ka apna internal delay — isi liye ye async `onError` alag se exist karta
+  // hai, dekho neeche wala comment). Is BEECH agar user skip kar de (ya
+  // auto-advance ho jaaye) aur Song B turant load+play ho jaaye, to jab tak
+  // Song A ka STALE error aakhir me surface hota hai, `_playToken`/
+  // `_activePlaybackSong` dono already Song B ke ho chuke hote hain.
+  // `_handleStreamDrop()` (jo sirf CURRENT `_playToken`/current song padhta
+  // hai) is stale error ko Song B ka GENUINE drop maan leta — Song B (jo
+  // asal me bilkul theek chal raha tha) ke liye ek fresh URL retry cycle
+  // shuru kar deta, jisse Song B beech mein hi restart/glitch ho jaata. Same
+  // token hone ki wajah se `_lastStreamDropToken`/`_lastStreamDropAt` ka
+  // 700ms dedup bhi isse nahi pakadta (wo sirf SAME token pe duplicate
+  // signals ke liye hai) — token to yahan khud hi change ho chuka hota hai.
+  //
+  // just_audio ka `playbackEventStream` errors ko unke originating
+  // source/attempt se tag nahi karta, isliye onError callback ke paas koi
+  // seedha tareeka nahi hai ye confirm karne ka ki ye error CURRENT source
+  // ka hai ya kisi abhi-abhi REPLACE kiye gaye purane source ka. Practical
+  // mitigation (isi file ka established pattern — dekho `_setUrlGeneration`
+  // upar, "sirf-isi-liye generation counter"): agar koi error ek fresh
+  // `setUrl()`/`setAudioSource()` attempt shuru hone ke turant baad (chhoti
+  // settle-window ke andar) aata hai, to wo ATTEMPT-STARTING attempt ka
+  // genuine turant-fail nahi ho sakta (asli turant-fail `_playSong()`'s apne
+  // try/catch se hi pakda jaata hai — dekho neeche ka comment, ye async
+  // `onError` sirf "kaafi der baad" wale drops ke liye hai) — isliye is
+  // window ke andar aaya koi bhi error, sabse zyada probability yahi hai ki
+  // wo abhi-abhi REPLACE kiye gaye PURANE source ka delayed/stale signal hai.
+  // Fix: har naye setUrl attempt ke start pe timestamp record karo; agar
+  // onError is timestamp ke `_sourceSwitchSettleWindow` ke andar aaye, use
+  // silently discard karo (current song/token ko chhuo tak mat) — asli
+  // current-source drop ke liye ye chhota sa window kaafi safe hai, kyunki
+  // genuine "kaafi der baad" wale drops per-definition is chhoti window se
+  // bahar hi aate hain.
+  DateTime? _lastSourceSwitchAt;
+  static const Duration _sourceSwitchSettleWindow = Duration(milliseconds: 1800);
+  // BUG FIX (v98 — user report + log evidence: "Laal Pari" gaane pe 38 se
+  // zyada baar back-to-back "YT PLAY ATTEMPT" hue, ek hi minute ke andar,
+  // resolve->fail->resolve->fail infinite loop): `_streamErrorRetries` har
+  // 3-retry cycle ke END pe (chahe success ho ya "saare 3 retries fail,
+  // final error") wapas 0 pe reset ho jaata tha. Agar us song ka underlying
+  // network/CDN issue GENUINELY persistent tha (log me baar-baar "Connection
+  // aborted"), to jab bhi agla error signal aata (async `playbackEventStream`
+  // ka apna `onError` AUR `_playSong()` ka apna catch — dono independently
+  // isi function ko call karte hain), counter fresh 0 pe milta aur ek
+  // BILKUL NAYA 3-retry cycle shuru ho jaata — koi overall/cross-cycle cap
+  // nahi tha. Isi wajah se ek hi gaana resolve->fail->resolve->fail
+  // hamesha ke liye chalta reh sakta tha, kabhi terminal error pe ruk kar
+  // agle gaane pe move hi nahi hota. Fix: jab ek gaana ek baar poori tarah
+  // "give up" ho chuka ho, uska ID yahan record karo — agla koi bhi error
+  // signal isi gaane ke liye aaye to naya cycle shuru mat karo, seedha
+  // discard karo. Naya gaana actually successfully bajna shuru hote hi
+  // (dekho _playSong() ka "playback successfully shuru" wala point) ye
+  // clear ho jaata hai.
+  String? _givenUpSongId;
 
   // BUG FIX (2026-09-18, v59 — "pause karo to 2-3 sec baad khud hi wapas
   // shuru se bajne lagta hai", full-screen aur notification dono se): Radio/
@@ -410,6 +651,71 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // hai, taaki asli (playing ke dauraan) stream-drop recovery bilkul pehle
   // jaisa hi kaam karta rahe.
   bool _userPaused = false;
+
+  // BUG FIX (2026-09-19 — "gaana beech mein smooth chal raha tha, achanak
+  // buffer pe hamesha ke liye atak gaya, koi error/retry nahi aaya"):
+  // V94_FIXES.md khud isse ek known-gap maanti thi — "Mid-play buffering
+  // stall ka watchdog nahi". ROOT CAUSE: `_handleStreamDrop()` (upar dekho)
+  // sirf DO jagah se trigger hota hai — (1) `playbackEventStream`'s
+  // `onError`, (2) `_playSong()`'s apna catch. Dono hi sirf tab fire hote
+  // hain jab just_audio/CDN kisi throw-able error ke through fail hota
+  // hai. Lekin real-world me ek "silent stall" bhi hota hai: connection
+  // (Wi-Fi<->mobile-data switch, CDN half-open socket, ISP throttle) drop
+  // ho jaata hai lekin koi exception kabhi throw hi nahi hoti — player bas
+  // `ProcessingState.buffering` me fasa reh jaata hai, permanently, kyunki
+  // wo ProcessingState.buffering se khud kabhi nikalta nahi (na `ready`
+  // wapas, na `error`). Is case me na `onError` fire hota hai na `_playSong`
+  // ka catch — poora stream-drop-recovery path (retry/resume) kabhi chalta
+  // hi nahi, aur audio hamesha ke liye rukta reh jaata hai, silently, koi
+  // spinner/error tak nahi (kyunki phase khud kabhi `error` set hi nahi
+  // hota).
+  //
+  // Fix: ek chhota watchdog Timer, sirf tab active jab playback GENUINELY
+  // shuru ho chuka ho (`_playbackStartedToken == _playToken` — initial
+  // resolve/buffering ka normal window nahi) aur player `ready` ya `buffering`
+  // state me ho. Timer position ko compare karta hai, isliye buffering event
+  // na aaye tab bhi READY + no-progress wala silent stall pakda ja sake.
+  // User pause/stop kare to watchdog disarm ho jata hai; real stall milne par
+  // wahi tested `_handleStreamDrop()` retry/give-up/notify path reuse hota hai.
+  static const Duration _stallWatchdogTimeout = Duration(seconds: 8);
+  Timer? _stallWatchdogTimer;
+  Duration _stallWatchdogPosition = Duration.zero;
+  DateTime? _stallWatchdogPositionAt;
+
+  void _armStallWatchdog(int token) {
+    _stallWatchdogTimer?.cancel();
+    _stallWatchdogPosition = player.position;
+    _stallWatchdogPositionAt = DateTime.now();
+    _stallWatchdogTimer = Timer(_stallWatchdogTimeout, () {
+      _stallWatchdogTimer = null;
+      if (token != _playToken) return;
+      if (_userPaused) return;
+      if (_playbackStartedToken != token) return;
+      final state = player.processingState;
+      if (state != ProcessingState.buffering &&
+          state != ProcessingState.ready) return;
+      final elapsed = _stallWatchdogPositionAt == null
+          ? Duration.zero
+          : DateTime.now().difference(_stallWatchdogPositionAt!);
+      final advanced = player.position >
+          _stallWatchdogPosition + const Duration(milliseconds: 250);
+      if (advanced) {
+        // A real position advance proves the stream is alive even when
+        // processingState stayed READY instead of entering BUFFERING.
+        _armStallWatchdog(token);
+        return;
+      }
+      print('YT PLAYBACK STALL WATCHDOG: ${_stallWatchdogTimeout.inSeconds}s '
+          'tak position advance nahi hua (state=$state, elapsed=${elapsed.inMilliseconds}ms) — '
+          'silent CDN/network stall maan ke stream-drop recovery start kar rahe hain.');
+      _handleStreamDrop();
+    });
+  }
+
+  void _disarmStallWatchdog() {
+    _stallWatchdogTimer?.cancel();
+    _stallWatchdogTimer = null;
+  }
 
   // PART 2 (Sleep timer — "Song khatam hone tak"): jab true ho, current
   // gaana khatam hote hi (ProcessingState.completed) agle gaane pe
@@ -455,6 +761,22 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
               'hua hai, auto-resume nahi karenge: $e');
           return;
         }
+        // BUG FIX (2026-09-19): dekho `_lastSourceSwitchAt` ka poora comment
+        // upar — abhi-abhi (settle-window ke andar) ek naya setUrl attempt
+        // (naya gaana ya isi gaane ka retry) shuru hua hai. Ye error us NAYE
+        // attempt ka turant-fail nahi ho sakta (wo `_playSong()`'s apne
+        // try/catch se pakda jaata), isliye ye zyada-tar PURANE, abhi
+        // replace kiye gaye source ka stale/delayed signal hai — current
+        // (naye) token/song ke naam par retry trigger karna galat hoga.
+        final sinceSwitch = _lastSourceSwitchAt == null
+            ? null
+            : DateTime.now().difference(_lastSourceSwitchAt!);
+        if (sinceSwitch != null && sinceSwitch < _sourceSwitchSettleWindow) {
+          print('YT PLAYBACK STREAM ERROR ignored — abhi-abhi '
+              '(${sinceSwitch.inMilliseconds}ms pehle) naya source set hua '
+              'hai, ye stale/purane-source ka delayed error lagta hai: $e');
+          return;
+        }
         print('YT PLAYBACK STREAM ERROR (CDN drop, setUrl pass hone ke '
             'baad): $e');
         _handleStreamDrop();
@@ -469,6 +791,34 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // nahi).
     player.processingStateStream.listen((state) {
       if (state == ProcessingState.completed) {
+        _disarmStallWatchdog();
+        // BUG FIX (2026-09-19 — user-identified: "uncancelled timeout +
+        // stale stream events + inconsistent playback signal"): dekho
+        // `_setUrlGeneration` ka poora comment upar — `player.setUrl()`/
+        // `setAudioSource()` par laga `.timeout()` sirf Dart-side `await`
+        // ko fail karta hai, underlying native operation (abhi bhi wahi
+        // SHARED `player` object pe) apni marzi se baad mein bhi chal/
+        // complete ho sakta hai. Har doosri reactive jagah (onError,
+        // _playSong ke continuations, stall watchdog ka arm-check) is file
+        // mein hamesha `token`/`_playbackStartedToken` se guard hoti hai —
+        // sirf yahi ek listener (auto-advance-on-completed) ab tak BINA
+        // kisi staleness-check ke seedha `skipToNext()`/`pause()` chala
+        // deta tha. Agar koi aisa timed-out/abandoned attempt (jiska
+        // Dart-side await kabhi ka discard ho chuka hai) kabhi der se
+        // native `completed` bhej de, ye listener use CURRENT gaane ka
+        // genuine "song khatam hua" maan ke galat skip/pause kar sakta
+        // tha — theek wahi "gana smooth chal raha tha, achanak skip/pause
+        // ho gaya" jaisa residual symptom. Fix: sirf tabhi trust karo jab
+        // CURRENT token ki playback genuinely confirm-start ho chuki ho
+        // (`_playbackStartedToken == _playToken` — bilkul wahi signal jo
+        // stall-watchdog arm-check bhi use karta hai) — warna ye zombie/
+        // stale signal maan ke chup-chaap ignore karo.
+        if (_playbackStartedToken != _playToken) {
+          print('YT PLAYBACK: stale/zombie "completed" signal ignored — '
+              'current token ki playback abhi confirm-start hi nahi hui '
+              '(purana/abandoned attempt ka late native event lagta hai).');
+          return;
+        }
         if (_radioPlaybackOwned) return;
         if (sleepAtEndOfTrack) {
           sleepAtEndOfTrack = false;
@@ -477,6 +827,23 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         } else {
           skipToNext();
         }
+        return;
+      }
+      // BUG FIX (2026-09-19, mid-play stall watchdog — dekho `_stallWatchdogTimer`
+      // ka poora comment upar): sirf tab arm karo jab ye MID-PLAY buffering ho
+      // (gaana already genuinely bajna shuru ho chuka tha isi token ke liye) —
+      // initial resolve/buffering window (naya gaana load hote waqt) yahan
+      // touch nahi karte, uske apne alag retry/timeout paths already hain
+      // (playWithRetry/_playSong attempts), unhe duplicate-trigger karne se
+      // bachna hai.
+      if (_playbackStartedToken == _playToken && !_userPaused &&
+          state == ProcessingState.buffering) {
+        _armStallWatchdog(_playToken);
+      } else if (_playbackStartedToken == _playToken && !_userPaused &&
+          state == ProcessingState.ready && _stallWatchdogTimer == null) {
+        _armStallWatchdog(_playToken);
+      } else if (state == ProcessingState.completed || state == ProcessingState.idle) {
+        _disarmStallWatchdog();
       }
     });
 
@@ -660,6 +1027,14 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     _lastStreamDropAt = nowTs;
     final song = _activePlaybackSong ?? QueueService.instance.currentSong;
 
+    // BUG FIX (v98): dekho `_givenUpSongId` ka comment upar — isi gaane ke
+    // liye pehle hi ek poora cycle "final error" tak ja chuka hai, ek naya
+    // cycle shuru mat karo (infinite loop yahi tha).
+    if (song != null && _givenUpSongId == song.id) {
+      print('YT STREAM DROP: "${song.title}" already given up — naya cycle shuru nahi karenge.');
+      return;
+    }
+
     if (song != null && _streamErrorRetries == 0) {
       // Ye pehla drop hai is cycle ka — `player.position` abhi bhi asli
       // "gaana yahan tak baja tha" wali value hai, isse aage kisi bhi
@@ -702,6 +1077,10 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     print('YT STREAM DROP: "${song?.title}" — saare $_maxStreamErrorRetries '
         'retries fail, final error.');
     _streamErrorRetries = 0;
+    // BUG FIX (v98): ab is gaane ko "given up" mark kar do — dekho
+    // `_givenUpSongId` ka comment. Isse agla koi bhi (delayed/duplicate)
+    // error signal isi gaane ke liye naya cycle shuru nahi karega.
+    if (song != null) _givenUpSongId = song.id;
     playbackState.add(
       playbackState.value.copyWith(
         processingState: AudioProcessingState.error,
@@ -926,10 +1305,17 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // ka phase galat overwrite ho jaata tha. Ab resume hote hi (source ready ho to)
     // turant phase `playing` karte hain, aur play() ka Future playback-end tak
     // caller ko latkata nahi.
+    final token = _playToken;
     final playFuture = player.play();
-    if (player.processingState == ProcessingState.ready &&
-        phase.value != PlaybackPhase.playing) {
-      _setPhase(_playToken, PlaybackPhase.playing);
+    if (player.processingState == ProcessingState.ready) {
+      // Resume path me pause() ne latch clear kiya hota hai. READY state me
+      // play command accept hote hi isi token ko active mark karo, warna
+      // mid-play stall watchdog resume ke baad kabhi arm nahi hoga.
+      _playbackStartedToken = token;
+      _armStallWatchdog(token);
+      if (phase.value != PlaybackPhase.playing) {
+        _setPhase(token, PlaybackPhase.playing);
+      }
     }
     _logCtl('play() DONE');
     unawaited(playFuture.catchError((Object e) {
@@ -946,6 +1332,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // notification/lock-screen ka — dono isi handler se guzarte hain, is
     // liye ek hi jagah flag set karne se dono cases cover ho jaate hain.
     _userPaused = true;
+    // Mid-play stall watchdog bhi disarm karo — user ne khud pause kiya hai
+    // jabki gaana buffering me ho sakta hai, isko stream-drop nahi maanna.
+    _disarmStallWatchdog();
     // BUG FIX (2026-09-18): dekho play()/stop() ka comment — yahi symmetric
     // gap tha. Pehle sirf `playing -> paused` handle hota tha; agar phase
     // kisi frozen state (buffering/resolving/retrying/error) me atka ho aur
@@ -995,7 +1384,26 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   Future<void> stop() async {
     _logCtl('stop() called');
     _playToken++; // koi bhi pending stale resolve ab kuch overwrite nahi karega
+    _setUrlGeneration++;
     _playbackStartedToken = null;
+    _lastSourceSwitchAt = DateTime.now();
+    await _abortInFlightSetUrl();
+    // BUG FIX (2026-09-19): `stop()` sirf `_playToken` bump karta tha,
+    // `_userPaused` ko kabhi set nahi karta tha (dekho `_userPaused` field
+    // ka poora comment upar — `onError` handler isi flag se decide karta
+    // hai ki late/delayed CDN error ko real drop maan ke retry kare ya
+    // ignore). Race: `stop()` ke turant baad agar player.stop() se pehle
+    // ya uske dauraan koi late `onError` isi (abhi-abhi bumped) naye token
+    // ke context mein aa jaaye, `_userPaused` false hone ki wajah se woh
+    // real stream-drop maan liya jaata — `_handleStreamDrop()` apna 1-sec-
+    // delay retry schedule kar deta (token abhi tak match karta hai kyunki
+    // beech mein kuch aur bump nahi hua), aur kuch der baad audio khud-ba-
+    // khud wapas bajne lagta — "Stop kiya, thodi der baad gaana khud
+    // resume ho gaya" jaisa bug. Fix: `pause()` ki tarah `stop()` bhi ek
+    // explicit user action hai, isliye yahan bhi flag set karo taaki
+    // `onError` aisa koi bhi late/stray error silently ignore kare.
+    _userPaused = true;
+    _disarmStallWatchdog();
     _cancelSkipDebounce();
     await player.stop();
     // BUG FIX (2026-09-18): dekho play() ka poora comment — `stop()` pehle
@@ -1149,24 +1557,22 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
-  /// Radio-only preload.
-  // STABILITY (v86): share the same serialized warm-URL queue as normal
-  // playback. The old Radio path started up to five full stream resolves
-  // and five background cache downloads at once, which matched the log's
-  // burst of YT PLAY OK / RequestLimitExceededException messages.
+  /// Radio-only warm-up. This resolves the next few stream URLs without
+  /// downloading full tracks or touching the active player source. The queue
+  /// stays serialized to avoid extraction bursts; each item gets one retry.
   Future<void> prefetchRadioSongs(Iterable<Song> songs) async {
     final list = songs
         .where((song) => song.id != _activePlaybackSong?.id)
-        // One warm URL is enough to make the immediate next swipe smooth.
-        // More concurrent extraction requests increase YouTube rate limiting.
-        .take(1)
-        .toList();
+        .take(_prefetchWindow)
+        .toList(growable: false);
+    final keepIds = list.map((song) => song.id).toSet();
+    _retainPrefetchQueue(keepIds);
     AppLogger.instance.log(
       '[RADIO] prefetchRadioSongs() called — ${list.length} candidates: '
       '${list.map((s) => s.title).join(", ")}',
     );
     for (final song in list) {
-      _prefetchOne(song);
+      _enqueuePrefetch(song);
     }
   }
 
@@ -1200,8 +1606,11 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // poora naya heavy resolve call (NewPipeExtractor) bhi karta tha.
     // Fix: pehle hi check kar lo ki ye "aakhri gaana, repeat off" wala
     // case hai ki nahi — agar hai, seedha `stop()` karo, replay mat karo.
+    // v106: "aakhri" ab PLAY ORDER ke hisaab se (shuffle ON mein physical
+    // `queue.length - 1` galat hota) — `isLastInPlayOrder` dono modes cover
+    // karta hai.
     final wasLastWithNoRepeat =
-        q.repeat == SurRepeatMode.off && q.currentIndex == q.queue.length - 1;
+        q.repeat == SurRepeatMode.off && q.isLastInPlayOrder;
     q.next();
     if (wasLastWithNoRepeat) {
       AppLogger.instance.log('[CTL] skipToNext() — queue ka aakhri gaana tha, repeat OFF — stop() kiya, replay nahi.');
@@ -1338,26 +1747,51 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       // → fresh-URL-retry chain fire ho, aur uske through `_transitioning`/
       // `finally` blocks bhi normally unwind ho jaayein.
       const setUrlTimeout = Duration(seconds: 20);
+      // Every source replacement first invalidates/cancels the previous
+      // native prepare as far as just_audio allows, then gets a fresh
+      // generation for this exact attempt.
+      final myGen = ++_setUrlGeneration;
+      _lastSourceSwitchAt = DateTime.now();
+      await _abortInFlightSetUrl();
+      if (myGen != _setUrlGeneration || token != _playToken) return;
+
+      Future<Duration?> prepare;
       if (useChunking) {
         // SPEED FIX: chunked HTTP Range source — dekho
         // chunked_audio_source.dart ka top comment (poora root-cause +
         // fix explanation).
-        await player
-            .setAudioSource(
-              ChunkedYoutubeAudioSource(
-                url,
-                headers: useHeaders ? YoutubeService.cdnHeaders : null,
-                expectedFormat: format,
-              ),
-            )
-            .timeout(setUrlTimeout);
+        prepare = player.setAudioSource(
+          ChunkedYoutubeAudioSource(
+            url,
+            headers: useHeaders ? YoutubeService.cdnHeaders : null,
+            expectedFormat: format,
+          ),
+        );
       } else {
-        await player
-            .setUrl(
-              url,
-              headers: useHeaders ? YoutubeService.cdnHeaders : null,
-            )
-            .timeout(setUrlTimeout);
+        prepare = player.setUrl(
+          url,
+          headers: useHeaders ? YoutubeService.cdnHeaders : null,
+        );
+      }
+      _activeSetUrlOperation = prepare;
+      try {
+        await prepare.timeout(setUrlTimeout);
+      } finally {
+        if (identical(_activeSetUrlOperation, prepare)) {
+          _activeSetUrlOperation = null;
+        }
+      }
+      // BUG FIX (v101): agar is await ke DAURAAN (chahe timeout ho gaya ho
+      // aur ye ab tak-return-na-hui exception ke baad bhi chalta raha ho)
+      // ek naya retry/attempt already shuru ho chuka hai (generation aage
+      // badh chuka), to ye result STALE hai — ise poori tarah discard karo.
+      // Seek/play/mediaItem/token kuch bhi is stale attempt ke naam par
+      // touch nahi hona chahiye, warna ye purana attempt naye (asli-current)
+      // attempt ke upar apni state thop sakta hai.
+      if (myGen != _setUrlGeneration) {
+        print('YT PLAY: stale setUrl attempt (gen $myGen, current '
+            '$_setUrlGeneration) completed late — discard kiya.');
+        return;
       }
       if (token != _playToken) return; // setUrl ke dauraan koi naya tap aa gaya
       // BUG FIX (2026-09-18 — user report: "next/previous kaam nahi karta
@@ -1391,7 +1825,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       // reason the UI could show a spinner at 0:18 while the song was
       // perfectly smooth. Fire the command without awaiting completion,
       // then wait only for the actual player-start signal below.
-      unawaited(player.play());
+      unawaited(player.play().catchError((Object e, StackTrace st) {
+        AppLogger.instance.logError('player.play() failed', e, st);
+      }));
 
       // just_audio publishes playing=true as soon as the player has accepted
       // the play command (and keeps it true during normal buffering). We wait
@@ -1404,6 +1840,7 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         );
       }
       if (token != _playToken) return;
+      _armStallWatchdog(token);
       _setPhase(token, PlaybackPhase.playing);
       // Part 3 (Library smarts): asli play-history record — "Recently
       // Played"/"Most Played" ke liye. Fire-and-forget, playback ko kabhi
@@ -1412,25 +1849,39 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       // Playback successfully shuru ho gaya — stream-drop retry counter
       // reset karo taaki agli baar drop hone pe wapas poore 3 attempts milein.
       _streamErrorRetries = 0;
-      // Cache background me ho jaaye — playback ruke bina
-      final cacheFuture = _autoCacheInBackground(song, url, markAsPlayed: true);
-      unawaited(cacheFuture);
-      // BUG FIX (2026-09-17 — user report: "auto-download cache se nahi
-      // aata, seedha download mein laga deta hai"): pehle
-      // `_maybeAutoDownload()` `_autoCacheInBackground()` se PEHLE call
-      // hota tha (dono `unawaited`/parallel) — matlab jab tak auto-cache
-      // ka network download poora hokar CacheDB mein likha jaata, tab tak
-      // auto-download queue ka worker already `youtube_service.download()`
-      // chala chuka hota tha aur cache-row abhi khaali paata (race
-      // condition) — isliye cache-copy shortcut kabhi mil hi nahi paata
-      // tha aur har baar poora naya (duplicate) network download hota
-      // tha. Ab auto-download ko auto-cache ke COMPLETE hone ke BAAD
-      // trigger karte hain — cache-row hamesha ready milega, cache-copy
-      // shortcut (`youtube_service.dart download()` mein already maujood)
-      // ab guaranteed use hoga. Agar auto-cache fail bhi ho jaaye, `.then`
-      // fir bhi chalta hai — `download()` khud normal network-fallback
-      // path use kar lega, koi crash/deadlock nahi.
-      unawaited(cacheFuture.then((_) => _maybeAutoDownload(song)));
+      // BUG FIX (v98): is gaane ka "given up" flag bhi saaf karo — agar
+      // future mein isi gaane pe dobara genuinely fresh drop ho (abhi
+      // successfully bajna shuru ho chuka hai), naya retry-cycle milna
+      // chahiye, purani "given up" state nahi.
+      if (_givenUpSongId == song.id) _givenUpSongId = null;
+      // Cache background me ho jaaye — playback ruke bina. Radio me is full
+      // track download ko thoda defer karte hain, kyunki next-song URL warm-up
+      // ko weak network par pehle bandwidth milni chahiye. Ye playback ko block
+      // nahi karta aur non-Radio songs ka existing immediate-cache behavior
+      // same rehta hai.
+      final radioOwnedAtStart = _radioPlaybackOwned;
+      Future<void> cacheAfterPriorityWarmup() async {
+        if (radioOwnedAtStart) {
+          await Future.delayed(const Duration(seconds: 6));
+          if (!_radioPlaybackOwned ||
+              token != _playToken ||
+              _activePlaybackSong?.id != song.id) {
+            return;
+          }
+        }
+        final cacheFuture = _autoCacheInBackground(song, url, markAsPlayed: true);
+        try {
+          await cacheFuture;
+        } finally {
+          // BUG FIX (2026-09-17 — user report: "auto-download cache se nahi
+          // aata, seedha download mein laga deta hai"): pehle auto-download
+          // cache completion ka wait kiye bina queue hota tha, isliye cache
+          // row ready hone se pehle duplicate network download start ho sakta
+          // tha. Ab download decision cache attempt ke baad hi hota hai.
+          await _maybeAutoDownload(song);
+        }
+      }
+      unawaited(cacheAfterPriorityWarmup());
       // Agla gaana bhi abhi se resolve karna shuru kar do (instant next ke liye)
       _prefetchNext();
     } catch (e) {
@@ -1500,8 +1951,12 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
   // dikhe aur spinner/loading state UI me nazar aaye.
   Future<void> playWithRetry(Song song) async {
     final token = ++_playToken;
+    _setUrlGeneration++;
     _playbackStartedToken = null;
     _activePlaybackSong = song;
+    _lastSourceSwitchAt = DateTime.now();
+    await _abortInFlightSetUrl();
+    if (token != _playToken) return;
     // BUG FIX (2026-09-18): dekho `_resolving` ka comment — ye yahan turant
     // (purana gaana pause karne se bhi PEHLE) set karte hain, taaki
     // 300ms-debounce window ke dauraan bhi (jab purana gaana already
@@ -1516,6 +1971,11 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // Naya song select hua — purane song ke stream-drop retries ka count
     // carry-forward nahi hona chahiye.
     _streamErrorRetries = 0;
+    // BUG FIX (v98): dekho `_givenUpSongId` ka comment — ye ek FRESH play
+    // decision hai (UI tap ya Radio recovery), isliye ise hamesha apna
+    // poora retry-budget milna chahiye, chahe ye SAME song ho jise pehle
+    // "given up" mark kiya gaya tha.
+    _givenUpSongId = null;
 
     // BUG FIX (2026-09-16, v12): "gaana change karo to photo/naam turant
     // badal jaata hai lekin AUDIO purana hi 10-12 sec tak bajta rehta hai,
@@ -1660,6 +2120,10 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     if (localPath != null) {
       if (token != _playToken) return;
       try {
+        // BUG FIX (2026-09-19): dekho `_lastSourceSwitchAt` ka comment
+        // (`_playSong()` ke paas) — yahan bhi (local-cache path) source
+        // replace ho raha hai, isi guard ki zaroorat hai.
+        _lastSourceSwitchAt = DateTime.now();
         await player.setFilePath(localPath);
         if (token != _playToken) return;
         // Dekho _playSong() ka isi tarah ka fix — same guarantee yahan bhi:
@@ -1675,7 +2139,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
         if (token != _playToken) return;
         // Do not await play(): its Future completes when playback ends/pauses.
         // We only need the immediate command plus a start-state confirmation.
-        unawaited(player.play());
+        unawaited(player.play().catchError((Object e, StackTrace st) {
+        AppLogger.instance.logError('player.play() failed', e, st);
+      }));
         if (!await _waitUntilPlaying()) {
           throw StateError('local file play() ke baad playing=true nahi hua');
         }
@@ -1714,8 +2180,9 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     // jab prefetch abhi resolve hi hua ho, disk-write abhi baaki ho),
     // seedha usi URL se play karo — koi naya NewPipe/explode/Piped
     // resolve nahi, isliye "next" ab bhi instant hai.
-    final cached = _urlCache.remove(song.id);
+    final cached = _freshWarmUrl(song.id);
     if (cached != null) {
+      _urlCache.remove(song.id);
       await _playSong(
         song,
         cached.url,
@@ -1827,14 +2294,30 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
     mediaItem.add(_toMediaItem(song.copyWith(filePath: filePath)));
     _setPhase(token, PlaybackPhase.buffering, 'Buffering...');
     try {
-      await player.setFilePath(filePath);
-      if (token != _playToken) return; // dauraan koi naya tap aa gaya
+      final myGen = ++_setUrlGeneration;
+      _lastSourceSwitchAt = DateTime.now();
+      await _abortInFlightSetUrl();
+      if (myGen != _setUrlGeneration || token != _playToken) return;
+
+      final filePrepare = player.setFilePath(filePath);
+      _activeSetUrlOperation = filePrepare;
+      try {
+        await filePrepare;
+      } finally {
+        if (identical(_activeSetUrlOperation, filePrepare)) {
+          _activeSetUrlOperation = null;
+        }
+      }
+      if (myGen != _setUrlGeneration || token != _playToken) return;
       // Do not await play(): its Future completes when playback ends/pauses.
-      unawaited(player.play());
+      unawaited(player.play().catchError((Object e, StackTrace st) {
+        AppLogger.instance.logError('File player.play() failed', e, st);
+      }));
       if (!await _waitUntilPlaying()) {
         throw StateError('file play() ke baad playing=true nahi hua');
       }
       if (token != _playToken) return;
+      _armStallWatchdog(token);
       _setPhase(token, PlaybackPhase.playing);
       // Part 3 (Library smarts): playFromFile bhi ek "real" play hai.
       unawaited(PlayHistoryDB.instance.recordPlay(song));
@@ -1900,7 +2383,23 @@ class SurSathiAudioHandler extends BaseAudioHandler with SeekHandler {
       // ke liye "borrow" karte hain, bina `artist` ko chhue.
       album: statusOverride,
       artUri: song.thumb.isNotEmpty ? Uri.tryParse(song.thumb) : null,
-      duration: Duration(seconds: song.duration),
+      // BUG FIX (v98 — user report: notification/quick-settings widget me
+      // seekbar kabhi-kabhi bilkul gayab ho jaata hai): pehle yahan
+      // `song.duration` 0 hone par bhi `Duration.zero` bhej dete the
+      // (kabhi-kabhi YouTube search metadata duration populate hi nahi
+      // karta). Kai OEM media-widgets (jaise MIUI ka quick-settings media
+      // card) apna seekbar sirf ek baar, mediaItem ke PEHLE snapshot par
+      // decide karte hain ki duration "valid" hai ya nahi — 0 ko "no
+      // duration" maan ke seekbar hamesha ke liye chhupa dete hain, chahe
+      // baad me humara durationStream listener (upar) asli duration se
+      // update kar bhi de — stock Android notification jaisa live-refresh
+      // nahi karte. Ek downloaded/cached gaane ke liye duration shuru se
+      // hi sahi hota hai (isliye ek case theek dikhta tha, doosra nahi);
+      // fresh-streamed gaane ke liye search-metadata duration kabhi 0
+      // hota hai. Fix: 0/unknown duration par null bhejo ("abhi pata
+      // nahi") — jab tak durationStream se asli value na mil jaaye, chahe
+      // wo OEM-widget ko re-check karne pe majboor kare.
+      duration: song.duration > 0 ? Duration(seconds: song.duration) : null,
       extras: {'filePath': song.filePath},
     );
   }

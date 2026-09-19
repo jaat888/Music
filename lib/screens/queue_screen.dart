@@ -72,6 +72,10 @@ class QueueScreen extends StatelessWidget {
     final queueService = context.watch<QueueService>();
     final currentSong = queueService.currentSong;
     final upcoming = queueService.upcoming;
+    // v106: `upcoming` ab PLAY ORDER mein hai (shuffle ON ho to physical
+    // queue order se alag) — isliye har item ka full-queue index alag se
+    // aata hai, `currentIndex + 1 + i` nahi.
+    final upcomingIndices = queueService.upcomingIndices;
     final fullQueue = queueService.queue;
 
     final totalSeconds = fullQueue.fold<int>(0, (sum, s) => sum + s.duration);
@@ -188,16 +192,14 @@ class QueueScreen extends StatelessWidget {
                           padding: const EdgeInsets.only(top: 6, bottom: 24),
                           itemCount: upcoming.length,
                           onReorder: (oldLocalIndex, newLocalIndex) {
-                            final base = queueService.currentIndex + 1;
-                            context.read<QueueService>().reorder(
-                                  base + oldLocalIndex,
-                                  base + newLocalIndex,
+                            context.read<QueueService>().reorderUpcoming(
+                                  oldLocalIndex,
+                                  newLocalIndex,
                                 );
                           },
                           itemBuilder: (context, i) {
                             final song = upcoming[i];
-                            final actualIndex =
-                                queueService.currentIndex + 1 + i;
+                            final actualIndex = upcomingIndices[i];
 
                             return Dismissible(
                               key: ValueKey('${song.id}_$actualIndex'),
